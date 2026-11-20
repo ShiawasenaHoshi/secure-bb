@@ -5,6 +5,7 @@ import type { CheckResult } from "./checks/types.js";
 import { appendRecord, lastHead, sealLegacy, verifyChain, type JournalAnchor, type JournalReport } from "./journal.js";
 import { PRUNE_MS, type RegistryCache, type RegistryEntry } from "./deps/registry.js";
 import { SKILL_MIGRATIONS } from "./skills/store.js";
+import { DEFAULT_PUBLISH, type PublishRow, type PublishSettings, type PublishStatus, type PublishTrigger } from "./publish/types.js";
 import { DEFAULT_AI, type AiSettings, type ScanResult, type ScanRow, type ScanStatus, type ScanTrigger } from "./scan/types.js";
 import type { Category, ConfigWindowRow, Drift, DriftKind, DriftStatus, SnapshotRow, WindowScope } from "./watch/model.js";
 
@@ -189,6 +190,22 @@ export const MIGRATIONS: string[] = [
   `CREATE TABLE IF NOT EXISTS trusted_repos (pattern TEXT PRIMARY KEY, added_at INTEGER NOT NULL)`,
   // Stage 6: skills module (pins, queue, trusted registry sources).
   ...SKILL_MIGRATIONS,
+  // Stage 4: publishing frozen versions to the plugins monorepo (one row per attempt).
+  `CREATE TABLE IF NOT EXISTS publications (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     plugin_id TEXT NOT NULL,
+     version TEXT NOT NULL,
+     local_hash TEXT NOT NULL,
+     trigger TEXT NOT NULL,
+     status TEXT NOT NULL,
+     repo_url TEXT NOT NULL,
+     branch TEXT NOT NULL,
+     started_at INTEGER NOT NULL,
+     finished_at INTEGER,
+     commit_sha TEXT,
+     tag TEXT,
+     detail TEXT)`,
+  `CREATE INDEX IF NOT EXISTS publications_plugin ON publications (plugin_id, local_hash)`,
 ];
 
 export interface Policy {
@@ -298,6 +315,22 @@ export interface LogRow {
 }
 
 type Raw = Record<string, unknown>;
+
+const publicationRow = (r: Raw): PublishRow => ({
+  id: r.id as number,
+  pluginId: r.plugin_id as string,
+  version: r.version as string,
+  localHash: r.local_hash as string,
+  trigger: r.trigger as PublishTrigger,
+  status: r.status as PublishStatus,
+  repoUrl: r.repo_url as string,
+  branch: r.branch as string,
+  startedAt: r.started_at as number,
+  finishedAt: (r.finished_at as number | null) ?? null,
+  commit: (r.commit_sha as string | null) ?? null,
+  tag: (r.tag as string | null) ?? null,
+  detail: (r.detail as string | null) ?? null,
+});
 
 const approval = (r: Raw): ApprovalRow => ({
   id: r.id as number,
@@ -909,6 +942,60 @@ export class Store implements RegistryCache {
   proposalByLocalHash(pluginId: string, localHash: string): ProposalRow | null {
     const r = this.db.prepare(`SELECT * FROM proposals WHERE plugin_id = ? AND local_hash = ? ORDER BY id DESC LIMIT 1`).get(pluginId, localHash) as Raw | undefined;
     return r ? proposalRow(r) : null;
+  }
+
+  // ---- publishing (stage 4) -------------------------------------------------
+  publishSettings(): PublishSettings {
+    const rows = this.db.prepare(`SELECT key, value FROM policy WHERE key LIKE 'publish.%'`).all() as Array<{ key: string; value: string }>;
+    const map = new Map(rows.map((r) => [r.key, r.value]));
+    return {
+      enabled: map.get("publish.enabled") === "1",
+      repoUrl: map.get("publish.repo_url") ?? DEFAULT_PUBLISH.repoUrl,
+      branch: map.get("publish.branch") ?? DEFAULT_PUBLISH.branch,
+      onApprove: map.get("publish.on_approve") === "1",
+    };
+  }
+  setPublishSettings(next: PublishSettings): void {
+    const put = this.db.prepare(`INSERT INTO policy (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`);
+    put.run("publish.enabled", next.enabled ? "1" : "0");
+    put.run("publish.repo_url", next.repoUrl);
+    put.run("publish.branch", next.branch);
+    put.run("publish.on_approve", next.onApprove ? "1" : "0");
+  }
+  /** True when this exact reviewed source of the plugin was approved (a touch, a window, or a pin). */
+  isApprovedSource(pluginId: string, localHash: string): boolean {
+    const a = this.db.prepare(`SELECT 1 FROM approvals WHERE plugin_id = ? AND local_hash = ? AND revoked_at IS NULL LIMIT 1`).get(pluginId, localHash);
+    if (a) return true;
+    return this.db.prepare(`SELECT 1 FROM proposals WHERE plugin_id = ? AND local_hash = ? AND touch_approved_at IS NOT NULL LIMIT 1`).get(pluginId, localHash) !== undefined;
+  }
+  insertPublication(p: { pluginId: string; version: string; localHash: string; trigger: PublishTrigger; repoUrl: string; branch: string }): PublishRow {
+    const info = this.db
+      .prepare(`INSERT INTO publications (plugin_id, version, local_hash, trigger, status, repo_url, branch, started_at) VALUES (?, ?, ?, ?, 'running', ?, ?, ?)`)
+      .run(p.pluginId, p.version, p.localHash, p.trigger, p.repoUrl, p.branch, this.now());
+    return this.getPublication(Number(info.lastInsertRowid))!;
+  }
+  finishPublication(id: number, r: { status: PublishStatus; commit?: string | null; tag?: string | null; detail?: string | null }): void {
+    this.db
+      .prepare(`UPDATE publications SET status = ?, finished_at = ?, commit_sha = ?, tag = ?, detail = ? WHERE id = ?`)
+      .run(r.status, this.now(), r.commit ?? null, r.tag ?? null, r.detail ?? null, id);
+  }
+  getPublication(id: number): PublishRow | null {
+    const r = this.db.prepare(`SELECT * FROM publications WHERE id = ?`).get(id) as Raw | undefined;
+    return r ? publicationRow(r) : null;
+  }
+  listPublications(limit = 60): PublishRow[] {
+    return (this.db.prepare(`SELECT * FROM publications ORDER BY id DESC LIMIT ?`).all(limit) as Raw[]).map(publicationRow);
+  }
+  /** A successful publication of exactly this source to exactly this place (so it is not pushed twice). */
+  publishedTo(pluginId: string, localHash: string, repoUrl: string, branch: string): PublishRow | null {
+    const r = this.db
+      .prepare(`SELECT * FROM publications WHERE plugin_id = ? AND local_hash = ? AND repo_url = ? AND branch = ? AND status IN ('published', 'unchanged') ORDER BY id DESC LIMIT 1`)
+      .get(pluginId, localHash, repoUrl, branch) as Raw | undefined;
+    return r ? publicationRow(r) : null;
+  }
+  /** A push the process never finished (restart, crash) is not a result. */
+  interruptRunningPublications(): number {
+    return this.db.prepare(`UPDATE publications SET status = 'failed', finished_at = ?, detail = 'прервано перезапуском сервера' WHERE status = 'running'`).run(this.now()).changes;
   }
 
   // ---- log --------------------------------------------------------------
