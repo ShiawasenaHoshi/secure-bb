@@ -3,6 +3,7 @@
 import type BetterSqlite3 from "better-sqlite3";
 import type { CheckResult } from "./checks/types.js";
 import { PRUNE_MS, type RegistryCache, type RegistryEntry } from "./deps/registry.js";
+import { DEFAULT_AI, type AiSettings, type ScanResult, type ScanRow, type ScanStatus, type ScanTrigger } from "./scan/types.js";
 import type { Category, ConfigWindowRow, Drift, DriftKind, DriftStatus, SnapshotRow, WindowScope } from "./watch/model.js";
 
 export type Db = BetterSqlite3.Database;
@@ -152,6 +153,20 @@ export const MIGRATIONS: string[] = [
      fetched_at INTEGER NOT NULL,
      dist_tags TEXT NOT NULL,
      times TEXT NOT NULL)`,
+  // Stage 3: optional AI scan results (spec §8). Keyed by the scanned source tree; the core's hash is kept when known.
+  `CREATE TABLE IF NOT EXISTS scans (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     plugin_id TEXT NOT NULL,
+     version TEXT NOT NULL,
+     local_hash TEXT NOT NULL,
+     content_hash TEXT,
+     trigger TEXT NOT NULL,
+     status TEXT NOT NULL,
+     started_at INTEGER NOT NULL,
+     finished_at INTEGER,
+     result TEXT)`,
+  `CREATE INDEX IF NOT EXISTS scans_local ON scans (local_hash)`,
+  `CREATE INDEX IF NOT EXISTS scans_content ON scans (content_hash)`,
 ];
 
 export interface Policy {
@@ -317,6 +332,19 @@ const proposalRow = (r: Raw): ProposalRow => ({
   builtHash: (r.built_hash as string | null) ?? null,
   loadedAt: (r.loaded_at as number | null) ?? null,
   createdAt: r.created_at as number,
+});
+
+const scanRow = (r: Raw): ScanRow => ({
+  id: r.id as number,
+  pluginId: r.plugin_id as string,
+  version: r.version as string,
+  localHash: r.local_hash as string,
+  contentHash: (r.content_hash as string | null) ?? null,
+  trigger: r.trigger as ScanTrigger,
+  status: r.status as ScanStatus,
+  startedAt: r.started_at as number,
+  finishedAt: (r.finished_at as number | null) ?? null,
+  result: r.result ? (JSON.parse(r.result as string) as ScanResult) : null,
 });
 
 export interface NewQueue {
@@ -753,6 +781,73 @@ export class Store implements RegistryCache {
   }
   setCfgWindowExpiry(id: number, expiresAt: number): void {
     this.db.prepare(`UPDATE cfg_windows SET expires_at = ? WHERE id = ? AND closed_at IS NULL`).run(expiresAt, id);
+  }
+
+  // ---- AI scan (stage 3) ---------------------------------------------------
+  /** Settings live in our database next to the policy; no token or secret is ever kept here. */
+  aiSettings(): AiSettings {
+    const rows = this.db.prepare(`SELECT key, value FROM policy WHERE key LIKE 'ai.%'`).all() as Array<{ key: string; value: string }>;
+    const map = new Map(rows.map((r) => [r.key, r.value]));
+    return {
+      enabled: map.get("ai.enabled") === "1",
+      autoFreeze: map.get("ai.auto_freeze") === "1",
+      autoExternal: map.get("ai.auto_external") === "1",
+      second: map.get("ai.second") === "1",
+      secondModel: map.get("ai.second_model") ?? DEFAULT_AI.secondModel,
+      freezePlugins: rows.filter((r) => r.key.startsWith("ai.freeze:") && r.value === "1").map((r) => r.key.slice("ai.freeze:".length)).sort(),
+    };
+  }
+  setAiSettings(next: AiSettings): void {
+    const put = this.db.prepare(`INSERT INTO policy (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`);
+    const flag = (b: boolean) => (b ? "1" : "0");
+    put.run("ai.enabled", flag(next.enabled));
+    put.run("ai.auto_freeze", flag(next.autoFreeze));
+    put.run("ai.auto_external", flag(next.autoExternal));
+    put.run("ai.second", flag(next.second));
+    put.run("ai.second_model", next.secondModel);
+    this.db.prepare(`DELETE FROM policy WHERE key LIKE 'ai.freeze:%'`).run();
+    for (const id of next.freezePlugins) put.run(`ai.freeze:${id}`, "1");
+  }
+  insertScan(s: { pluginId: string; version: string; localHash: string; contentHash: string | null; trigger: ScanTrigger }): ScanRow {
+    const info = this.db
+      .prepare(`INSERT INTO scans (plugin_id, version, local_hash, content_hash, trigger, status, started_at) VALUES (?, ?, ?, ?, ?, 'running', ?)`)
+      .run(s.pluginId, s.version, s.localHash, s.contentHash, s.trigger, this.now());
+    return this.getScan(Number(info.lastInsertRowid))!;
+  }
+  finishScan(id: number, result: ScanResult): void {
+    this.db.prepare(`UPDATE scans SET status = ?, finished_at = ?, result = ? WHERE id = ?`).run(result.status, this.now(), JSON.stringify(result), id);
+  }
+  /** An earlier scan of the same tree also answers for this core hash. */
+  linkScan(id: number, contentHash: string): void {
+    this.db.prepare(`UPDATE scans SET content_hash = ? WHERE id = ? AND content_hash IS NULL`).run(contentHash, id);
+  }
+  /** A scan the process never finished (restart, crash) is not a result: say so instead of showing it as running forever. */
+  interruptRunningScans(): number {
+    const result: ScanResult = { status: "unavailable", models: [], files: 0, chars: 0, incomplete: [], skipped: [], note: "прервано перезапуском сервера" };
+    return this.db.prepare(`UPDATE scans SET status = 'unavailable', finished_at = ?, result = ? WHERE status = 'running'`).run(this.now(), JSON.stringify(result)).changes;
+  }
+  getScan(id: number): ScanRow | null {
+    const r = this.db.prepare(`SELECT * FROM scans WHERE id = ?`).get(id) as Raw | undefined;
+    return r ? scanRow(r) : null;
+  }
+  listScans(limit = 40): ScanRow[] {
+    return (this.db.prepare(`SELECT * FROM scans ORDER BY id DESC LIMIT ?`).all(limit) as Raw[]).map(scanRow);
+  }
+  /** The newest scan (finished or running) of exactly this tree or this core hash. */
+  latestScanFor(k: { localHash?: string | null; contentHash?: string | null }): ScanRow | null {
+    const r = this.db
+      .prepare(`SELECT * FROM scans WHERE (local_hash = ? AND ? IS NOT NULL) OR (content_hash = ? AND ? IS NOT NULL) ORDER BY id DESC LIMIT 1`)
+      .get(k.localHash ?? null, k.localHash ?? null, k.contentHash ?? null, k.contentHash ?? null) as Raw | undefined;
+    return r ? scanRow(r) : null;
+  }
+  latestScanOfPlugin(pluginId: string): ScanRow | null {
+    const r = this.db.prepare(`SELECT * FROM scans WHERE plugin_id = ? ORDER BY id DESC LIMIT 1`).get(pluginId) as Raw | undefined;
+    return r ? scanRow(r) : null;
+  }
+  /** The proposal whose reviewed source has this hash. */
+  proposalByLocalHash(pluginId: string, localHash: string): ProposalRow | null {
+    const r = this.db.prepare(`SELECT * FROM proposals WHERE plugin_id = ? AND local_hash = ? ORDER BY id DESC LIMIT 1`).get(pluginId, localHash) as Raw | undefined;
+    return r ? proposalRow(r) : null;
   }
 
   // ---- log --------------------------------------------------------------

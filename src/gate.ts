@@ -5,6 +5,8 @@ import { readFileSync } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
 import { runChecks as defaultRunChecks, type CheckResult } from "./checks/index.js";
 import { BLOCKED_REASON, bySeverity, capabilityTokens, localCheckKey, newTokens, summarize } from "./decision.js";
+import { validateSecondModel } from "./scan/commands.js";
+import type { AiSettings } from "./scan/types.js";
 import { generateSecret, otpauthUri, verifyTotp, stepAt } from "./totp.js";
 import type { ApprovalRow, Policy, ProposalRow, QueueRow, Store, WindowRow } from "./store.js";
 import { hashTree, isInsideSnapshots } from "./tree.js";
@@ -75,6 +77,12 @@ export interface GateDeps {
   onChecked?: () => void;
   /** How long the hook waits for the checks before holding (the core gives the hook 10 s). Default 8000. */
   checkWaitMs?: number;
+  /** Stage 3: why a stored AI scan of this version makes it suspect (null: no scan, or clean). Only ever adds a hold. */
+  scanFlag?: (k: { contentHash: string; localHash: string | null }) => string | null;
+  /** Stage 3: a trust window closed and `pin` stays pinned (the "scan on freeze" option). Must not throw. */
+  onFreeze?: (pluginId: string, pin: ApprovalRow | null) => void;
+  /** Stage 3: a version that did not come through `propose` is held (the "scan externals" option). Must not throw. */
+  onExternal?: (ctx: HookCtx) => void;
 }
 
 export type TotpState = "none" | "pending" | "locked" | "external" | "external-broken";
@@ -351,10 +359,13 @@ export class Gate {
       }
     }
 
+    // An AI scan (stage 3) can only add a hold: a flagged, failed or incomplete scan of this version.
+    const aiFlag = this.d.scanFlag?.({ contentHash: ctx.contentHash, localHash: proposal?.localHash ?? null }) ?? null;
+
     // After-the-fact scans only record: the plugin already ran, nothing here can stop it.
     if (ctx.trigger === "afterfact") {
       this.scheduleCheck(ctx);
-      return this.hold(ctx, proposal, reason);
+      return this.holdExternal(ctx, proposal, reason ?? aiFlag);
     }
 
     // Everything below needs the checks (spec §5.3). A snapshot proposed through
@@ -384,24 +395,29 @@ export class Gate {
       const windowOpen = w !== null && w.pluginId === ctx.pluginId && isOpen(w, this.now);
       if (windowOpen) {
         const fresh = newTokens(result, w.caps);
-        if (reviews.length === 0 && fresh.length === 0) {
+        if (reviews.length === 0 && fresh.length === 0 && aiFlag === null) {
           this.recordApproval(ctx, "window", w.id, proposal);
           this.slide(w);
           return { action: "proceed" };
         }
         // Held for one code; the window stays open (spec §0, §6).
-        const why = fresh.length > 0 ? `новая возможность в окне: ${fresh.slice(0, 6).join(", ")}${fresh.length > 6 ? "…" : ""}` : `проверки требуют ревью: ${summarize(reviews)}`;
+        const why = fresh.length > 0 ? `новая возможность в окне: ${fresh.slice(0, 6).join(", ")}${fresh.length > 6 ? "…" : ""}` : reviews.length > 0 ? `проверки требуют ревью: ${summarize(reviews)}` : aiFlag!;
         return this.hold(ctx, proposal, why);
       }
-      if (reviews.length === 0 && result.capabilities.length === 0) {
+      if (reviews.length === 0 && result.capabilities.length === 0 && aiFlag === null) {
         // Safe class (§5.2), our own immutable snapshot, clean checks: no touch needed.
         this.recordApproval(ctx, "auto", null, proposal);
         return { action: "proceed" };
       }
-      const why = result.capabilities.length > 0 ? `вне безопасного класса: ${result.capabilities.map((c) => c.kind).join(", ")}` : `проверки требуют ревью: ${summarize(reviews)}`;
+      const why =
+        result.capabilities.length > 0
+          ? `вне безопасного класса: ${result.capabilities.map((c) => c.kind).join(", ")}`
+          : reviews.length > 0
+            ? `проверки требуют ревью: ${summarize(reviews)}`
+            : aiFlag!;
       return this.hold(ctx, proposal, why);
     }
-    return this.hold(ctx, proposal, reason);
+    return this.holdExternal(ctx, proposal, reason ?? aiFlag);
   }
 
   private queue(ctx: HookCtx, proposal: ProposalRow | null, reason: string | null): QueueRow {
@@ -420,6 +436,18 @@ export class Gate {
       proposalId: proposal?.id ?? null,
       reason,
     });
+  }
+
+  /** A hold of a version that did not come through `propose`: the optional scan of externals starts here. */
+  private holdExternal(ctx: HookCtx, proposal: ProposalRow | null, reason: string | null): Decision {
+    if (proposal === null) {
+      try {
+        this.d.onExternal?.(ctx);
+      } catch {
+        /* optional */
+      }
+    }
+    return this.hold(ctx, proposal, reason);
   }
 
   private hold(ctx: HookCtx, proposal: ProposalRow | null, reason: string | null): Decision {
@@ -555,6 +583,11 @@ export class Gate {
         pinnedVersion: pin?.version ?? null,
         note: "последняя версия закреплена; следующие требуют нового окна",
       });
+      try {
+        this.d.onFreeze?.(w.pluginId, pin);
+      } catch {
+        /* an optional scan must never break the sweep */
+      }
       frozen++;
     }
     return frozen;
@@ -642,6 +675,42 @@ export class Gate {
     }
     this.store.setPolicy(next);
     this.store.log("policy", null, null, { from: cur, to: next, touched: widens });
+    return next;
+  }
+
+  // ---- AI scan settings (stage 3, spec §8) -------------------------------------
+  /**
+   * Changes the optional AI scan. Everything is off by default; switching something on needs no code
+   * (the module only adds suspicion), switching an enabled option off does: that is the direction that weakens the gate.
+   */
+  setAiSettings(patch: Partial<Omit<AiSettings, "freezePlugins">> & { freezePlugin?: { id: string; on: boolean } }, code: string | undefined): AiSettings {
+    const cur = this.store.aiSettings();
+    const next: AiSettings = { ...cur, freezePlugins: [...cur.freezePlugins] };
+    for (const k of ["enabled", "autoFreeze", "autoExternal", "second"] as const) if (patch[k] !== undefined) next[k] = patch[k]!;
+    if (patch.secondModel !== undefined) {
+      const name = patch.secondModel.trim();
+      const bad = name === "" ? null : validateSecondModel(name);
+      if (bad) throw new GateError("invalid", bad);
+      next.secondModel = name;
+    }
+    if (next.second && next.secondModel === "") throw new GateError("invalid", "укажите имя второй модели (не Anthropic) до того, как включать её");
+    if (patch.freezePlugin) {
+      const { id, on } = patch.freezePlugin;
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id)) throw new GateError("invalid", "неверный id плагина");
+      next.freezePlugins = on ? [...new Set([...next.freezePlugins, id])].sort() : next.freezePlugins.filter((x) => x !== id);
+    }
+    const switchedOff =
+      (cur.enabled && !next.enabled) ||
+      (cur.autoFreeze && !next.autoFreeze) ||
+      (cur.autoExternal && !next.autoExternal) ||
+      (cur.second && !next.second) ||
+      cur.freezePlugins.some((id) => !next.freezePlugins.includes(id));
+    if (switchedOff) {
+      if (code === undefined) throw new GateError("invalid_code", "выключение включённой опции ИИ-скана требует кода");
+      this.touch("ai.settings", code);
+    }
+    this.store.setAiSettings(next);
+    this.store.log("ai.settings", null, null, { from: cur, to: next, touched: switchedOff });
     return next;
   }
 
