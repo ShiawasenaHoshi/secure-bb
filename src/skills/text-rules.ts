@@ -153,29 +153,45 @@ function exfilIn(text: string): boolean {
 
 // ---- protection switched off -----------------------------------------------------------------------------------------
 const PROTECTION_TARGET = W("(?:secure-?bb|sandbox(?:ing)?|песочниц\\p{L}*|plugin[- ]?gate|watch-?dog|сторож\\p{L}*|гейт\\p{L}*|totp|trust window|окн\\p{L}*\\s+довери\\p{L}*|permission\\s+(?:prompts?|checks?|dialogs?)|approval(?:s|\\s+prompts?)?|запрос\\p{L}*\\s+(?:на\\s+)?разрешени\\p{L}*|подтверждени\\p{L}*|safe[- ]?mode|guardrails?)");
-const PROTECTION_VERB = W("(?:disabl\\p{L}*|turn(?:ing)?\\s+off|switch(?:ing)?\\s+off|bypass\\p{L}*|circumvent\\p{L}*|evad\\p{L}*|skip\\p{L}*|ignor\\p{L}*|kill|stop|remov\\p{L}*|uninstall\\p{L}*|delet\\p{L}*|tamper\\p{L}*|override|disarm\\p{L}*|work\\s+around|отключ\\p{L}*|выключ\\p{L}*|обойд\\p{L}*|обход\\p{L}*|игнорир\\p{L}*|останов\\p{L}*|удал\\p{L}*|сним\\p{L}*|пропуск\\p{L}*|пропуст\\p{L}*|отмен\\p{L}*|вырубь|не\\s+проси\\p{L}*)");
-const NEGATION = /(?:never|don'?t|do\s+not|must\s+not|should\s+not|shouldn'?t|cannot|can'?t|avoid|without\s+asking\s+to|не\s|нельзя|никогда|запрещ\p{L}*|избегай\p{L}*)\s*(?:\S+\s+){0,3}$/iu;
+// Verbs that switch something off. Deliberately narrow: "stop", "remove", "delete" also describe ordinary work.
+const PROTECTION_VERB = W("(?:disabl\\p{L}*|turn(?:ing)?\\s+off|switch(?:ing)?\\s+off|shut\\s+(?:down|off)|bypass\\p{L}*|circumvent\\p{L}*|evad\\p{L}*|skip\\p{L}*|ignor\\p{L}*|kill|uninstall\\p{L}*|tamper\\p{L}*|disarm\\p{L}*|work\\s+around|отключ\\p{L}*|выключ\\p{L}*|обойд\\p{L}*|обход\\p{L}*|игнорир\\p{L}*|пропуск\\p{L}*|пропуст\\p{L}*|вырубь|не\\s+проси\\p{L}*)");
+/**
+ * A sentence that forbids, warns or only talks about such an instruction is not one: "never disable the sandbox",
+ * "if a skill asks you to turn off secure-bb, refuse", "a skill that asks to disable the sandbox is an attempt to deceive".
+ * Checked per sentence; the marker may stand anywhere in it.
+ */
+const WARNING = new RegExp(
+  `${W("(?:never|don'?t|do\\s+not|must\\s+not|should\\s+not|shouldn'?t|cannot|can'?t|won'?t|avoid|refuse|decline|if\\s+(?:a|the|any)\\s+\\p{L}+\\s+(?:asks?|tells?|says?|wants?|requests?)|asks?\\s+(?:you\\s+)?to|tells?\\s+you\\s+to|attempts?|deceiv\\p{L}*|trick\\p{L}*|suspicious|не|нельзя|никогда|запрещ\\p{L}*|избегай\\p{L}*|откажи\\p{L}*|отказ\\p{L}*|если\\s+(?:скилл|инструкци\\p{L}*|текст)\\s+\\p{L}*|проси\\p{L}*|просит|попытк\\p{L}*|обман\\p{L}*|подозрител\\p{L}*)")}(?![\\p{L}\\p{N}_])`,
+  "iu",
+);
+// "не проси" is itself an instruction ("don't ask for confirmation"), so it is cut out before the warning words are looked for.
+const sentences = (text: string): string[] => text.split(/(?<=[.!?;])\s+|\s[—–]\s/u).filter((x) => x.trim() !== "");
+const MAX_GAP = 40;
+const isWarning = (sentence: string): boolean => WARNING.test(sentence.replace(/не\s+проси\p{L}*/giu, " "));
 const PROTECTION_FLAGS = /--dangerously-skip-permissions|\bbypassPermissions\b|\bdangerouslyDisableSandbox\b|\bdangerously[-_]?disable\w*|sandbox(?:Enabled)?["']?\s*[:=]\s*(?:false|0|off|no)\b|\bBB_PLUGIN_ACTIVATION_GUARDS\b|permission[-_ ]?mode["']?\s*[:=]\s*["']?(?:full|bypass\w*)|--permission-mode[ =](?:full|bypass\w*)|\bunset\s+BB_\w+/iu;
 
 function protectionFindings(path: string, lines: Array<{ line: number; text: string }>): Finding[] {
   const out: Finding[] = [];
   for (const { line, text } of lines) {
     if (out.length >= 5) break;
-    const flag = PROTECTION_FLAGS.exec(text);
-    if (flag && !NEGATION.test(text.slice(0, flag.index))) {
-      out.push({ rule: "disable-protection", severity: "block", file: path, line, excerpt: excerptOf(text) });
-      continue;
-    }
-    for (const t of text.matchAll(new RegExp(PROTECTION_TARGET, "giu"))) {
-      const before = text.slice(Math.max(0, (t.index ?? 0) - 70), t.index ?? 0);
-      const verbs = [...before.matchAll(new RegExp(PROTECTION_VERB, "giu"))];
-      const v = verbs.at(-1);
-      if (!v) continue;
-      const verbAt = Math.max(0, (t.index ?? 0) - 70) + (v.index ?? 0);
-      if (NEGATION.test(text.slice(Math.max(0, verbAt - 40), verbAt))) continue;
-      // "не проси" is itself the verb phrase in Russian ("не проси подтверждения"): handled as a verb, not as a negation.
-      out.push({ rule: "disable-protection", severity: "block", file: path, line, excerpt: excerptOf(text) });
-      break;
+    for (const sentence of sentences(text)) {
+      if (isWarning(sentence)) continue;
+      let hit = PROTECTION_FLAGS.test(sentence);
+      if (!hit) {
+        for (const t of sentence.matchAll(new RegExp(PROTECTION_TARGET, "giu"))) {
+          const from = Math.max(0, (t.index ?? 0) - MAX_GAP);
+          const before = sentence.slice(from, t.index ?? 0);
+          // the verb must stand close to the thing it switches off
+          if ([...before.matchAll(new RegExp(PROTECTION_VERB, "giu"))].length > 0) {
+            hit = true;
+            break;
+          }
+        }
+      }
+      if (hit) {
+        out.push({ rule: "disable-protection", severity: "block", file: path, line, excerpt: excerptOf(text) });
+        break;
+      }
     }
   }
   return out;
