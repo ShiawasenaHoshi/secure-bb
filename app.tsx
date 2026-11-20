@@ -152,6 +152,93 @@ function ScanResultView({ scan, other }: { scan: ScanView | undefined; other?: s
   );
 }
 
+const PUBLISH_STATE: Record<string, string> = {
+  off: "публикация выключена",
+  "no-address": "публикация включена, но адрес репозитория не задан",
+  "not-configured": "публикация не настроена: на сервере не задана переменная BB_SECURE_BB_PUBLISH_TOKEN_FILE",
+  ready: "публикация готова",
+};
+const PUBLISH_STATUS: Record<string, string> = { running: "идёт", published: "опубликовано", unchanged: "уже было опубликовано", failed: "ошибка", skipped: "пропущено" };
+
+/** Where this version of this plugin went (or why it did not): the result of the last attempts, with the reason. */
+function PublicationLine({ ov, pluginId, version, rpc, refetch }: { ov: Overview; pluginId: string; version: string | null; rpc: Rpc; refetch: () => void }) {
+  const act = useCodeAction(refetch);
+  const mine = ov.publish.recent.filter((r) => r.pluginId === pluginId && (version === null || r.version === version || r.version === "—"));
+  const last = mine[0];
+  if (!ov.publish.settings.enabled && !last) return null;
+  return (
+    <div className="mt-1 text-xs">
+      {last ? (
+        <p className={last.status === "failed" ? "text-destructive" : muted}>
+          Публикация {last.version}: {PUBLISH_STATUS[last.status] ?? last.status}
+          {last.commit ? ` · коммит ${last.commit.slice(0, 10)}` : ""}{last.tag ? ` · тег ${last.tag}` : ""} · {when(last.finishedAt ?? last.startedAt)}
+          {last.detail && last.status !== "published" ? ` — ${last.detail}` : ""}
+        </p>
+      ) : (
+        <p className={muted}>Публикация: ещё не было ({PUBLISH_STATE[ov.publish.state]}).</p>
+      )}
+      {ov.publish.state === "ready" && version ? (
+        <button className={`${btn} mt-1`} disabled={act.busy} onClick={() => void act.run(async () => { const r = await rpc.call("publish.run", { pluginId }); return { note: r.note }; })}>
+          Опубликовать закреплённую версию
+        </button>
+      ) : null}
+      <Msg error={act.error} ok={act.ok} />
+    </div>
+  );
+}
+
+function PublishCard({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; refetch: () => void }) {
+  const cur = ov.publish.settings;
+  const [url, setUrl] = useState(cur.repoUrl);
+  const [branch, setBranch] = useState(cur.branch);
+  const [code, setCode] = useState("");
+  const act = useCodeAction(refetch);
+  const registered = ov.totp.state === "locked" || ov.totp.state === "external";
+  useEffect(() => setUrl(cur.repoUrl), [cur.repoUrl]);
+  useEffect(() => setBranch(cur.branch), [cur.branch]);
+  const set = (patch: Record<string, unknown>) =>
+    void act.run(async () => {
+      await rpc.call("publish.settings", { ...patch, ...(code.length === 6 ? { code } : {}) });
+      setCode("");
+    });
+  return (
+    <div className={card}>
+      <h3 className="font-semibold">Публикация замороженных версий (необязательный модуль)</h3>
+      <p className={muted}>
+        При заморозке окна secure-bb кладёт снимок плагина в git-репозиторий: каталог <code>&lt;id&gt;/</code>, коммит «id@версия frozen хеш», тег <code>id-vверсия</code>. Только наши плагины (снимки через propose). Включение, смена адреса и ветки — с кодом. Токен в настройках не хранится: путь к файлу задаёт переменная окружения сервера <code>BB_SECURE_BB_PUBLISH_TOKEN_FILE</code>.
+      </p>
+      <p className="mt-1">{PUBLISH_STATE[ov.publish.state]}</p>
+      <div className="mt-2 space-y-1">
+        <label className="flex items-center justify-between gap-2">Адрес (https)
+          <input className={`${input} w-72 tracking-normal`} value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://github.com/owner/bb-plugins.git" />
+        </label>
+        <label className="flex items-center justify-between gap-2">Ветка
+          <input className={`${input} w-48 tracking-normal`} value={branch} onChange={(e) => setBranch(e.target.value)} />
+        </label>
+        <label className="flex items-center gap-2"><input type="checkbox" checked={cur.enabled} disabled={act.busy || cur.repoUrl === ""} onChange={(e) => set({ enabled: e.target.checked })} /> Публиковать при заморозке окна</label>
+        <label className="flex items-center gap-2"><input type="checkbox" checked={cur.onApprove} disabled={act.busy || !cur.enabled} onChange={(e) => set({ onApprove: e.target.checked })} /> Также при одобрении версии кодом</label>
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        {registered ? <CodeField value={code} onChange={setCode} /> : <span className={muted}>Второй фактор ещё не зарегистрирован.</span>}
+        <button className={btn} disabled={act.busy || (url === cur.repoUrl && branch === cur.branch)} onClick={() => set({ repoUrl: url, branch })}>Сохранить адрес и ветку</button>
+      </div>
+      {ov.publish.recent.length > 0 ? (
+        <details className="mt-1">
+          <summary className="cursor-pointer">Последние публикации ({ov.publish.recent.length})</summary>
+          <ul className="mt-1 list-disc pl-5">
+            {ov.publish.recent.slice(0, 15).map((r) => (
+              <li key={r.id} className={r.status === "failed" ? "text-destructive" : undefined}>
+                {r.pluginId}@{r.version} · {PUBLISH_STATUS[r.status] ?? r.status} · {when(r.startedAt)}{r.detail ? ` — ${r.detail}` : ""}
+              </li>
+            ))}
+          </ul>
+        </details>
+      ) : null}
+      <Msg error={act.error} ok={act.ok} />
+    </div>
+  );
+}
+
 function ScanButton({ ov, target, rpc, refetch }: { ov: Overview; target: { pluginId: string } | { queueId: number }; rpc: Rpc; refetch: () => void }) {
   const act = useCodeAction(refetch);
   if (!ov.ai.settings.enabled) return null;
@@ -608,6 +695,7 @@ function PluginRow({ p, ov, rpc, refetch, registered, checks }: { p: PluginView;
       </div>
       <p className={muted}>{p.window ? windowLine(p.window, remaining) : "окно закрыто"}</p>
       {p.pin ? <ChecksView result={checks[p.pin.contentHash]} /> : null}
+      <PublicationLine ov={ov} pluginId={p.id} version={p.pin?.version ?? null} rpc={rpc} refetch={refetch} />
       <ScanResultView scan={ov.ai.pluginScans[p.id]} other={ov.ai.pluginScans[p.id] ? (ov.ai.pluginScans[p.id]!.current ? "это закреплённая версия" : "не закреплённая версия") : undefined} />
       {ov.ai.settings.enabled ? (
         <div className="mt-1 flex flex-wrap items-center gap-3">
@@ -1156,6 +1244,7 @@ function GatePage() {
         </Section>
         <Section title="Гейт плагинов — окна доверия"><PolicyCard ov={ov} rpc={rpc} refetch={refetch} /></Section>
         <Section title="Гейт плагинов — ИИ-скан"><AiCard ov={ov} rpc={rpc} refetch={refetch} /></Section>
+        <Section title="Гейт плагинов — публикация"><PublishCard ov={ov} rpc={rpc} refetch={refetch} /></Section>
         <Section title={`Сторож конфигурации${ov.watch.drifts.some((d) => d.status === "open" || d.status === "rollback-failed") ? " (!)" : ""}`}><WatchSection ov={ov} rpc={rpc} refetch={refetch} /></Section>
         <Section title={`Скиллы${ov.skills.open.length > 0 ? ` — очередь (${ov.skills.open.length})` : ""}`}><SkillsSection ov={ov} rpc={rpc} refetch={refetch} /></Section>
         <Section title={`Загрязнение тредов${ov.tainted.length > 0 ? ` (${ov.tainted.length})` : ""}`}><TaintCard ov={ov} /></Section>

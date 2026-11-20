@@ -8,6 +8,8 @@ import { isThirdParty, runningThirdParty } from "./probe.js";
 import type { Availability, Scanner } from "./scan/scanner.js";
 import { scanView, type ScanView } from "./scan/view.js";
 import type { AiSettings } from "./scan/types.js";
+import type { Publisher } from "./publish/publisher.js";
+import type { PublishRow, PublishSettings, PublishState } from "./publish/types.js";
 import type { SkillGuard, SkillsView } from "./skills/guard.js";
 import type { Watchdog, WatchView } from "./watch/watchdog.js";
 import type { ApprovalRow, LogRow, Policy, QueueRow, Store, WindowRow } from "./store.js";
@@ -49,6 +51,12 @@ export interface AiView {
   queueScans: Record<number, ScanView>;
   recent: ScanView[];
 }
+export interface PublishView {
+  settings: PublishSettings;
+  state: PublishState;
+  /** Latest attempts, newest first (the page picks the plugin's own by id and version). */
+  recent: PublishRow[];
+}
 export interface Overview {
   now: number;
   assessment: Assessment;
@@ -70,6 +78,8 @@ export interface Overview {
   skills: SkillsView;
   /** Stage 3: the optional AI scan. */
   ai: AiView;
+  /** Stage 4: publishing frozen versions to the plugins repository. */
+  publish: PublishView;
   /** Stage 5: integrity of the decision journal; anything but ok is an alarm. */
   journal: JournalView;
   /** Stage 5: threads known to have read untrusted content (closes trust windows of their tree). */
@@ -92,6 +102,8 @@ export interface JournalView {
 export interface OverviewDeps {
   /** Absent in tests that do not touch the AI scan. */
   scanner?: Scanner;
+  /** Absent in tests that do not touch publishing. */
+  publisher?: Publisher;
   watch: Watchdog;
   /** Absent in tests that do not touch skills. */
   skills?: SkillGuard;
@@ -218,6 +230,7 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
     watch: d.watch.view(),
     skills: d.skills?.view() ?? EMPTY_SKILLS,
     ai,
+    publish: { settings: d.store.publishSettings(), state: d.publisher?.state() ?? "off", recent: d.store.listPublications(60) },
     journal: journalView(d),
     tainted: d.taintedThreads?.() ?? [],
     trustedRepos: d.store.trustedRepos(),

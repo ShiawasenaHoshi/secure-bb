@@ -53,6 +53,17 @@ export const rpcContract = defineRpcContract({
     input: s.object({ pluginId: s.optional(s.string({ min: 1, max: 128 })), queueId: s.optional(id) }),
     output: s.json<{ ok: true; scan: number; status: string }>(),
   },
+  "publish.settings": {
+    input: s.object({
+      enabled: s.optional(s.boolean()),
+      repoUrl: s.optional(s.string({ max: 300 })),
+      branch: s.optional(s.string({ max: 100 })),
+      onApprove: s.optional(s.boolean()),
+      code: s.optional(code),
+    }),
+    output: s.json<{ ok: true }>(),
+  },
+  "publish.run": { input: s.object({ pluginId: s.string({ min: 1, max: 128 }) }), output: s.json<{ ok: true; status: string; note: string }>() },
   "policy.set": {
     input: s.object({
       windowMin: s.optional(s.integer({ min: 1, max: 1440 })),

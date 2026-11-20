@@ -27,6 +27,9 @@ import type { FetchLike } from "./src/deps/registry.js";
 import { verifyDependencies } from "./src/deps/verify.js";
 import { fileAnchor, agentLine, type JournalReport } from "./src/journal.js";
 import { propose } from "./src/propose.js";
+import { Publisher } from "./src/publish/publisher.js";
+import { PUBLISH_TOKEN_FILE_ENV } from "./src/publish/types.js";
+import { publishLine } from "./src/publish/view.js";
 import { runProcess } from "./src/scan/process.js";
 import { flagReason, ScanError, Scanner, type ScanTarget } from "./src/scan/scanner.js";
 import { scanLine, scanView } from "./src/scan/view.js";
@@ -141,10 +144,25 @@ export default async function plugin(bb: BbPluginApi) {
     return installed ? { dir: installed.rootDir, version: installed.version } : null;
   };
 
+  // ---- publishing frozen versions (stage 4, spec §14): off until a human turns it on with a code -----
+  store.interruptRunningPublications();
+  const publisher = new Publisher({
+    store,
+    now,
+    run: runProcess,
+    // The path only; the token is read from the file at the moment of a push and goes to one git child's environment.
+    tokenFile: process.env[PUBLISH_TOKEN_FILE_ENV]?.trim() || null,
+    snapshotsRoot,
+    serverEnv: process.env,
+    log: (m) => bb.log.warn(m),
+    onDone: () => changed(),
+  });
+
   const gate = new Gate({
     store,
     scanFlag: (k) => flagReason(store.latestScanFor(k)),
     onFreeze: (pluginId, pin) => {
+      publisher.onFreeze(pluginId, pin);
       const ai = store.aiSettings();
       if (!ai.enabled || !(ai.autoFreeze || ai.freezePlugins.includes(pluginId))) return;
       void freezeTarget(pluginId, pin)
@@ -237,7 +255,7 @@ export default async function plugin(bb: BbPluginApi) {
   };
   journal(true);
   const overview = () =>
-    buildOverview({ scanner: aiScanner, store, gate, now, hookRegistered, listPlugins, probe, descendants: threads.descendants, watch, skills: skillGuard, journal: () => journal(), taintedThreads: () => store.taintedThreads(20) });
+    buildOverview({ scanner: aiScanner, publisher, store, gate, now, hookRegistered, listPlugins, probe, descendants: threads.descendants, watch, skills: skillGuard, journal: () => journal(), taintedThreads: () => store.taintedThreads(20) });
 
   // ---- after-the-fact mode ------------------------------------------------
   const scanner = new AfterFactScanner({
@@ -304,6 +322,7 @@ export default async function plugin(bb: BbPluginApi) {
       }
       recheck();
       changed();
+      publisher.onApproved(res.proposalId);
       return { ok: true as const, note };
     }),
     "queue.dismiss": wrap(({ id, code }) => {
@@ -412,6 +431,16 @@ export default async function plugin(bb: BbPluginApi) {
       const { row } = await aiScanner.start(target);
       changed();
       return { ok: true as const, scan: row.id, status: row.status };
+    }),
+    "publish.settings": wrap(({ code, ...patch }) => {
+      gate.setPublishSettings(patch, code);
+      changed();
+      return { ok: true as const };
+    }),
+    "publish.run": wrap(async ({ pluginId }) => {
+      const r = await publisher.publishPinned(pluginId);
+      changed();
+      return { ok: true as const, status: r.row?.status ?? "skipped", note: r.note };
     }),
     "policy.set": wrap(({ code, ...patch }) => {
       gate.setPolicy(patch, code);
@@ -523,6 +552,14 @@ export default async function plugin(bb: BbPluginApi) {
               const recent = store.listScans(5).map((r) => scanLine(scanView(r)));
               lines.push(...(recent.length > 0 ? recent : ["no scans yet"]));
             }
+            return { exitCode: 0, stdout: lines.join("\n") };
+          },
+        }),
+        publish: cliCommand({
+          summary: "Publishing of frozen versions of our plugins to the plugins repository: state and latest results (settings and the token are for the person on the page)",
+          options: { limit: { type: "integer", min: 1, max: 20, default: 5, description: "How many results (1-20)" } },
+          async run(input) {
+            const lines = [publishLine(store.publishSettings(), publisher.state()), ...store.listPublications(input.options.limit).map((r) => `${new Date(r.startedAt).toISOString()} ${r.pluginId}@${r.version} ${r.status}`)];
             return { exitCode: 0, stdout: lines.join("\n") };
           },
         }),

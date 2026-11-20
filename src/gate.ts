@@ -10,6 +10,8 @@ import { validateSecondModel } from "./scan/commands.js";
 import type { TaintAssessment } from "./taint/monitor.js";
 import type { AiSettings } from "./scan/types.js";
 import { normalizePattern } from "./taint/repos.js";
+import { checkBranch, checkRepoUrl, sameSettings } from "./publish/validate.js";
+import type { PublishSettings } from "./publish/types.js";
 import { T } from "./text.js";
 import { generateSecret, otpauthUri, verifyTotp, stepAt } from "./totp.js";
 import type { ApprovalRow, Policy, ProposalRow, QueueRow, Store, WindowRow } from "./store.js";
@@ -91,6 +93,8 @@ export interface GateDeps {
   taint?: { assessTree(rootThreadId: string, scope: "tree" | "thread", since: number): Promise<TaintAssessment> };
   /** Stage 5: who other than the server user can write to this directory (injectable for tests). Default: the real file system. */
   unsafeDirs?: (dir: string) => Promise<PermIssue[]>;
+  /** Stage 4: `file://` repository addresses are accepted (tests only; the server never sets it). */
+  publishAllowFile?: boolean;
   /** Stage 3: a version that did not come through `propose` is held (the "scan externals" option). Must not throw. */
   onExternal?: (ctx: HookCtx) => void;
 }
@@ -536,7 +540,7 @@ export class Gate {
    * Approves a held version with a touch. Returns what the server must do next:
    * install the snapshot (a proposal not yet seen by core) or just recheck.
    */
-  approveQueue(queueId: number, code: string, opts: { acknowledgeBlock?: boolean } = {}): { installDir: string | null; pluginId: string; enable: boolean } {
+  approveQueue(queueId: number, code: string, opts: { acknowledgeBlock?: boolean } = {}): { installDir: string | null; pluginId: string; enable: boolean; proposalId: number | null } {
     const q = this.requireHeld(queueId);
     // No code lifts this: the directory itself must be fixed (nobody but the server's user may write there), then the version is looked at again.
     if (q.reason?.startsWith(UNSAFE_DIR_REASON))
@@ -579,7 +583,7 @@ export class Gate {
       // Not yet seen by the core, or rejected by the hook (a block): install the snapshot again.
       if (!q.contentHash || blocked) installDir = this.store.getProposal(q.proposalId)?.snapshotDir ?? null;
     }
-    return { installDir, pluginId: q.pluginId, enable: q.kind === "afterfact" };
+    return { installDir, pluginId: q.pluginId, enable: q.kind === "afterfact", proposalId: q.proposalId };
   }
 
   dismissQueue(queueId: number, code: string): void {
@@ -672,7 +676,13 @@ export class Gate {
     if (!w || w.closedAt !== null) throw new GateError("not_found", "no such open window");
     this.touch(`window.close:${w.pluginId}`, code);
     this.store.closeWindow(windowId, "closed");
+    const pin = this.store.latestApproval(w.pluginId);
     this.store.log("window.close", w.pluginId, null, { windowId });
+    try {
+      this.d.onFreeze?.(w.pluginId, pin); // closing by hand freezes the last version just like the clock does
+    } catch {
+      /* optional modules must never break closing */
+    }
   }
 
   private slide(w: WindowRow): void {
@@ -804,6 +814,39 @@ export class Gate {
     }
     this.store.setAiSettings(next);
     this.store.log("ai.settings", null, null, { from: cur, to: next, touched: switchedOff });
+    return next;
+  }
+
+  // ---- publishing settings (stage 4, spec §14) ---------------------------------------
+  /**
+   * Turning publishing on, changing the address or the branch, and turning "on approval" on all need a code:
+   * they decide where reviewed code is sent. Turning something off does not (it only publishes less).
+   * The token is not a setting: it is a file named by an environment variable of the server.
+   */
+  setPublishSettings(patch: Partial<PublishSettings>, code: string | undefined): PublishSettings {
+    const cur = this.store.publishSettings();
+    const next: PublishSettings = { ...cur };
+    if (patch.enabled !== undefined) next.enabled = patch.enabled;
+    if (patch.onApprove !== undefined) next.onApprove = patch.onApprove;
+    if (patch.repoUrl !== undefined) {
+      const u = checkRepoUrl(patch.repoUrl, { allowFile: this.d.publishAllowFile });
+      if (!u.ok) throw new GateError("invalid", u.error);
+      next.repoUrl = u.url;
+    }
+    if (patch.branch !== undefined) {
+      const bad = checkBranch(patch.branch);
+      if (bad) throw new GateError("invalid", bad);
+      next.branch = patch.branch.trim();
+    }
+    if (next.enabled && next.repoUrl === "") throw new GateError("invalid", "сначала задайте адрес репозитория");
+    if (sameSettings(cur, next)) return cur;
+    const widens = (next.enabled && !cur.enabled) || next.repoUrl !== cur.repoUrl || next.branch !== cur.branch || (next.onApprove && !cur.onApprove);
+    if (widens) {
+      if (code === undefined) throw new GateError("invalid_code", "включение публикации, смена адреса или ветки и публикация при одобрении требуют кода");
+      this.touch("publish.settings", code);
+    }
+    this.store.setPublishSettings(next);
+    this.store.log("publish.settings", null, null, { from: cur, to: next, touched: widens });
     return next;
   }
 
