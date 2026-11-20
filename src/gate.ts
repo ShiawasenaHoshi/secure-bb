@@ -31,6 +31,9 @@ export type GateErrorCode =
   | "not_found"
   | "invalid";
 
+/** Hold reason for a snapshot whose files differ from what was proposed. */
+export const TAMPERED_REASON = "снимок изменён после предложения";
+
 export class GateError extends Error {
   constructor(
     readonly code: GateErrorCode,
@@ -198,7 +201,7 @@ export class Gate {
    * snapshots directory is writable by whoever shares our uid.
    */
   private async verifySnapshot(p: ProposalRow, dir: string): Promise<string | null> {
-    if ((await hashTree(dir)) !== p.localHash) return "снимок изменён после предложения";
+    if ((await hashTree(dir)) !== p.localHash) return TAMPERED_REASON;
     let hasDist = false;
     try {
       hasDist = (await stat(`${dir}/dist`)).isDirectory();
@@ -215,6 +218,7 @@ export class Gate {
     const approved = this.store.activeApproval(ctx.contentHash);
     if (approved) {
       this.store.touchApproval(approved.id);
+      this.store.supersedeTampered(ctx.pluginId, ctx.contentHash);
       return { action: "proceed" };
     }
 
@@ -290,8 +294,10 @@ export class Gate {
       localHash: proposal?.localHash ?? null,
     });
     if (proposal) this.store.markProposalLoaded(proposal.id);
+    this.store.supersedeTampered(ctx.pluginId, ctx.contentHash);
     this.store.resolveQueueByHash(ctx.contentHash);
-    this.store.log(via === "window" ? "approved.window" : via === "pin" ? "approved.pin" : "approved.touch", ctx.pluginId, ctx.contentHash, {
+    // A touch-approved proposal was already logged as "approved.touch" at approval time; its load is a separate event.
+    this.store.log(via === "window" ? "approved.window" : via === "pin" ? "approved.pin" : "approved.load", ctx.pluginId, ctx.contentHash, {
       version: ctx.version,
       windowId,
       localHash: proposal?.localHash ?? null,
