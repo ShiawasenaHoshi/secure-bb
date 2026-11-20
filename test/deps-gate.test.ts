@@ -49,7 +49,7 @@ class H {
       threads: { ancestors: async () => [], descendants: async () => [] },
       thirdPartyRunning: async () => [],
       externalTotpFile: null,
-      snapshotsRoot: this.snaps,
+      snapshotsRoot: this.snaps, unsafeDirs: async () => [],
       runChecks,
       verifyDeps: async (r: CheckResult) => {
         if (this.verifyThrows) throw new Error("boom");

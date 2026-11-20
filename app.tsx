@@ -11,6 +11,8 @@ import type { QueueRow } from "./src/store";
 import type { CheckResult } from "./src/checks/types";
 import type { ConfigWindowView } from "./src/watch/watchdog";
 import { CATEGORY_LABEL, WINDOW_SCOPES, SCOPE_LABEL } from "./src/watch/model";
+import { NOT_OBSERVED, TAINT_LABEL } from "./src/taint/classify";
+import type { TaintKind } from "./src/taint/classify";
 import type { Drift, WindowScope } from "./src/watch/model";
 
 // ---------------------------------------------------------------- helpers --
@@ -299,12 +301,31 @@ function WindowRows({ windows, cfgWindows, rpc, refetch }: { windows: WindowView
   );
 }
 
+/** A broken journal chain is an alarm: shown on the page and in the strip, never hidden. */
+function JournalAlarm({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void }) {
+  const act = useCodeAction(refetch);
+  if (ov.journal.ok) return null;
+  return (
+    <div className="rounded-md border-2 border-destructive bg-destructive/10 p-2 text-destructive" role="alert" data-secure-bb-alarm>
+      <p className="font-semibold">ТРЕВОГА: цепочка журнала решений нарушена</p>
+      <ul className="mt-1 list-disc pl-5 text-xs">
+        {ov.journal.problems.slice(0, 5).map((p, i) => <li key={i}>{p.detail}</li>)}
+        {ov.journal.problems.length > 5 ? <li>и ещё {ov.journal.problems.length - 5}</li> : null}
+      </ul>
+      <p className="mt-1 text-xs">Журнал или база изменены не гейтом. Всё, что гейт «одобрил» до этого места, нельзя считать надёжным: проверьте плагины и одобрения вручную.</p>
+      <button className={`${btn} mt-1`} disabled={act.busy} onClick={() => void act.run(async () => rpc.call("journal.verify"))}>Проверить заново</button>
+      <Msg error={act.error} />
+    </div>
+  );
+}
+
 /** Always-on-screen strip: open windows are never hidden. */
 function WindowOverlay() {
   const { rpc, data, refetch } = useOverview();
-  if (!data || (data.windows.length === 0 && data.watch.windows.length === 0)) return null;
+  if (!data || (data.windows.length === 0 && data.watch.windows.length === 0 && data.journal.ok)) return null;
   return (
-    <div className="pointer-events-auto fixed bottom-3 left-3 z-50 max-w-[min(32rem,calc(100vw-1.5rem))] rounded-lg border border-border bg-card p-2 shadow-lg" data-secure-bb-banner>
+    <div className="pointer-events-auto fixed bottom-3 left-3 z-50 max-w-[min(32rem,calc(100vw-1.5rem))] space-y-2 rounded-lg border border-border bg-card p-2 shadow-lg" data-secure-bb-banner>
+      <JournalAlarm ov={data} rpc={rpc} refetch={refetch} />
       <WindowRows windows={data.windows} cfgWindows={data.watch.windows} rpc={rpc} refetch={refetch} />
     </div>
   );
@@ -514,11 +535,14 @@ function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; rpc: Re
   const act = useCodeAction(refetch);
   const registered = ov.totp.state === "locked" || ov.totp.state === "external";
   const held = q.status === "held";
-  const disabled = act.busy || code.length !== 6 || !registered;
+  const unsafeDirNow = q.reason?.startsWith("каталог доступен на запись другим") ?? false;
+  const disabled = act.busy || code.length !== 6 || !registered || unsafeDirNow;
   const done = () => setCode("");
   const found = ov.queueChecks[q.id];
   const blocked = (q.reason?.startsWith("заблокировано проверками") ?? false) || (found?.findings.some((f) => f.severity === "block") ?? false);
   const [ack, setAck] = useState(false);
+  // The directory can be changed by someone other than the server's user: no code approves it; fix the directory, then it is looked at again.
+  const unsafeDir = q.reason?.startsWith("каталог доступен на запись другим") ?? false;
   return (
     <div className={card}>
       <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -536,7 +560,8 @@ function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; rpc: Re
         {q.kind === "proposal" && !q.contentHash ? " · предложен агентом, окно было закрыто" : ""}
       </p>
       {q.contentHash ? <p className={`break-all font-mono text-xs ${muted}`}>{q.contentHash}</p> : null}
-      {q.reason ? <p className={`mt-1 ${blocked ? "font-semibold text-red-600" : muted}`}>{q.reason}</p> : null}
+      {q.reason ? <p className={`mt-1 ${blocked || unsafeDir ? "font-semibold text-red-600" : muted}`}>{q.reason}</p> : null}
+      {unsafeDir && held ? <p className="mt-1 text-red-600">Одобрить нельзя: пока в каталоге или выше может писать кто-то кроме пользователя сервера, его содержимое может измениться после проверки. Исправьте права (владелец — пользователь сервера, без записи для группы и остальных) или предложите плагин через <span className="font-mono">bb secure-bb propose</span>: снимок гейт хранит у себя.</p> : null}
       <ChecksView result={ov.queueChecks[q.id] ?? (q.contentHash ? ov.checks[q.contentHash] : undefined)} />
       <ScanResultView scan={ov.ai.queueScans[q.id]} />
       {held ? (
@@ -693,17 +718,103 @@ function PolicyCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof
   );
 }
 
-function LogCard({ ov }: { ov: Overview }) {
+function TrustedRepos({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void }) {
+  const [pattern, setPattern] = useState("");
+  const [code, setCode] = useState("");
+  const act = useCodeAction(refetch);
+  const registered = ov.totp.state === "locked" || ov.totp.state === "external";
+  const run = (change: { add: string } | { remove: string }) =>
+    void act.run(async () => {
+      const r = await rpc.call("trusted.set", { ...change, code });
+      setCode("");
+      setPattern("");
+      return r;
+    });
   return (
     <div className={card}>
+      <p>
+        Свои репозитории (github.com): <span className="font-mono">owner/name</span> или <span className="font-mono">owner/*</span>. <span className="font-mono">git clone/fetch/pull/ls-remote</span> по их адресу и вызовы <span className="font-mono">gh</span> с <span className="font-mono">--repo</span> или адресом такого репозитория не загрязняют тред. <span className="font-mono">gh</span> без явного репозитория загрязняет. Список пуст по умолчанию; менять — только с кодом. Изменение действует на события, прочитанные после него.
+      </p>
+      {ov.trustedRepos.length === 0 ? <p className={`mt-2 ${muted}`}>Список пуст: любой clone/fetch по адресу загрязняет.</p> : (
+        <ul className="mt-2 space-y-1 font-mono text-xs">
+          {ov.trustedRepos.map((r) => (
+            <li key={r} className="flex items-center gap-2">
+              {r}
+              <button className={btn} disabled={act.busy || code.length !== 6 || !registered} onClick={() => run({ remove: r })}>Убрать</button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <input className="rounded border border-border bg-transparent px-2 py-1 font-mono text-xs" placeholder="owner/name или owner/*" value={pattern} onChange={(e) => setPattern(e.target.value)} />
+        <CodeField value={code} onChange={setCode} />
+        <button className={btnPrimary} disabled={act.busy || code.length !== 6 || pattern.trim() === "" || !registered} onClick={() => run({ add: pattern })}>Добавить</button>
+      </div>
+      <Msg error={act.error} />
+    </div>
+  );
+}
+
+function TaintCard({ ov }: { ov: Overview }) {
+  return (
+    <div className={card}>
+      <p>
+        Тред, который прочитал недоверенное (веб, чужой репозиторий, инструмент MCP, установка скилла, проект с <span className="font-mono">.bb-env-setup.sh</span>), закрывает окно доверия плагина, если он в его дереве, и окно конфигурации. Окно не открыть заново само: нужно новое касание.
+      </p>
+      {ov.tainted.length === 0 ? (
+        <p className={`mt-2 ${muted}`}>Пока ни один просмотренный тред не отмечен.</p>
+      ) : (
+        <ul className="mt-2 space-y-1 text-xs">
+          {ov.tainted.map((t) => (
+            <li key={t.threadId} className="break-all">
+              <span className="font-mono">{t.threadId}</span> · {t.kinds.map((k) => TAINT_LABEL[k as TaintKind] ?? k).join(", ")} · {when(t.first)}{t.last !== t.first ? ` … ${when(t.last)}` : ""}
+            </li>
+          ))}
+        </ul>
+      )}
+      <details className="mt-2">
+        <summary className={`cursor-pointer ${muted}`}>Что не наблюдается (честно)</summary>
+        <ul className="mt-1 list-disc pl-5 text-xs">{NOT_OBSERVED.map((n) => <li key={n}>{n}</li>)}</ul>
+        <p className={`mt-1 text-xs ${muted}`}>Источник — история событий треда в API bb. Берутся только события после открытия окна; «проект с .bb-env-setup.sh» считается всегда.</p>
+      </details>
+    </div>
+  );
+}
+
+function logExtra(l: Overview["log"][number]): string {
+  const d = (l.detail ?? {}) as Record<string, unknown>;
+  if (l.kind === "window.taint" || l.kind === "watch.window.taint")
+    return ` · окно закрыто: загрязнение (${((d.kinds as string[] | undefined) ?? []).map((k) => TAINT_LABEL[k as TaintKind] ?? k).join(", ")}); ${((d.lines as string[] | undefined) ?? []).join("; ")}`;
+  if (l.kind === "trusted.add" || l.kind === "trusted.remove") return ` · ${(d.pattern as string | undefined) ?? ""}`;
+  if (l.kind === "journal.alarm") return ` · цепочка нарушена: ${((d.problems as Array<{ kind: string; id: number | null }> | undefined) ?? []).map((p) => `${p.kind}${p.id ? ` #${p.id}` : ""}`).join(", ")}`;
+  return "";
+}
+
+function LogCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void }) {
+  const act = useCodeAction(refetch);
+  const j = ov.journal;
+  return (
+    <div className={card}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className={j.ok ? "text-green-600" : "font-semibold text-destructive"}>
+          {j.ok ? `Цепочка хешей цела: ${j.entries} записей, голова ${j.head ?? "—"}` : `Цепочка НАРУШЕНА (${j.problems.length}), записей ${j.entries}`}
+        </p>
+        <button className={btn} disabled={act.busy} onClick={() => void act.run(async () => rpc.call("journal.verify"))}>Проверить целостность</button>
+      </div>
+      <p className={`text-xs ${muted}`}>
+        Проверено {when(j.checkedAt)}. Каждая запись содержит хеш предыдущей; голова цепочки дополнительно лежит в файле рядом с базой, одобрение без записи в журнале — тоже тревога.
+        {j.sealedLegacy > 0 ? ` ${j.sealedLegacy} записей были до цепочки: их целостность до этого момента не доказать.` : ""} Кто может писать и в базу, и в этот файл (тот же пользователь ОС, пока нет ступени 3), перепишет цепочку целиком незаметно.
+      </p>
+      <Msg error={act.error} />
       {ov.log.length === 0 ? <p className={muted}>Пока пусто.</p> : (
-        <ul className="space-y-1 font-mono text-xs">
+        <ul className="mt-2 space-y-1 font-mono text-xs">
           {ov.log.map((l) => (
             <li key={l.id}>
               {when(l.ts)} · {l.kind}{l.pluginId ? ` · ${l.pluginId}` : ""}
               {l.kind === "window.freeze" ? ` · закреплена версия ${(l.detail as { pinnedVersion?: string | null } | null)?.pinnedVersion ?? "—"}` : ""}
               {l.kind === "totp.begin" ? ` · ${(l.detail as { attended?: boolean; caller?: string } | null)?.attended ? "со страницы" : "НЕ со страницы"} (${(l.detail as { caller?: string } | null)?.caller ?? "?"})` : ""}
               {l.kind === "hold" && (l.detail as { reason?: string } | null)?.reason ? ` · ${(l.detail as { reason: string }).reason}` : ""}
+              {logExtra(l)}
             </li>
           ))}
         </ul>
@@ -883,6 +994,7 @@ function GatePage() {
         {ov.totp.blockedUntil > 0 ? (
           <p className="rounded-md border border-destructive p-2 text-destructive">Слишком много неверных кодов: одобрения заблокированы до {when(ov.totp.blockedUntil)}.</p>
         ) : null}
+        <JournalAlarm ov={ov} rpc={rpc} refetch={refetch} />
         <WindowRows windows={ov.windows} cfgWindows={ov.watch.windows} rpc={rpc} refetch={refetch} />
         <Section title="Защита этого bb"><StageCard ov={ov} /></Section>
         <Section title="Второй фактор"><Registration ov={ov} rpc={rpc} refetch={refetch} /></Section>
@@ -901,7 +1013,9 @@ function GatePage() {
         <Section title="Гейт плагинов — окна доверия"><PolicyCard ov={ov} rpc={rpc} refetch={refetch} /></Section>
         <Section title="Гейт плагинов — ИИ-скан"><AiCard ov={ov} rpc={rpc} refetch={refetch} /></Section>
         <Section title={`Сторож конфигурации${ov.watch.drifts.some((d) => d.status === "open" || d.status === "rollback-failed") ? " (!)" : ""}`}><WatchSection ov={ov} rpc={rpc} refetch={refetch} /></Section>
-        <Section title="Журнал"><LogCard ov={ov} /></Section>
+        <Section title={`Загрязнение тредов${ov.tainted.length > 0 ? ` (${ov.tainted.length})` : ""}`}><TaintCard ov={ov} /></Section>
+        <Section title={`Доверенные репозитории (${ov.trustedRepos.length})`}><TrustedRepos ov={ov} rpc={rpc} refetch={refetch} /></Section>
+        <Section title={`Журнал${ov.journal.ok ? "" : " (!)"}`}><LogCard ov={ov} rpc={rpc} refetch={refetch} /></Section>
       </div>
     </div>
   );

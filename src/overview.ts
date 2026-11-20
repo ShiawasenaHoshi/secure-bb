@@ -2,6 +2,7 @@
 import type { CheckResult } from "./checks/types.js";
 import { assess, type Assessment, type Probe } from "./detect.js";
 import type { Gate, TotpState } from "./gate.js";
+import type { JournalReport } from "./journal.js";
 import type { InstalledPluginLite } from "./probe.js";
 import { isThirdParty, runningThirdParty } from "./probe.js";
 import type { Availability, Scanner } from "./scan/scanner.js";
@@ -66,6 +67,21 @@ export interface Overview {
   watch: WatchView;
   /** Stage 3: the optional AI scan. */
   ai: AiView;
+  /** Stage 5: integrity of the decision journal; anything but ok is an alarm. */
+  journal: JournalView;
+  /** Stage 5: threads known to have read untrusted content (closes trust windows of their tree). */
+  tainted: Array<{ threadId: string; kinds: string[]; first: number; last: number }>;
+  /** Repositories whose use does not taint a thread. */
+  trustedRepos: string[];
+}
+export interface JournalView {
+  ok: boolean;
+  entries: number;
+  head: string | null;
+  checkedAt: number;
+  problems: Array<{ kind: string; id: number | null; detail: string }>;
+  /** Records that existed before the chain began: their history before that cannot be proven. */
+  sealedLegacy: number;
 }
 
 export interface OverviewDeps {
@@ -79,6 +95,8 @@ export interface OverviewDeps {
   listPlugins: () => Promise<InstalledPluginLite[]>;
   probe: () => Promise<Probe>;
   descendants: (threadId: string) => Promise<string[]>;
+  journal?: () => JournalReport;
+  taintedThreads?: () => Array<{ threadId: string; kinds: string[]; first: number; last: number }>;
 }
 
 export async function windowView(d: Pick<OverviewDeps, "descendants" | "now">, w: WindowRow): Promise<WindowView> {
@@ -102,6 +120,18 @@ export async function windowView(d: Pick<OverviewDeps, "descendants" | "now">, w
     hardExpiresAt: w.hardExpiresAt,
     remainingSec: Math.max(0, Math.ceil((end - d.now()) / 1000)),
     subthreads,
+  };
+}
+
+function journalView(d: OverviewDeps): JournalView {
+  const r = d.journal?.() ?? d.store.verifyJournal();
+  return {
+    ok: r.ok,
+    entries: r.entries,
+    head: r.head ? r.head.hash.slice(0, 16) : null,
+    checkedAt: r.checkedAt,
+    problems: r.problems.slice(0, 20),
+    sealedLegacy: d.store.journalSealedLegacy(),
   };
 }
 
@@ -180,5 +210,8 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
     checks,
     watch: d.watch.view(),
     ai,
+    journal: journalView(d),
+    tainted: d.taintedThreads?.() ?? [],
+    trustedRepos: d.store.trustedRepos(),
   };
 }

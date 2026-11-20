@@ -83,4 +83,8 @@ export const T = {
   proposeClosed: (id: string) =>
     `окно доверия для ${id} закрыто; попроси человека открыть его в secure-bb и повтори propose`,
   agentHeld: (n: number) => `held by secure-bb: review #${n}`,
+  agentHeldNoReview: "held by secure-bb",
+  agentRejected: (n: number) => `rejected by secure-bb: review #${n}`,
+  /** For agents: a version stopped by the checks. Reasons are on the page only. */
+  proposeBlocked: (n: number) => `версия остановлена проверками (review #${n}); подробности видит только человек на странице secure-bb`,
 } as const;

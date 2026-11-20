@@ -35,7 +35,7 @@ class H {
       threads: { ancestors: async () => [], descendants: async () => [] },
       thirdPartyRunning: async () => [],
       externalTotpFile: null,
-      snapshotsRoot: this.snaps,
+      snapshotsRoot: this.snaps, unsafeDirs: async () => [],
       runChecks: async (d) => (this.runs++, this.next(d)),
       checkWaitMs: 200,
     });
@@ -74,9 +74,11 @@ describe("§5.3 outside a window", () => {
     h.next = async () => BLOCK;
     const s = await h.snapshot(1);
     const d = await h.gate.decide(s.ctx);
-    expect(d).toMatchObject({ action: "reject", message: expect.stringContaining("decode-eval server.ts:3") });
+    // The agent learns only that it was stopped: no rule, no file (spec §11); the reasons are on the entry for the human.
+    expect(d).toMatchObject({ action: "reject", message: "rejected by secure-bb: review #1" });
+    expect((d as { message: string }).message).not.toMatch(/decode-eval|server\.ts/);
     const q = h.store.listQueue()[0]!;
-    expect(q).toMatchObject({ status: "held", reason: expect.stringContaining("заблокировано проверками") });
+    expect(q).toMatchObject({ status: "held", reason: expect.stringContaining("decode-eval server.ts:3") });
     expect(h.store.listLog().some((l) => l.kind === "reject")).toBe(true);
   });
 

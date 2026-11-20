@@ -8,6 +8,7 @@
 //     undo exists (disable a built-in plugin, delete a new env variable, restore the
 //     instructions), undone.
 // The snapshot itself is only ever changed by a touch (TOTP) or by a window.
+import type { TaintAssessment } from "../taint/monitor.js";
 import { collect, type WatchSource } from "./collect.js";
 import { diffSnapshot, type Difference } from "./diff.js";
 import {
@@ -155,6 +156,29 @@ export class Watchdog {
       if (isCfgOpen(w, this.now)) continue;
       this.store.closeCfgWindow(w.id, w.expiresAt >= w.hardExpiresAt ? "ceiling" : "expired", Math.min(w.expiresAt, w.hardExpiresAt));
       this.store.log("watch.window.freeze", null, null, { windowId: w.id, scopes: w.scopes, note: "снимок зафиксирован" });
+      n++;
+    }
+    return n;
+  }
+
+  /**
+   * Pollution (spec §6): a configuration window is not tied to a thread (bb does not say which thread changed
+   * a setting), so it covers all of bb: if any thread has read untrusted content since it opened, it is closed.
+   * Returns how many windows were closed. A read failure leaves the window open (it is closed on the next pass that can read).
+   */
+  async taintSweep(assess: (since: number) => Promise<TaintAssessment>): Promise<number> {
+    let n = 0;
+    for (const w of this.openWindows()) {
+      let verdict: TaintAssessment;
+      try {
+        verdict = await assess(w.openedAt);
+      } catch (err) {
+        this.d.log?.(`taint check of configuration window #${w.id} failed: ${err instanceof Error ? err.message : String(err)}`);
+        continue;
+      }
+      if (verdict.state !== "tainted") continue;
+      this.store.closeCfgWindow(w.id, "tainted");
+      this.store.log("watch.window.taint", null, null, { windowId: w.id, scopes: w.scopes, kinds: verdict.kinds, threads: verdict.threads.slice(0, 10), lines: verdict.lines.slice(0, 5), note: "снимок зафиксирован" });
       n++;
     }
     return n;

@@ -30,7 +30,8 @@ async function boot(dataDir: string) {
     pluginId: "secure-bb",
     experimental_dataDir: dataDir,
     sdk: {
-      subscribe: (opts: { callback: (e: { changes?: string[] }) => void }) => {
+      subscribe: (opts: { event?: string; callback: (e: { changes?: string[] }) => void }) => {
+        if (opts.event !== undefined && opts.event !== "system:changed") return () => undefined;
         listener = opts.callback;
         return () => {
           listener = null;

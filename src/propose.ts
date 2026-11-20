@@ -21,6 +21,18 @@ export interface ProposeDeps {
   changed: () => void;
 }
 
+/**
+ * What an agent may be told about a plugin's status: never a rule name, a path or a reason (they would
+ * let it probe for a bypass). Anything of ours is reduced to "held/rejected by secure-bb: review #N".
+ * Null: the status detail is not ours.
+ */
+export function agentStatusDetail(detail: string | null): string | null {
+  if (detail === null || !/secure-bb/.test(detail)) return null;
+  const review = /review #(\d+)/.exec(detail);
+  if (/rejected/i.test(detail)) return review ? T.agentRejected(Number(review[1])) : "rejected by secure-bb";
+  return review ? T.agentHeld(Number(review[1])) : T.agentHeldNoReview;
+}
+
 export interface CliResult {
   exitCode: number;
   stdout?: string;
@@ -125,7 +137,7 @@ export async function propose(
       reason: why,
     });
     d.changed();
-    return { exitCode: 3, stdout: `${info.id}: ${why} (review #${q.id}). Исправь код и повтори propose; снять блок может только человек.` };
+    return { exitCode: 3, stdout: `${info.id}: ${T.proposeBlocked(q.id)}` };
   }
 
   // Outside a window a clean plugin of the safe class (spec §5.2) needs no touch: the hook will let it in.
@@ -155,10 +167,10 @@ export async function propose(
     const res = await d.install(target);
     await d.afterInstall?.(target).catch(() => undefined);
     d.changed();
-    const held = /secure-bb/.test(res.statusDetail ?? "");
+    const detail = agentStatusDetail(res.statusDetail);
     return {
-      exitCode: held ? 3 : 0,
-      stdout: `${res.id}@${res.version}: ${res.status}${held ? ` (${res.statusDetail})` : ""}`,
+      exitCode: detail !== null ? 3 : 0,
+      stdout: `${res.id}@${res.version}: ${res.status}${detail !== null ? ` (${detail})` : ""}`,
     };
   } catch (err) {
     return { exitCode: 1, stderr: `install failed: ${err instanceof Error ? err.message : String(err)}` };

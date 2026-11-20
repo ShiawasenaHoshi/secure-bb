@@ -33,7 +33,7 @@ class Env {
       threads: { ancestors: async () => [], descendants: async () => [] },
       thirdPartyRunning: async () => [],
       externalTotpFile: null,
-      snapshotsRoot: this.snapshots,
+      snapshotsRoot: this.snapshots, unsafeDirs: async () => [],
       runChecks: async () => this.result,
     });
   }
@@ -132,7 +132,8 @@ describe("propose", () => {
     e.result = withFindings([{ rule: "env-dump", severity: "block", file: "server.ts", line: 4, excerpt: "JSON.stringify(process.env)" }]);
     const res = await propose(deps(), { path: e.plugin("demo", { "extra.ts": "1" }), cwd: undefined, threadId: "T1" });
     expect(res.exitCode).toBe(3);
-    expect(res.stdout).toContain("заблокировано проверками: env-dump server.ts:4");
+    expect(res.stdout).toContain("версия остановлена проверками (review #");
+    expect(res.stdout).not.toMatch(/env-dump|server\.ts/);
     expect(installs).toEqual([]);
     expect(e.store.listQueue()[0]).toMatchObject({ status: "held", reason: expect.stringContaining("env-dump") });
     expect(e.gate.openWindows()).toHaveLength(1);

@@ -143,7 +143,7 @@ export class WatchHarness {
       threads: { ancestors: async () => [], descendants: async () => [] },
       thirdPartyRunning: async () => [],
       externalTotpFile: null,
-      snapshotsRoot: "/nonexistent",
+      snapshotsRoot: "/nonexistent", unsafeDirs: async () => [],
       runChecks: async () => NETWORKED,
     });
     this.watch = new Watchdog({
