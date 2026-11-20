@@ -71,6 +71,8 @@ export interface Overview {
   journal: JournalView;
   /** Stage 5: threads known to have read untrusted content (closes trust windows of their tree). */
   tainted: Array<{ threadId: string; kinds: string[]; first: number; last: number }>;
+  /** Repositories whose use does not taint a thread. */
+  trustedRepos: string[];
 }
 export interface JournalView {
   ok: boolean;
@@ -210,5 +212,6 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
     ai,
     journal: journalView(d),
     tainted: d.taintedThreads?.() ?? [],
+    trustedRepos: d.store.trustedRepos(),
   };
 }

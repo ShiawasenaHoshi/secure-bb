@@ -10,6 +10,7 @@ const id = s.integer({ min: 1 });
 export const rpcContract = defineRpcContract({
   overview: { input: s.nullValue(), output: s.json<Overview>() },
   "journal.verify": { input: s.nullValue(), output: s.json<JournalReport>() },
+  "trusted.set": { input: s.object({ add: s.optional(s.string({ min: 1, max: 140 })), remove: s.optional(s.string({ min: 1, max: 140 })), code }), output: s.json<{ ok: true; repos: string[] }>() },
   "page.ping": { input: s.nullValue(), output: s.json<{ ok: true }>() },
   "totp.begin": {
     input: s.nullValue(),

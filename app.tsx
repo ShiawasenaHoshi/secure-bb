@@ -718,6 +718,43 @@ function PolicyCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof
   );
 }
 
+function TrustedRepos({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void }) {
+  const [pattern, setPattern] = useState("");
+  const [code, setCode] = useState("");
+  const act = useCodeAction(refetch);
+  const registered = ov.totp.state === "locked" || ov.totp.state === "external";
+  const run = (change: { add: string } | { remove: string }) =>
+    void act.run(async () => {
+      const r = await rpc.call("trusted.set", { ...change, code });
+      setCode("");
+      setPattern("");
+      return r;
+    });
+  return (
+    <div className={card}>
+      <p>
+        Свои репозитории (github.com): <span className="font-mono">owner/name</span> или <span className="font-mono">owner/*</span>. <span className="font-mono">git clone/fetch/pull/ls-remote</span> по их адресу и вызовы <span className="font-mono">gh</span> с <span className="font-mono">--repo</span> или адресом такого репозитория не загрязняют тред. <span className="font-mono">gh</span> без явного репозитория загрязняет. Список пуст по умолчанию; менять — только с кодом. Изменение действует на события, прочитанные после него.
+      </p>
+      {ov.trustedRepos.length === 0 ? <p className={`mt-2 ${muted}`}>Список пуст: любой clone/fetch по адресу загрязняет.</p> : (
+        <ul className="mt-2 space-y-1 font-mono text-xs">
+          {ov.trustedRepos.map((r) => (
+            <li key={r} className="flex items-center gap-2">
+              {r}
+              <button className={btn} disabled={act.busy || code.length !== 6 || !registered} onClick={() => run({ remove: r })}>Убрать</button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <input className="rounded border border-border bg-transparent px-2 py-1 font-mono text-xs" placeholder="owner/name или owner/*" value={pattern} onChange={(e) => setPattern(e.target.value)} />
+        <CodeField value={code} onChange={setCode} />
+        <button className={btnPrimary} disabled={act.busy || code.length !== 6 || pattern.trim() === "" || !registered} onClick={() => run({ add: pattern })}>Добавить</button>
+      </div>
+      <Msg error={act.error} />
+    </div>
+  );
+}
+
 function TaintCard({ ov }: { ov: Overview }) {
   return (
     <div className={card}>
@@ -748,6 +785,7 @@ function logExtra(l: Overview["log"][number]): string {
   const d = (l.detail ?? {}) as Record<string, unknown>;
   if (l.kind === "window.taint" || l.kind === "watch.window.taint")
     return ` · окно закрыто: загрязнение (${((d.kinds as string[] | undefined) ?? []).map((k) => TAINT_LABEL[k as TaintKind] ?? k).join(", ")}); ${((d.lines as string[] | undefined) ?? []).join("; ")}`;
+  if (l.kind === "trusted.add" || l.kind === "trusted.remove") return ` · ${(d.pattern as string | undefined) ?? ""}`;
   if (l.kind === "journal.alarm") return ` · цепочка нарушена: ${((d.problems as Array<{ kind: string; id: number | null }> | undefined) ?? []).map((p) => `${p.kind}${p.id ? ` #${p.id}` : ""}`).join(", ")}`;
   return "";
 }
@@ -976,6 +1014,7 @@ function GatePage() {
         <Section title="Гейт плагинов — ИИ-скан"><AiCard ov={ov} rpc={rpc} refetch={refetch} /></Section>
         <Section title={`Сторож конфигурации${ov.watch.drifts.some((d) => d.status === "open" || d.status === "rollback-failed") ? " (!)" : ""}`}><WatchSection ov={ov} rpc={rpc} refetch={refetch} /></Section>
         <Section title={`Загрязнение тредов${ov.tainted.length > 0 ? ` (${ov.tainted.length})` : ""}`}><TaintCard ov={ov} /></Section>
+        <Section title={`Доверенные репозитории (${ov.trustedRepos.length})`}><TrustedRepos ov={ov} rpc={rpc} refetch={refetch} /></Section>
         <Section title={`Журнал${ov.journal.ok ? "" : " (!)"}`}><LogCard ov={ov} rpc={rpc} refetch={refetch} /></Section>
       </div>
     </div>

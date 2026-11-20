@@ -184,6 +184,8 @@ export const MIGRATIONS: string[] = [
      thread_id TEXT PRIMARY KEY,
      last_seq INTEGER NOT NULL,
      scanned_at INTEGER NOT NULL)`,
+  // Stage 5: repositories whose use does not taint a thread (`owner/name`, `owner/*`, github.com). Empty by default; changed only with a code.
+  `CREATE TABLE IF NOT EXISTS trusted_repos (pattern TEXT PRIMARY KEY, added_at INTEGER NOT NULL)`,
 ];
 
 export interface Policy {
@@ -949,6 +951,17 @@ export class Store implements RegistryCache {
       contentHash: (r.content_hash as string | null) ?? null,
       detail: r.detail ? JSON.parse(r.detail as string) : null,
     }));
+  }
+
+  // ---- trusted repositories (stage 5) -------------------------------------------
+  trustedRepos(): string[] {
+    return (this.db.prepare(`SELECT pattern FROM trusted_repos ORDER BY pattern`).all() as Array<{ pattern: string }>).map((r) => r.pattern);
+  }
+  addTrustedRepo(pattern: string): boolean {
+    return this.db.prepare(`INSERT OR IGNORE INTO trusted_repos (pattern, added_at) VALUES (?, ?)`).run(pattern, this.now()).changes > 0;
+  }
+  removeTrustedRepo(pattern: string): boolean {
+    return this.db.prepare(`DELETE FROM trusted_repos WHERE pattern = ?`).run(pattern).changes > 0;
   }
 
   // ---- taint (stage 5): threads that read untrusted content ---------------------

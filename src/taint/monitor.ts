@@ -37,6 +37,8 @@ export interface TaintDeps {
   source: TaintSource;
   tree: ThreadTree;
   now: () => number;
+  /** Trusted repository patterns, read at every scan (a change applies to events read afterwards). */
+  trustedRepos?: () => readonly string[];
 }
 
 export class TaintMonitor {
@@ -61,7 +63,7 @@ export class TaintMonitor {
       const rows = await source.events(threadId, cursor, PAGE);
       for (const ev of rows) {
         if (cursor === null || ev.seq > cursor) cursor = ev.seq;
-        const hit = classifyEvent(ev);
+        const hit = classifyEvent(ev, this.d.trustedRepos?.() ?? []);
         if (hit && store.addTaintHit({ threadId, seq: ev.seq, kind: hit.kind, at: ev.createdAt, note: hit.note })) fresh++;
       }
       if (cursor !== null) store.setTaintCursor(threadId, cursor);

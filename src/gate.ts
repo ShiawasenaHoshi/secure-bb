@@ -9,6 +9,7 @@ import { describeIssues, serverIds, writableByOthers, type PermIssue } from "./p
 import { validateSecondModel } from "./scan/commands.js";
 import type { TaintAssessment } from "./taint/monitor.js";
 import type { AiSettings } from "./scan/types.js";
+import { normalizePattern } from "./taint/repos.js";
 import { T } from "./text.js";
 import { generateSecret, otpauthUri, verifyTotp, stepAt } from "./totp.js";
 import type { ApprovalRow, Policy, ProposalRow, QueueRow, Store, WindowRow } from "./store.js";
@@ -755,6 +756,19 @@ export class Gate {
     this.store.setPolicy(next);
     this.store.log("policy", null, null, { from: cur, to: next, touched: widens });
     return next;
+  }
+
+  // ---- trusted repositories (stage 5) -----------------------------------------------
+  /** Adds or removes one pattern (`owner/name`, `owner/*`). Both directions need a code: a wider list means less pollution is noticed, a narrower one changes what windows survive. */
+  setTrustedRepo(change: { add?: string; remove?: string }, code: string): string[] {
+    if ((change.add === undefined) === (change.remove === undefined)) throw new GateError("invalid", "give exactly one of add / remove");
+    const raw = (change.add ?? change.remove)!;
+    const pattern = normalizePattern(raw);
+    if (pattern === null) throw new GateError("invalid", "a trusted repository is `owner/name` or `owner/*` (github.com)");
+    this.touch("trusted.repos", code);
+    const changed = change.add !== undefined ? this.store.addTrustedRepo(pattern) : this.store.removeTrustedRepo(pattern);
+    this.store.log(change.add !== undefined ? "trusted.add" : "trusted.remove", null, null, { pattern, changed });
+    return this.store.trustedRepos();
   }
 
   // ---- AI scan settings (stage 3, spec §8) -------------------------------------

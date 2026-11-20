@@ -103,7 +103,7 @@ export default async function plugin(bb: BbPluginApi) {
     loopbackBaseUrl: () => bb.server.loopbackBaseUrl,
     dataDir: () => bb.server.experimental_dataDir,
   });
-  const taint = new TaintMonitor({ store, source: bbTaintSource(bb.sdk, (projectId) => watchSource.envSetup(projectId)), tree: threads, now });
+  const taint = new TaintMonitor({ store, source: bbTaintSource(bb.sdk, (projectId) => watchSource.envSetup(projectId)), tree: threads, now, trustedRepos: () => store.trustedRepos() });
 
   // Registry lookups for dependencies (stage 2.3) are made here, by the server process; answers are cached in our database.
   const verifyDeps = (result: Parameters<typeof verifyDependencies>[0]) => verifyDependencies(result, { cache: store, fetch: globalThis.fetch as unknown as FetchLike, now });
@@ -246,6 +246,11 @@ export default async function plugin(bb: BbPluginApi) {
       changed();
       return r;
     },
+    "trusted.set": wrap(({ code, ...change }) => {
+      const repos = gate.setTrustedRepo(change, code);
+      changed();
+      return { ok: true as const, repos };
+    }),
     "page.ping": () => {
       lastPagePing = now();
       return { ok: true as const };
@@ -388,6 +393,7 @@ export default async function plugin(bb: BbPluginApi) {
               `gate before load: ${hookRegistered ? "yes" : "no (after the fact)"}`,
               `trust window for this thread: ${open.length > 0 ? `open (${open.map((w) => `${w.pluginId}, ${Math.ceil((Math.min(w.expiresAt, w.hardExpiresAt) - now()) / 60_000)} min`).join("; ")})` : "closed"}`,
               agentLine(journal()),
+              `trusted repositories: ${store.trustedRepos().length}`,
             ];
             return { exitCode: 0, stdout: lines.join("\n") };
           },

@@ -3,6 +3,8 @@
 // Input is a thread event row from bb's events API (`threads.events.list`): items the agent
 // started or finished. Only what those items show can be seen; see `NOT_OBSERVED` for what cannot.
 
+import { ghTrusted, gitAddressesTrusted, segments } from "./repos.js";
+
 export type TaintKind = "web" | "repo" | "mcp" | "skill" | "env-setup";
 
 export const TAINT_LABEL: Record<TaintKind, string> = {
@@ -41,7 +43,7 @@ export const NOT_OBSERVED: readonly string[] = [
 
 const URL_RE = /\b(?:https?|ssh|git|ftp):\/\/\S+|\bgit@[\w.-]+:\S+/i;
 const GIT_REMOTE_VERBS = /\bgit\b(?:\s+-[-\w]+(?:[= ]\S+)?)*\s+(clone|fetch|pull|ls-remote|submodule\s+add|remote\s+add|remote\s+set-url)\b/i;
-const GH_REPO = /\bgh\s+(?:repo\s+(?:clone|fork)|pr\s+checkout|pr\s+diff|issue\s+view|release\s+download)\b/i;
+const GH_REPO = /\bgh\s+(?:repo\s+(?:clone|fork)|pr\s+checkout|pr\s+diff|issue\s+view|release\s+download|api)\b/i;
 const SHELL_WEB = /\b(curl|wget|http|https|xh|aria2c)\b(?=[^|;&]*\b(?:https?:\/\/|ftp:\/\/))/i;
 const SKILL_INSTALL = /\bbb\s+skills?\s+install\b|\bnpx\s+(?:-y\s+)?skills(?:@\S+)?\s+add\b|\bskills\.sh\b/i;
 const SKILL_DIR = /(?:^|[\s/"'=])\.(?:claude|agents|bb)\/skills\b/;
@@ -59,7 +61,7 @@ function hostOf(url: string): string {
 }
 
 /** Classifies the item inside one event. Null: nothing untrusted was read. */
-export function classifyItem(item: Record<string, unknown>): Hit | null {
+export function classifyItem(item: Record<string, unknown>, trustedRepos: readonly string[] = []): Hit | null {
   switch (item.type) {
     case "webFetch":
       return { kind: "web", note: `WebFetch ${hostOf(str(item.url))}` };
@@ -85,9 +87,12 @@ export function classifyItem(item: Record<string, unknown>): Hit | null {
       if (cmd === "") return null;
       if (SKILL_INSTALL.test(cmd)) return { kind: "skill", note: "установка скилла" };
       if (SKILL_DIR.test(cmd) && WRITE_VERB.test(cmd)) return { kind: "skill", note: "запись в каталог скиллов" };
-      if (GH_REPO.test(cmd)) return { kind: "repo", note: "gh" };
-      const git = GIT_REMOTE_VERBS.exec(cmd);
-      if (git && URL_RE.test(cmd)) return { kind: "repo", note: `git ${git[1]!.toLowerCase()}` };
+      // Repositories: per simple command, so `git clone <trusted> && git clone <foreign>` still taints.
+      for (const seg of segments(cmd)) {
+        if (GH_REPO.test(seg) && !ghTrusted(seg, trustedRepos)) return { kind: "repo", note: "gh" };
+        const git = GIT_REMOTE_VERBS.exec(seg);
+        if (git && URL_RE.test(seg) && !gitAddressesTrusted(seg, trustedRepos)) return { kind: "repo", note: `git ${git[1]!.toLowerCase()}` };
+      }
       if (SHELL_WEB.test(cmd)) return { kind: "web", note: "загрузка из shell" };
       return null;
     }
@@ -96,8 +101,8 @@ export function classifyItem(item: Record<string, unknown>): Hit | null {
   }
 }
 
-export function classifyEvent(ev: EventLike): Hit | null {
+export function classifyEvent(ev: EventLike, trustedRepos: readonly string[] = []): Hit | null {
   if (ev.type !== "item/started" && ev.type !== "item/completed") return null;
   const item = record(record(ev.data)?.item);
-  return item ? classifyItem(item) : null;
+  return item ? classifyItem(item, trustedRepos) : null;
 }
