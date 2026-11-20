@@ -1,4 +1,5 @@
 // Config watchdog (spec §7): shared types. Everything here is plain data.
+import type { SkillRef } from "../skills/types.js";
 
 export type Category =
   | "instructions"
@@ -57,6 +58,8 @@ export interface Observation {
   blind: Unobserved[];
   /** Instruction text, kept only to restore it (held in the plugin's own database). */
   instructionsText: string | null;
+  /** Stage 6: every skill bb listed (one per skill), for the skills guard. */
+  skillRefs?: SkillRef[];
 }
 
 export type DriftKind = "added" | "removed" | "changed";

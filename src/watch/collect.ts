@@ -5,6 +5,7 @@
 import { createHash } from "node:crypto";
 import { SENSITIVE_BUILTINS } from "../detect.js";
 import type { InstalledPluginLite } from "../probe.js";
+import type { SkillRef } from "../skills/types.js";
 import type { Item, Observation, Unobserved } from "./model.js";
 
 export interface SkillLite {
@@ -13,6 +14,8 @@ export interface SkillLite {
   scope: string;
   pluginId: string | null;
   manageable: boolean;
+  /** Where bb installed the skill from (`github.com/owner/repo/skill`), if it did. */
+  registrySkillId?: string | null;
 }
 
 /** Everything the watchdog reads from bb. Implemented over `bb.sdk` in server.ts; faked in tests. */
@@ -76,6 +79,7 @@ export async function collect(src: WatchSource, now: () => number): Promise<Obse
   };
 
   let projects: Array<{ id: string; name: string }> | null = null;
+  const skillRefs = new Map<string, SkillRef>();
 
   await Promise.all([
     step("builtins", async () => {
@@ -195,12 +199,15 @@ export async function collect(src: WatchSource, now: () => number): Promise<Obse
             // Plugin skills are the gate's business (their code is pinned there): membership only.
             const isPlugin = s.scope === "plugin";
             const projectScoped = s.scope === "bb-project" || s.scope === "shared-project" || s.scope === "provider-project";
+            const key = projectScoped ? `skill:${p.id}:${s.scope}:${s.name}` : `skill:${s.scope}:${s.pluginId ?? ""}:${s.name}`;
+            if (!skillRefs.has(key)) skillRefs.set(key, { key, id: s.id, projectId: p.id, name: s.name, scope: s.scope, pluginId: s.pluginId, manageable: s.manageable, registrySkillId: s.registrySkillId ?? null });
+            // The guard sees the skill even when it cannot be read here (then it marks it unchecked).
             const value = isPlugin ? `плагин ${s.pluginId ?? "?"}` : short(sha(await src.skillRevision(p.id, s.id)));
             const label = `скилл ${s.name} (${s.scope})`;
             if (projectScoped) {
-              items.push({ key: `skill:${p.id}:${s.scope}:${s.name}`, category: "skills", source: `skills:${p.id}`, label: `${label}, проект ${p.name}`, value });
-            } else if (!globalSkills.has(`skill:${s.scope}:${s.pluginId ?? ""}:${s.name}`)) {
-              globalSkills.set(`skill:${s.scope}:${s.pluginId ?? ""}:${s.name}`, { key: `skill:${s.scope}:${s.pluginId ?? ""}:${s.name}`, category: "skills", source: "skills:global", label, value });
+              items.push({ key, category: "skills", source: `skills:${p.id}`, label: `${label}, проект ${p.name}`, value });
+            } else if (!globalSkills.has(key)) {
+              globalSkills.set(key, { key, category: "skills", source: "skills:global", label, value });
             }
           }
           globalSkillsRead = true;
@@ -214,5 +221,5 @@ export async function collect(src: WatchSource, now: () => number): Promise<Obse
 
   // Deterministic order (tests, stable page).
   items.sort((a, b) => a.key.localeCompare(b.key));
-  return { at: now(), items, failed, notApplicable, blind: BLIND, instructionsText };
+  return { at: now(), items, failed, notApplicable, blind: BLIND, instructionsText, skillRefs: [...skillRefs.values()] };
 }

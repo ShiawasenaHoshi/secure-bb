@@ -8,6 +8,7 @@ import { isThirdParty, runningThirdParty } from "./probe.js";
 import type { Availability, Scanner } from "./scan/scanner.js";
 import { scanView, type ScanView } from "./scan/view.js";
 import type { AiSettings } from "./scan/types.js";
+import type { SkillGuard, SkillsView } from "./skills/guard.js";
 import type { Watchdog, WatchView } from "./watch/watchdog.js";
 import type { ApprovalRow, LogRow, Policy, QueueRow, Store, WindowRow } from "./store.js";
 
@@ -65,6 +66,8 @@ export interface Overview {
   queueChecks: Record<number, CheckResult>;
   /** Stage 2a: config watchdog (approved snapshot, differences, configuration windows). */
   watch: WatchView;
+  /** Stage 6: skills (pins, queue, removals). */
+  skills: SkillsView;
   /** Stage 3: the optional AI scan. */
   ai: AiView;
   /** Stage 5: integrity of the decision journal; anything but ok is an alarm. */
@@ -74,6 +77,8 @@ export interface Overview {
   /** Repositories whose use does not taint a thread. */
   trustedRepos: string[];
 }
+const EMPTY_SKILLS: SkillsView = { baselineAt: null, lastScanAt: null, pinned: { total: 0, builtin: 0, baseline: 0, approved: 0 }, open: [], recent: [], trusted: [], blind: [], unchecked: [] };
+
 export interface JournalView {
   ok: boolean;
   entries: number;
@@ -88,6 +93,8 @@ export interface OverviewDeps {
   /** Absent in tests that do not touch the AI scan. */
   scanner?: Scanner;
   watch: Watchdog;
+  /** Absent in tests that do not touch skills. */
+  skills?: SkillGuard;
   store: Store;
   gate: Gate;
   now: () => number;
@@ -209,6 +216,7 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
     log: d.store.listLog(40),
     checks,
     watch: d.watch.view(),
+    skills: d.skills?.view() ?? EMPTY_SKILLS,
     ai,
     journal: journalView(d),
     tainted: d.taintedThreads?.() ?? [],

@@ -8,6 +8,7 @@
 //     undo exists (disable a built-in plugin, delete a new env variable, restore the
 //     instructions), undone.
 // The snapshot itself is only ever changed by a touch (TOTP) or by a window.
+import type { SkillGuard } from "../skills/guard.js";
 import type { TaintAssessment } from "../taint/monitor.js";
 import { collect, type WatchSource } from "./collect.js";
 import { diffSnapshot, type Difference } from "./diff.js";
@@ -38,6 +39,8 @@ export interface WatchDeps {
   actions: WatchActions;
   /** A touch: throws unless `code` is a fresh valid TOTP code. Provided by the gate. */
   touch: (purpose: string, code: string) => void;
+  /** Stage 6: the skills guard. Absent: skills are only compared by their hash, as before. */
+  skills?: SkillGuard;
   log?: (message: string) => void;
 }
 
@@ -232,6 +235,12 @@ export class Watchdog {
   }
 
   // ---- the scan ----------------------------------------------------------
+  /** One reading of bb. Skills are read afresh (the reader's memo is per reading). */
+  private observe(): Promise<Observation> {
+    this.d.skills?.beginScan();
+    return collect(this.d.source, () => this.now);
+  }
+
   /** Coalesces overlapping triggers (events come in bursts). */
   async scan(): Promise<ScanResult> {
     if (this.running) {
@@ -273,9 +282,25 @@ export class Watchdog {
   private async scanOnce(): Promise<ScanResult> {
     const out: ScanResult = { found: 0, accepted: 0, rolledBack: 0, rollbackFailed: 0 };
     this.sweep();
-    const obs = await collect(this.d.source, () => this.now);
+    const obs = await this.observe();
     this.last = obs;
     this.store.setMeta(META_LAST_SCAN, String(obs.at));
+
+    // Skills (stage 6): checked and decided by the guard, whether or not a configuration snapshot was approved.
+    if (this.d.skills && obs.skillRefs) {
+      const complete = !obs.failed.some((f) => f.source === "skills" || f.source.startsWith("skills:") || f.source === "projects");
+      const win = this.openWindows().find((w) => w.scopes.includes("skills")) ?? null;
+      try {
+        const r = await this.d.skills.evaluate({ refs: obs.skillRefs, complete, skillsWindow: win?.id ?? null });
+        out.found += r.raised;
+        for (const id of new Set(r.viaWindow)) {
+          const w = this.store.getCfgWindow(id);
+          if (w) this.slide(w);
+        }
+      } catch (err) {
+        this.d.log?.(`skills guard failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
     if (this.baselineAt() === null) return out; // nothing approved yet: show, do not judge
 
     const diffs = diffSnapshot(this.store.listSnapshot(), obs);
@@ -300,7 +325,9 @@ export class Watchdog {
         out.found++;
       }
 
-      const w = this.coveringWindow(diff, drift);
+      // A skill is taken into the snapshot by a window only if the guard accepted its content (checks clean).
+      const skillOk = diff.category !== "skills" || !this.d.skills || diff.kind === "removed" || this.d.skills.isAccepted(diff.key);
+      const w = skillOk ? this.coveringWindow(diff, drift) : null;
       if (w) {
         this.applyToSnapshot(diff.key, obs, "window");
         this.store.resolveDrift(drift.id, "accepted-window", `окно #${w.id}`);
@@ -363,7 +390,7 @@ export class Watchdog {
   /** The first snapshot, or a full re-approval: everything observed right now becomes the approved state. */
   async acceptAll(code: string): Promise<{ items: number }> {
     this.d.touch("watch.baseline", code);
-    const obs = await collect(this.d.source, () => this.now);
+    const obs = await this.observe();
     this.last = obs;
     const isFailed = (source: string) => obs.failed.some((f) => source === f.source || source.startsWith(`${f.source}:`));
     const keys = new Set(obs.items.map((i) => i.key));
@@ -379,7 +406,7 @@ export class Watchdog {
   async acceptDrift(driftId: number, code: string): Promise<void> {
     const drift = this.requireOpen(driftId);
     this.d.touch("watch.accept", code);
-    const obs = await collect(this.d.source, () => this.now);
+    const obs = await this.observe();
     this.last = obs;
     this.applyToSnapshot(drift.key, obs, "touch");
     this.store.resolveDrift(drift.id, "accepted-touch", "принято человеком");
@@ -391,7 +418,7 @@ export class Watchdog {
     const drift = this.requireOpen(driftId);
     if (!drift.rollbackable) throw new WatchError("invalid", "no safe rollback exists for this change; accept it or fix it by hand");
     this.d.touch("watch.rollback", code);
-    const obs = await collect(this.d.source, () => this.now);
+    const obs = await this.observe();
     this.last = obs;
     const diff = diffSnapshot(this.store.listSnapshot(), obs).find((x) => x.key === drift.key);
     const rb = diff?.item?.rollback;
