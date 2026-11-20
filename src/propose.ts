@@ -3,6 +3,7 @@
 // installed from there, so what was reviewed is exactly what gets loaded.
 import { mkdir, realpath, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { BLOCKED_REASON, bySeverity, summarize } from "./decision.js";
 import type { Gate } from "./gate.js";
 import type { Store } from "./store.js";
 import { T } from "./text.js";
@@ -97,10 +98,17 @@ export async function propose(
   } else {
     proposal = d.store.addProposal({ pluginId: info.id, localHash, snapshotDir: target, threadId: args.threadId, windowId: covering?.id ?? null });
   }
-  const allowed = covering !== null || proposal.touchApprovedAt !== null || proposal.loadedAt !== null;
+  const approvedBefore = proposal.touchApprovedAt !== null || proposal.loadedAt !== null;
+  const allowed = covering !== null || approvedBefore;
   d.store.log("propose", info.id, null, { version: info.version, thread: args.threadId, allowed, snapshot: localHash });
 
-  if (!allowed) {
+  // Checks run now, on the snapshot, so the human sees them on the proposal's card
+  // (they are keyed by the snapshot's own hash and linked to the core's hash at load).
+  const checks = await d.gate.checkSnapshot(info.id, localHash, target);
+  const blocks = checks && !approvedBefore ? bySeverity(checks, "block") : [];
+
+  if (blocks.length > 0) {
+    const why = `${BLOCKED_REASON}: ${summarize(blocks)}`;
     const q = d.store.upsertQueue({
       kind: "proposal",
       contentHash: null,
@@ -114,7 +122,30 @@ export async function propose(
       trigger: "propose",
       threadId: args.threadId,
       proposalId: proposal.id,
-      reason: "window closed",
+      reason: why,
+    });
+    d.changed();
+    return { exitCode: 3, stdout: `${info.id}: ${why} (review #${q.id}). Исправь код и повтори propose; снять блок может только человек.` };
+  }
+
+  // Outside a window a clean plugin of the safe class (spec §5.2) needs no touch: the hook will let it in.
+  const safeClass = checks !== null && checks.capabilities.length === 0 && bySeverity(checks, "review").length === 0;
+
+  if (!allowed && !safeClass) {
+    const q = d.store.upsertQueue({
+      kind: "proposal",
+      contentHash: null,
+      pluginId: info.id,
+      version: info.version,
+      source: `path:${target}`,
+      sourceKind: "path",
+      rootDir: target,
+      gitCommit: null,
+      npmIntegrity: null,
+      trigger: "propose",
+      threadId: args.threadId,
+      proposalId: proposal.id,
+      reason: checks === null ? "window closed; проверки не завершились" : "window closed",
     });
     d.changed();
     return { exitCode: 3, stdout: `${T.proposeClosed(info.id)} (review #${q.id})` };

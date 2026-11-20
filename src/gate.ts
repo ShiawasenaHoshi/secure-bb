@@ -4,6 +4,7 @@
 import { readFileSync } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
 import { runChecks as defaultRunChecks, type CheckResult } from "./checks/index.js";
+import { BLOCKED_REASON, bySeverity, capabilityTokens, localCheckKey, newTokens, summarize } from "./decision.js";
 import { generateSecret, otpauthUri, verifyTotp, stepAt } from "./totp.js";
 import type { ApprovalRow, Policy, ProposalRow, QueueRow, Store, WindowRow } from "./store.js";
 import { hashTree, isInsideSnapshots } from "./tree.js";
@@ -62,10 +63,12 @@ export interface GateDeps {
   externalTotpFile: string | null;
   /** Directory snapshots live in (no trailing slash needed); only plugins inside it can use windows or touch-approved proposals. */
   snapshotsRoot: string;
-  /** Deterministic plugin checks (stage 2.1); injectable for tests. Results are stored and shown, never acted on yet. */
+  /** Deterministic plugin checks; injectable for tests. */
   runChecks?: (dir: string) => Promise<CheckResult>;
-  /** Called after a check result was stored (the page refreshes). */
+  /** Called after a check result was stored (the page refreshes, held versions are rechecked). */
   onChecked?: () => void;
+  /** How long the hook waits for the checks before holding (the core gives the hook 10 s). Default 8000. */
+  checkWaitMs?: number;
 }
 
 export type TotpState = "none" | "pending" | "locked" | "external" | "external-broken";
@@ -189,27 +192,80 @@ export class Gate {
     this.store.log("totp.registered", null, null);
   }
 
-  // ---- checks (stage 2.1: informational) ------------------------------------
-  private readonly checking = new Map<string, Promise<void>>();
+  // ---- checks -------------------------------------------------------------
+  private readonly checking = new Map<string, Promise<CheckResult | null>>();
+
+  /**
+   * The check result stored under `key`, or a fresh run on `dir` (one retry if it
+   * throws), stored under `key`. Concurrent calls share one run. Null = the checks
+   * failed twice; the caller must hold (fail closed).
+   */
+  private startCheck(key: string, pluginId: string, dir: string, logHash: string | null): Promise<CheckResult | null> {
+    const stored = this.store.getCheck(key);
+    if (stored) return Promise.resolve(stored.result);
+    const running = this.checking.get(key);
+    if (running) return running;
+    const run = this.d.runChecks ?? defaultRunChecks;
+    const job = (async (): Promise<CheckResult | null> => {
+      try {
+        let result: CheckResult;
+        try {
+          result = await run(dir);
+        } catch {
+          result = await run(dir); // one retry
+        }
+        this.store.putCheck(key, pluginId, result);
+        this.store.log("check", pluginId, logHash, {
+          blocks: bySeverity(result, "block").length,
+          reviews: bySeverity(result, "review").length,
+          infos: bySeverity(result, "info").length,
+          capabilities: result.capabilities.map((c) => c.kind),
+          key,
+        });
+        this.d.onChecked?.();
+        return result;
+      } catch (err) {
+        this.store.log("check.error", pluginId, logHash, { message: err instanceof Error ? err.message : String(err), key });
+        return null;
+      } finally {
+        this.checking.delete(key);
+      }
+    })();
+    this.checking.set(key, job);
+    return job;
+  }
+
+  /** Waits for a check, but never longer than the hook may take. Null on failure or timeout (the run goes on and is stored). */
+  private async awaitCheck(job: Promise<CheckResult | null>): Promise<CheckResult | null> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), this.d.checkWaitMs ?? 8000);
+    });
+    try {
+      return await Promise.race([job, timeout]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   /** Runs the checks for a content hash in the background, once. Never throws, never delays the hook. */
   scheduleCheck(ctx: Pick<HookCtx, "pluginId" | "contentHash" | "rootDir">): void {
-    if (this.store.getCheck(ctx.contentHash) || this.checking.has(ctx.contentHash)) return;
-    const run = this.d.runChecks ?? defaultRunChecks;
-    const job = (async () => {
-      try {
-        const result = await run(ctx.rootDir);
-        this.store.putCheck(ctx.contentHash, ctx.pluginId, result);
-        const count = (s: string) => result.findings.filter((f) => f.severity === s).length;
-        this.store.log("check", ctx.pluginId, ctx.contentHash, { block: count("block"), review: count("review"), info: count("info"), capabilities: result.capabilities.map((c) => c.kind) });
-        this.d.onChecked?.();
-      } catch (err) {
-        this.store.log("check.error", ctx.pluginId, ctx.contentHash, { message: err instanceof Error ? err.message : String(err) });
-      } finally {
-        this.checking.delete(ctx.contentHash);
-      }
-    })();
-    this.checking.set(ctx.contentHash, job);
+    void this.startCheck(ctx.contentHash, ctx.pluginId, ctx.rootDir, ctx.contentHash);
+  }
+
+  /** `propose` runs the checks on the snapshot right away, keyed by the snapshot's own hash. */
+  checkSnapshot(pluginId: string, localHash: string, dir: string): Promise<CheckResult | null> {
+    return this.awaitCheck(this.startCheck(localCheckKey(localHash), pluginId, dir, null));
+  }
+
+  /** The stored result for a queue entry: by the core's hash, else by its proposal's snapshot hash. */
+  checkForQueue(q: QueueRow): CheckResult | null {
+    if (q.contentHash) {
+      const c = this.store.getCheck(q.contentHash);
+      if (c) return c.result;
+    }
+    const p = q.proposalId === null ? null : this.store.getProposal(q.proposalId);
+    return p ? (this.store.getCheck(localCheckKey(p.localHash))?.result ?? null) : null;
   }
 
   /** Resolves when no background check is running (tests, shutdown). */
@@ -248,9 +304,9 @@ export class Gate {
   }
 
   private async decideUnsafe(ctx: HookCtx): Promise<Decision> {
-    this.scheduleCheck(ctx);
     const approved = this.store.activeApproval(ctx.contentHash);
     if (approved) {
+      this.scheduleCheck(ctx);
       this.store.touchApproval(approved.id);
       this.store.supersedeTampered(ctx.pluginId, ctx.contentHash);
       return { action: "proceed" };
@@ -258,14 +314,14 @@ export class Gate {
 
     let proposal: ProposalRow | null = null;
     let reason: string | null = null;
+    let verifiedDir: string | null = null;
     if (await isInsideSnapshots(this.d.snapshotsRoot, ctx.rootDir)) {
       const real = await realpath(ctx.rootDir);
       proposal = this.store.proposalByDir(real);
       if (proposal && proposal.pluginId === ctx.pluginId) {
         reason = await this.verifySnapshot(proposal, real);
         if (reason === null) {
-          const w = proposal.windowId === null ? null : this.store.getWindow(proposal.windowId);
-          const windowOpen = w !== null && w.pluginId === ctx.pluginId && isOpen(w, this.now);
+          verifiedDir = real;
           if (proposal.loadedAt !== null) {
             // Already approved and loaded once: still pinned. (bb's own hash
             // changes after a build, so the same snapshot arrives under a new hash.)
@@ -273,19 +329,64 @@ export class Gate {
             return { action: "proceed" };
           }
           if (proposal.touchApprovedAt !== null) {
+            // A human approved this snapshot with a code (also lifting a block).
             this.recordApproval(ctx, "touch", null, proposal);
-            return { action: "proceed" };
-          }
-          if (windowOpen) {
-            this.recordApproval(ctx, "window", w!.id, proposal);
-            this.slide(w!);
             return { action: "proceed" };
           }
         }
       }
     }
 
-    const q = this.store.upsertQueue({
+    // After-the-fact scans only record: the plugin already ran, nothing here can stop it.
+    if (ctx.trigger === "afterfact") {
+      this.scheduleCheck(ctx);
+      return this.hold(ctx, proposal, reason);
+    }
+
+    // Everything below needs the checks (spec §5.3). A snapshot proposed through
+    // `propose` was checked then (by its own hash); link that result to the core's hash.
+    const key = proposal && verifiedDir ? localCheckKey(proposal.localHash) : ctx.contentHash;
+    const dir = verifiedDir ?? ctx.rootDir;
+    const result = await this.awaitCheck(this.startCheck(key, ctx.pluginId, dir, ctx.contentHash));
+    if (result === null) return this.hold(ctx, proposal, reason ?? "проверки не завершились");
+    if (key !== ctx.contentHash && !this.store.getCheck(ctx.contentHash)) this.store.putCheck(ctx.contentHash, ctx.pluginId, result);
+
+    const blocks = bySeverity(result, "block");
+    if (blocks.length > 0) {
+      const why = `${BLOCKED_REASON}: ${summarize(blocks)}`;
+      const q = this.queue(ctx, proposal, reason ?? why);
+      this.store.log("reject", ctx.pluginId, ctx.contentHash, { review: q.id, version: ctx.version, rules: blocks.map((f) => f.rule) });
+      return { action: "reject", message: `secure-bb: ${why} (review #${q.id}); снять блок может только человек кодом` };
+    }
+
+    if (verifiedDir && proposal && reason === null) {
+      const reviews = bySeverity(result, "review");
+      const w = proposal.windowId === null ? null : this.store.getWindow(proposal.windowId);
+      const windowOpen = w !== null && w.pluginId === ctx.pluginId && isOpen(w, this.now);
+      if (windowOpen) {
+        const fresh = newTokens(result, w.caps);
+        if (reviews.length === 0 && fresh.length === 0) {
+          this.recordApproval(ctx, "window", w.id, proposal);
+          this.slide(w);
+          return { action: "proceed" };
+        }
+        // Held for one code; the window stays open (spec §0, §6).
+        const why = fresh.length > 0 ? `новая возможность в окне: ${fresh.slice(0, 6).join(", ")}${fresh.length > 6 ? "…" : ""}` : `проверки требуют ревью: ${summarize(reviews)}`;
+        return this.hold(ctx, proposal, why);
+      }
+      if (reviews.length === 0 && result.capabilities.length === 0) {
+        // Safe class (§5.2), our own immutable snapshot, clean checks: no touch needed.
+        this.recordApproval(ctx, "auto", null, proposal);
+        return { action: "proceed" };
+      }
+      const why = result.capabilities.length > 0 ? `вне безопасного класса: ${result.capabilities.map((c) => c.kind).join(", ")}` : `проверки требуют ревью: ${summarize(reviews)}`;
+      return this.hold(ctx, proposal, why);
+    }
+    return this.hold(ctx, proposal, reason);
+  }
+
+  private queue(ctx: HookCtx, proposal: ProposalRow | null, reason: string | null): QueueRow {
+    return this.store.upsertQueue({
       kind: ctx.trigger === "afterfact" ? "afterfact" : proposal ? "proposal" : "hook",
       contentHash: ctx.contentHash,
       pluginId: ctx.pluginId,
@@ -300,6 +401,10 @@ export class Gate {
       proposalId: proposal?.id ?? null,
       reason,
     });
+  }
+
+  private hold(ctx: HookCtx, proposal: ProposalRow | null, reason: string | null): Decision {
+    const q = this.queue(ctx, proposal, reason);
     this.store.log("hold", ctx.pluginId, ctx.contentHash, { review: q.id, version: ctx.version, trigger: ctx.trigger, ...(reason ? { reason } : {}) });
     return { action: "wait", reason: `held by secure-bb: review #${q.id}` };
   }
@@ -313,7 +418,7 @@ export class Gate {
     this.store.setProposalBuilt(p.id, await hashTree(real, { includeDist: true }));
   }
 
-  private recordApproval(ctx: HookCtx, via: "touch" | "window" | "pin", windowId: number | null, proposal: ProposalRow | null): ApprovalRow {
+  private recordApproval(ctx: HookCtx, via: ApprovalRow["via"], windowId: number | null, proposal: ProposalRow | null): ApprovalRow {
     const a = this.store.addApproval({
       contentHash: ctx.contentHash,
       pluginId: ctx.pluginId,
@@ -331,7 +436,7 @@ export class Gate {
     this.store.supersedeTampered(ctx.pluginId, ctx.contentHash);
     this.store.resolveQueueByHash(ctx.contentHash);
     // A touch-approved proposal was already logged as "approved.touch" at approval time; its load is a separate event.
-    this.store.log(via === "window" ? "approved.window" : via === "pin" ? "approved.pin" : "approved.load", ctx.pluginId, ctx.contentHash, {
+    this.store.log(via === "window" ? "approved.window" : via === "pin" ? "approved.pin" : via === "auto" ? "approved.auto" : "approved.load", ctx.pluginId, ctx.contentHash, {
       version: ctx.version,
       windowId,
       localHash: proposal?.localHash ?? null,
@@ -344,9 +449,22 @@ export class Gate {
    * Approves a held version with a touch. Returns what the server must do next:
    * install the snapshot (a proposal not yet seen by core) or just recheck.
    */
-  approveQueue(queueId: number, code: string): { installDir: string | null; pluginId: string; enable: boolean } {
+  approveQueue(queueId: number, code: string, opts: { acknowledgeBlock?: boolean } = {}): { installDir: string | null; pluginId: string; enable: boolean } {
     const q = this.requireHeld(queueId);
+    const result = this.checkForQueue(q);
+    const blocked = (q.reason?.startsWith(BLOCKED_REASON) ?? false) || (result !== null && bySeverity(result, "block").length > 0);
+    // A block is lifted only knowingly: the page shows the findings and asks for explicit confirmation along with the code.
+    if (blocked && !opts.acknowledgeBlock)
+      throw new GateError("invalid", "this version was blocked by the checks; confirm that you accept the risk to approve it anyway", { blocked: true });
     this.touch(`approve:${q.pluginId}`, code);
+    if (blocked) this.store.log("block.lifted", q.pluginId, q.contentHash, { review: q.id, version: q.version, rules: result ? bySeverity(result, "block").map((f) => f.rule) : [] });
+    // A capability accepted with a code inside an open window becomes part of the window's set; the window stays open.
+    const proposal = q.proposalId === null ? null : this.store.getProposal(q.proposalId);
+    const w = proposal?.windowId == null ? null : this.store.getWindow(proposal.windowId);
+    if (w && w.pluginId === q.pluginId && isOpen(w, this.now) && result) {
+      this.store.setWindowCaps(w.id, [...new Set([...w.caps, ...capabilityTokens(result)])].sort());
+      this.store.log("window.caps", q.pluginId, q.contentHash, { windowId: w.id, added: newTokens(result, w.caps) });
+    }
     if (q.contentHash) {
       this.store.addApproval({
         contentHash: q.contentHash,
@@ -367,7 +485,8 @@ export class Gate {
     let installDir: string | null = null;
     if (q.proposalId !== null) {
       this.store.approveProposal(q.proposalId);
-      if (!q.contentHash) installDir = this.store.getProposal(q.proposalId)?.snapshotDir ?? null;
+      // Not yet seen by the core, or rejected by the hook (a block): install the snapshot again.
+      if (!q.contentHash || blocked) installDir = this.store.getProposal(q.proposalId)?.snapshotDir ?? null;
     }
     return { installDir, pluginId: q.pluginId, enable: q.kind === "afterfact" };
   }
@@ -423,12 +542,16 @@ export class Gate {
     const q = this.store.getQueue(queueId);
     if (!q) throw new GateError("not_found", `no review #${queueId}`);
     if (!q.threadId) throw new GateError("invalid", "this entry did not come from a thread, so a trust window cannot be bound to it; approve the version instead");
+    const found = this.checkForQueue(q);
+    if ((q.reason?.startsWith(BLOCKED_REASON) ?? false) || (found !== null && bySeverity(found, "block").length > 0))
+      throw new GateError("invalid", "this version was blocked by the checks; a window cannot be opened on it (approve the version knowingly, or fix the plugin)");
     this.touch(`window.open:${q.pluginId}`, code);
     this.sweep();
     for (const old of this.store.unclosedWindows()) {
       if (old.pluginId === q.pluginId) this.store.closeWindow(old.id, "reopened");
     }
     const policy = this.store.policy();
+    const opening = this.checkForQueue(q);
     const now = this.now;
     const hard = now + policy.capMin * 60_000;
     const w = this.store.insertWindow({
@@ -441,6 +564,8 @@ export class Gate {
       openedAt: now,
       expiresAt: Math.min(now + policy.windowMin * 60_000, hard),
       hardExpiresAt: hard,
+      // The version the human looked at when opening: what it can do is the window's baseline.
+      caps: opening ? capabilityTokens(opening) : [],
     });
     this.store.log("window.open", q.pluginId, null, { windowId: w.id, thread: w.threadId, scope: w.scope, mode: w.mode, sizeSec: w.sizeSec });
     return w;

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { beforeEach, describe, expect, it } from "vitest";
 import { Gate, GateError, type HookCtx, type ThreadTree } from "../src/gate.js";
+import { NETWORKED } from "./support/checks.js";
 import { MIGRATIONS, Store } from "../src/store.js";
 import { base32Decode, base32Encode, hotp, stepAt, verifyTotp } from "../src/totp.js";
 import { findEscapingSymlinks, hashTree, isInside, isInsideSnapshots } from "../src/tree.js";
@@ -38,6 +39,7 @@ class Harness {
       thirdPartyRunning: async () => this.running,
       externalTotpFile: this.externalFile,
       snapshotsRoot: this.snaps,
+      runChecks: async () => NETWORKED,
     });
   }
   /** Registers a TOTP secret (from the page) and returns a code generator. */
@@ -244,8 +246,9 @@ describe("trust windows", () => {
   });
 
   const openFor = (thread: string, scope?: "tree" | "thread") => {
+    h.store.putCheck("sha256:opening", "demo", NETWORKED); // what the human saw when opening the window
     const q = h.store.upsertQueue({
-      kind: "proposal", contentHash: null, pluginId: "demo", version: "1.0.0", source: "path:/x", sourceKind: "path",
+      kind: "proposal", contentHash: "sha256:opening", pluginId: "demo", version: "1.0.0", source: "path:/x", sourceKind: "path",
       rootDir: null, gitCommit: null, npmIntegrity: null, trigger: "propose", threadId: thread, proposalId: null, reason: null,
     });
     return h.gate.openWindow(q.id, code(), scope);
@@ -407,7 +410,8 @@ describe("a snapshot is only trusted if its bytes match what was proposed (revie
 
   it("holds a window-approved snapshot that was edited, or gained a file, after proposing", async () => {
     const w = (() => {
-      const q = h.store.upsertQueue({ kind: "proposal", contentHash: null, pluginId: "demo", version: "1", source: "x", sourceKind: "path", rootDir: null, gitCommit: null, npmIntegrity: null, trigger: "propose", threadId: "T1", proposalId: null, reason: null });
+      h.store.putCheck("sha256:opening", "demo", NETWORKED);
+      const q = h.store.upsertQueue({ kind: "proposal", contentHash: "sha256:opening", pluginId: "demo", version: "1", source: "x", sourceKind: "path", rootDir: null, gitCommit: null, npmIntegrity: null, trigger: "propose", threadId: "T1", proposalId: null, reason: null });
       return h.gate.openWindow(q.id, code());
     })();
     expect(w.pluginId).toBe("demo");
