@@ -1,8 +1,14 @@
 // secure-bb's own SQLite. Policy lives here (never in plugin settings: anyone
 // can change settings through the API without authentication).
 import type BetterSqlite3 from "better-sqlite3";
+import type { CheckResult } from "./checks/types.js";
 
 export type Db = BetterSqlite3.Database;
+
+export interface StoredCheck {
+  ts: number;
+  result: CheckResult;
+}
 
 /** Append-only: never edit or reorder shipped statements, only push new ones. */
 export const MIGRATIONS: string[] = [
@@ -91,6 +97,11 @@ export const MIGRATIONS: string[] = [
      first_seen INTEGER NOT NULL,
      baseline INTEGER NOT NULL DEFAULT 0,
      local_hash TEXT)`,
+  `CREATE TABLE IF NOT EXISTS check_results (
+     content_hash TEXT PRIMARY KEY,
+     plugin_id TEXT NOT NULL,
+     ts INTEGER NOT NULL,
+     result TEXT NOT NULL)`,
 ];
 
 export interface Policy {
@@ -396,6 +407,18 @@ export class Store {
   }
   revokeApproval(id: number): void {
     this.db.prepare(`UPDATE approvals SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`).run(this.now(), id);
+  }
+
+  // ---- check results (stage 2.1: shown only, nothing is held on them yet) ----
+  putCheck(contentHash: string, pluginId: string, result: CheckResult): void {
+    this.db
+      .prepare(`INSERT INTO check_results (content_hash, plugin_id, ts, result) VALUES (?, ?, ?, ?)
+                ON CONFLICT(content_hash) DO UPDATE SET plugin_id = excluded.plugin_id, ts = excluded.ts, result = excluded.result`)
+      .run(contentHash, pluginId, this.now(), JSON.stringify(result));
+  }
+  getCheck(contentHash: string): StoredCheck | null {
+    const r = this.db.prepare(`SELECT * FROM check_results WHERE content_hash = ?`).get(contentHash) as Raw | undefined;
+    return r ? { ts: r.ts as number, result: JSON.parse(r.result as string) as CheckResult } : null;
   }
 
   // ---- queue ------------------------------------------------------------

@@ -3,6 +3,7 @@
 // so it is testable without a server.
 import { readFileSync } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
+import { runChecks as defaultRunChecks, type CheckResult } from "./checks/index.js";
 import { generateSecret, otpauthUri, verifyTotp, stepAt } from "./totp.js";
 import type { ApprovalRow, Policy, ProposalRow, QueueRow, Store, WindowRow } from "./store.js";
 import { hashTree, isInsideSnapshots } from "./tree.js";
@@ -61,6 +62,10 @@ export interface GateDeps {
   externalTotpFile: string | null;
   /** Directory snapshots live in (no trailing slash needed); only plugins inside it can use windows or touch-approved proposals. */
   snapshotsRoot: string;
+  /** Deterministic plugin checks (stage 2.1); injectable for tests. Results are stored and shown, never acted on yet. */
+  runChecks?: (dir: string) => Promise<CheckResult>;
+  /** Called after a check result was stored (the page refreshes). */
+  onChecked?: () => void;
 }
 
 export type TotpState = "none" | "pending" | "locked" | "external" | "external-broken";
@@ -184,6 +189,34 @@ export class Gate {
     this.store.log("totp.registered", null, null);
   }
 
+  // ---- checks (stage 2.1: informational) ------------------------------------
+  private readonly checking = new Map<string, Promise<void>>();
+
+  /** Runs the checks for a content hash in the background, once. Never throws, never delays the hook. */
+  scheduleCheck(ctx: Pick<HookCtx, "pluginId" | "contentHash" | "rootDir">): void {
+    if (this.store.getCheck(ctx.contentHash) || this.checking.has(ctx.contentHash)) return;
+    const run = this.d.runChecks ?? defaultRunChecks;
+    const job = (async () => {
+      try {
+        const result = await run(ctx.rootDir);
+        this.store.putCheck(ctx.contentHash, ctx.pluginId, result);
+        const count = (s: string) => result.findings.filter((f) => f.severity === s).length;
+        this.store.log("check", ctx.pluginId, ctx.contentHash, { block: count("block"), review: count("review"), info: count("info"), capabilities: result.capabilities.map((c) => c.kind) });
+        this.d.onChecked?.();
+      } catch (err) {
+        this.store.log("check.error", ctx.pluginId, ctx.contentHash, { message: err instanceof Error ? err.message : String(err) });
+      } finally {
+        this.checking.delete(ctx.contentHash);
+      }
+    })();
+    this.checking.set(ctx.contentHash, job);
+  }
+
+  /** Resolves when no background check is running (tests, shutdown). */
+  async checksIdle(): Promise<void> {
+    while (this.checking.size > 0) await Promise.all([...this.checking.values()]);
+  }
+
   // ---- the hook -----------------------------------------------------------
   async decide(ctx: HookCtx): Promise<Decision> {
     try {
@@ -215,6 +248,7 @@ export class Gate {
   }
 
   private async decideUnsafe(ctx: HookCtx): Promise<Decision> {
+    this.scheduleCheck(ctx);
     const approved = this.store.activeApproval(ctx.contentHash);
     if (approved) {
       this.store.touchApproval(approved.id);

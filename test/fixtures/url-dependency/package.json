@@ -1,0 +1,8 @@
+{
+  "name": "x",
+  "dependencies": {
+    "a": "github:evil/a",
+    "b": "https://x.test/b.tgz",
+    "c": "^1.0.0"
+  }
+}

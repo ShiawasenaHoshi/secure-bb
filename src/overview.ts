@@ -1,4 +1,5 @@
 // Builds the single view the Plugin Gate page renders (one RPC, one shape).
+import type { CheckResult } from "./checks/types.js";
 import { assess, type Assessment, type Probe } from "./detect.js";
 import type { Gate, TotpState } from "./gate.js";
 import type { InstalledPluginLite } from "./probe.js";
@@ -44,6 +45,8 @@ export interface Overview {
   plugins: PluginView[];
   windows: WindowView[];
   log: LogRow[];
+  /** Stage 2.1 check results by content hash (held queue entries and approved versions). */
+  checks: Record<string, CheckResult>;
 }
 
 export interface OverviewDeps {
@@ -103,6 +106,14 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
     };
   });
 
+  const checks: Record<string, CheckResult> = {};
+  const hashes = [...d.store.listQueue(50).map((q) => q.contentHash), ...approvals.slice(0, 200).map((a) => a.contentHash)];
+  for (const h of hashes) {
+    if (!h || checks[h]) continue;
+    const c = d.store.getCheck(h);
+    if (c) checks[h] = c.result;
+  }
+
   return {
     now: d.now(),
     assessment: assess(probe),
@@ -114,5 +125,6 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
     plugins: views,
     windows,
     log: d.store.listLog(40),
+    checks,
   };
 }

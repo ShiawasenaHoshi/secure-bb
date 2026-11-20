@@ -7,6 +7,7 @@ import { definePluginApp, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import type { SecureBbRpc } from "./server";
 import type { Overview, PluginView, WindowView } from "./src/overview";
 import type { QueueRow } from "./src/store";
+import type { CheckResult } from "./src/checks/types";
 
 // ---------------------------------------------------------------- helpers --
 
@@ -292,6 +293,41 @@ function QrSvg({ matrix }: { matrix: boolean[][] }) {
   );
 }
 
+/** Stage 2.1: what the deterministic checks found in one version. Informational: nothing is held on it yet. */
+function ChecksView({ result }: { result: CheckResult | undefined }) {
+  if (!result) return <p className={`mt-2 text-xs ${muted}`}>Проверки ещё выполняются или не запускались для этой версии.</p>;
+  const sev = (s: string) => (s === "block" ? "блок" : s === "review" ? "на ревью" : "инфо");
+  return (
+    <details className="mt-2" open={result.findings.some((f) => f.severity === "block")}>
+      <summary className="cursor-pointer">
+        Проверки: {result.findings.length === 0 ? "находок нет" : `${result.findings.length} находок`} · возможностей: {result.capabilities.length}
+      </summary>
+      {result.findings.length > 0 ? (
+        <ul className="mt-1 list-disc pl-5">
+          {result.findings.map((f, i) => (
+            <li key={i} className="break-all">
+              <b>{sev(f.severity)}</b> {f.rule} · <span className="font-mono">{f.file}{f.line ? `:${f.line}` : ""}</span> · <span className="font-mono">{f.excerpt}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      <p className="mt-1 font-semibold">Возможности</p>
+      {result.capabilities.length === 0 ? (
+        <p className={muted}>нет (безопасный класс)</p>
+      ) : (
+        <ul className="list-disc pl-5">
+          {result.capabilities.map((c) => (
+            <li key={c.kind} className="break-all">
+              <span className="font-mono">{c.kind}</span>{c.detail.length ? `: ${c.detail.join(", ")}` : ""}
+              <span className={muted}> ({c.sites.slice(0, 3).map((s) => `${s.file}${s.line ? `:${s.line}` : ""}`).join(", ")}{c.sites.length > 3 ? ", …" : ""})</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </details>
+  );
+}
+
 function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void }) {
   const [code, setCode] = useState("");
   const act = useCodeAction(refetch);
@@ -316,6 +352,7 @@ function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; rpc: Re
         {q.kind === "proposal" && !q.contentHash ? " · предложен агентом, окно было закрыто" : ""}
       </p>
       {q.contentHash ? <p className={`break-all font-mono text-xs ${muted}`}>{q.contentHash}</p> : null}
+      {q.contentHash ? <ChecksView result={ov.checks[q.contentHash]} /> : null}
       {held ? (
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <CodeField value={code} onChange={setCode} />
@@ -338,7 +375,7 @@ function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; rpc: Re
   );
 }
 
-function PluginRow({ p, rpc, refetch, registered }: { p: PluginView; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void; registered: boolean }) {
+function PluginRow({ p, rpc, refetch, registered, checks }: { p: PluginView; checks: Record<string, CheckResult>; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void; registered: boolean }) {
   const now = useNow();
   const [code, setCode] = useState("");
   const act = useCodeAction(refetch);
@@ -352,6 +389,7 @@ function PluginRow({ p, rpc, refetch, registered }: { p: PluginView; rpc: Return
         </span>
       </div>
       <p className={muted}>{p.window ? windowLine(p.window, remaining) : "окно закрыто"}</p>
+      {p.pin ? <ChecksView result={checks[p.pin.contentHash]} /> : null}
       {p.history.length > 1 ? (
         <details className="mt-1">
           <summary className="cursor-pointer">История ({p.history.length})</summary>
@@ -492,7 +530,7 @@ function GatePage() {
           ) : null}
         </Section>
         <Section title="Гейт плагинов — сторонние плагины">
-          {ov.plugins.length === 0 ? <div className={`${card} ${muted}`}>Сторонних плагинов нет.</div> : ov.plugins.map((p) => <PluginRow key={p.id} p={p} rpc={rpc} refetch={refetch} registered={registered} />)}
+          {ov.plugins.length === 0 ? <div className={`${card} ${muted}`}>Сторонних плагинов нет.</div> : ov.plugins.map((p) => <PluginRow key={p.id} p={p} rpc={rpc} refetch={refetch} registered={registered} checks={ov.checks} />)}
         </Section>
         <Section title="Гейт плагинов — окна доверия"><PolicyCard ov={ov} rpc={rpc} refetch={refetch} /></Section>
         <Section title="Журнал"><LogCard ov={ov} /></Section>
