@@ -306,7 +306,7 @@ function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; rpc: Re
           #{q.id} · {q.pluginId} <span className={muted}>{q.version}</span>
         </h3>
         <span className={muted}>
-          {held ? "держится" : q.status === "approved" ? "одобрено" : "отклонено"} · {when(q.firstSeen)}
+          {held ? "держится" : q.status === "approved" ? "одобрено" : q.status === "stale" ? "устарело" : "отклонено"} · {when(q.firstSeen)}
         </span>
       </div>
       <p className={`mt-1 break-all ${muted}`}>

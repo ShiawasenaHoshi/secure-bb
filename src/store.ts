@@ -142,7 +142,7 @@ export interface QueueRow {
   trigger: string | null;
   threadId: string | null;
   proposalId: number | null;
-  status: "held" | "approved" | "dismissed";
+  status: "held" | "approved" | "dismissed" | "stale";
   reason: string | null;
   firstSeen: number;
   lastSeen: number;
@@ -444,6 +444,16 @@ export class Store {
   /** Marks every held entry for a hash as approved (after any approval path). */
   resolveQueueByHash(contentHash: string): void {
     this.db.prepare(`UPDATE queue SET status = 'approved' WHERE content_hash = ? AND status = 'held'`).run(contentHash);
+  }
+
+  /**
+   * The plugin loaded under an approved hash: entries still held for it because
+   * its snapshot was tampered with are obsolete (the original is back).
+   */
+  supersedeTampered(pluginId: string, loadedHash: string): void {
+    this.db
+      .prepare(`UPDATE queue SET status = 'stale' WHERE plugin_id = ? AND status = 'held' AND reason LIKE 'снимок изменён%' AND (content_hash IS NULL OR content_hash <> ?)`)
+      .run(pluginId, loadedHash);
   }
 
   // ---- windows ----------------------------------------------------------

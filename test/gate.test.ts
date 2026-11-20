@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -381,6 +381,28 @@ describe("a snapshot is only trusted if its bytes match what was proposed (revie
     expect(h.store.activeApproval("sha256:core-evil")).toBeNull();
     const hold = h.store.listLog().find((l) => l.kind === "hold")!;
     expect(hold.detail).toMatchObject({ reason: "снимок изменён после предложения" });
+  });
+
+  it("logs the load of a touch-approved snapshot as approved.load, not a second approved.touch", async () => {
+    const s = await h.snapshot(1, "T1");
+    h.gate.approveQueue(queueFor(s.proposal.id, s.dir).id, code());
+    await h.gate.decide(snapCtx(s.dir, 1, "sha256:core1"));
+    const kinds = h.store.listLog().map((l) => l.kind);
+    expect(kinds.filter((k) => k === "approved.touch")).toHaveLength(1);
+    expect(kinds).toContain("approved.load");
+  });
+
+  it("marks the held 'snapshot changed' entry stale once the original loads again", async () => {
+    const s = await h.snapshot(1, "T1");
+    h.gate.approveQueue(queueFor(s.proposal.id, s.dir).id, code());
+    const orig = readFileSync(join(s.dir, "server.ts"), "utf8");
+    writeFileSync(join(s.dir, "server.ts"), "export default () => 'evil';\n");
+    expect((await h.gate.decide(snapCtx(s.dir, 1, "sha256:core-evil"))).action).toBe("wait");
+    const held = h.store.listQueue().find((q) => q.contentHash === "sha256:core-evil")!;
+    expect(held.status).toBe("held");
+    writeFileSync(join(s.dir, "server.ts"), orig);
+    expect((await h.gate.decide(snapCtx(s.dir, 1, "sha256:core1"))).action).toBe("proceed");
+    expect(h.store.listQueue().find((q) => q.id === held.id)!.status).toBe("stale");
   });
 
   it("holds a window-approved snapshot that was edited, or gained a file, after proposing", async () => {

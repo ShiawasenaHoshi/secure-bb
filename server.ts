@@ -233,7 +233,16 @@ export default async function plugin(bb: BbPluginApi) {
           options: { limit: { type: "integer", min: 1, max: 100, default: 20, description: "How many entries (1-100)" } },
           async run(input) {
             const rows = store.listLog(input.options.limit);
-            const text = rows.map((r) => `${new Date(r.ts).toISOString()} ${r.kind}${r.pluginId ? ` ${r.pluginId}` : ""}`).join("\n");
+            const text = rows
+              .map((r) => {
+                const d = (r.detail && typeof r.detail === "object" ? r.detail : {}) as Record<string, unknown>;
+                const parts = [new Date(r.ts).toISOString(), r.kind];
+                if (r.pluginId) parts.push(d.version ? `${r.pluginId}@${String(d.version)}` : r.pluginId);
+                if (d.review !== undefined) parts.push(`review #${String(d.review)}`);
+                if (typeof d.reason === "string") parts.push(`— ${d.reason}`);
+                return parts.join(" ");
+              })
+              .join("\n");
             return { exitCode: 0, stdout: text || "(empty)" };
           },
         }),
