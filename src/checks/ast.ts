@@ -560,6 +560,12 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
    * network, a template/concatenation or the response of an HTTP/RPC handler. `source` is
    * `process.env`, an alias of it or a copy; the walk follows the data upwards.
    */
+  const isSinkCall = (x: N): boolean => {
+    if (x.type !== "CallExpression") return false;
+    const d = dottedName(x.callee);
+    const simple = calleeSimpleName(x.callee);
+    return (d !== null && ENV_SINK_CALLS.has(d)) || (simple !== null && ENV_SINK_CALLS.has(simple) && !CHILD_FUNCS.has(simple));
+  };
   const checkEnvWhole = (source: N, anc: N[]): void => {
     let cur = source;
     for (let i = anc.length - 2; i >= 0; i--) {
@@ -584,13 +590,26 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
         case "BinaryExpression":
           if (p.operator === "+") finding("env-dump", "block", p);
           return;
+        case "ForOfStatement":
+        case "ForInStatement":
+          // `for (const [k, v] of Object.entries(process.env)) navigator.sendBeacon(url, k + v)`:
+          // the whole environment is walked and something in the body sends data out.
+          if (p.right === cur && anyNode(p.body, isSinkCall)) finding("env-dump", "block", p, "the whole environment is enumerated and the loop body sends data out");
+          return;
         case "MemberExpression": {
           // `Object.entries(env).map(…)`: a method on tainted data keeps it tainted; a property read does not.
           const call = anc[i - 1];
-          if (p.object === cur && call?.type === "CallExpression" && call.callee === p && TAINT_METHODS.has(String(propName(p)))) {
-            cur = call;
-            i--;
-            continue;
+          const method = String(propName(p));
+          if (p.object === cur && call?.type === "CallExpression" && call.callee === p) {
+            if (method === "forEach" || TAINT_METHODS.has(method)) {
+              if (call.arguments.some((a: N) => (a.type === "ArrowFunctionExpression" || a.type === "FunctionExpression") && anyNode(a.body, isSinkCall)))
+                finding("env-dump", "block", call, "the whole environment is enumerated and the callback sends data out");
+            }
+            if (TAINT_METHODS.has(method)) {
+              cur = call;
+              i--;
+              continue;
+            }
           }
           return;
         }
@@ -602,8 +621,11 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
             cur = p; // a copy: keep following it
             continue;
           }
-          if ((d !== null && ENV_SINK_CALLS.has(d)) || (simple !== null && ENV_SINK_CALLS.has(simple) && !CHILD_FUNCS.has(simple))) finding("env-dump", "block", p);
-          return; // spawn/exec/fork(env), or an unknown function: not a leak we can show
+          if (isSinkCall(p)) finding("env-dump", "block", p);
+          else if (!(simple !== null && CHILD_FUNCS.has(simple)) && !(d !== null && /^(Object|Array|Reflect|Number|Boolean|Math|Map|Set)\./.test(d)) && p.arguments.includes(cur))
+            // spawn/exec/fork(env) is ordinary; handing the whole environment to any other function is not a leak we can show, but it is not nothing
+            finding("env-passed", "review", p, `the whole environment is passed to ${d ?? simple ?? "a function"}(…)`);
+          return;
         }
         case "NewExpression":
           return;
@@ -799,7 +821,12 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
       // `new [].constructor()` / `new (class {}).constructor()`.
       if (name === "constructor") {
         const literalOwner = unwrap(n.object).type === "ArrayExpression" || unwrap(n.object).type === "ClassExpression" || unwrap(n.object).type === "ObjectExpression";
-        if (!(parent?.type === "NewExpression" && parent.callee === n && literalOwner)) {
+        // Reading only the name, or comparing it (`o.constructor.name`, `o.constructor === Foo`), cannot run code.
+        const harmless =
+          (parent?.type === "MemberExpression" && parent.object === n && !parent.computed && ["name", "length"].includes(String(propName(parent)))) ||
+          (parent?.type === "BinaryExpression" && ["==", "===", "!=", "!==", "instanceof"].includes(parent.operator)) ||
+          (parent?.type === "UnaryExpression" && (parent.operator === "typeof" || parent.operator === "!"));
+        if (!harmless && !(parent?.type === "NewExpression" && parent.callee === n && literalOwner)) {
           cap("dynamic_code", ".constructor", n);
           finding("dynamic-constructor", "review", n);
         }

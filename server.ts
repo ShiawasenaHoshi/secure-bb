@@ -88,7 +88,10 @@ export default async function plugin(bb: BbPluginApi) {
     thirdPartyRunning: async () => runningThirdParty(await listPlugins()),
     externalTotpFile: process.env.BB_SECURE_BB_TOTP_FILE?.trim() || null,
     snapshotsRoot,
-    onChecked: () => changed(),
+    onChecked: () => {
+      changed();
+      recheck(); // a check that outlived the hook's wait may now decide the held version
+    },
   });
 
   // ---- the hook ----------------------------------------------------------
@@ -161,8 +164,8 @@ export default async function plugin(bb: BbPluginApi) {
       changed();
       return { ok: true as const };
     }),
-    "queue.approve": wrap(async ({ id, code }) => {
-      const res = gate.approveQueue(id, code);
+    "queue.approve": wrap(async ({ id, code, acknowledgeBlock }) => {
+      const res = gate.approveQueue(id, code, { acknowledgeBlock });
       let note = "approved";
       if (res.installDir) {
         const installed = await bb.sdk.plugins.install({ source: res.installDir });

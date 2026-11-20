@@ -7,6 +7,8 @@ import { AfterFactScanner } from "../src/afterfact.js";
 import { Gate } from "../src/gate.js";
 import type { InstalledPluginLite } from "../src/probe.js";
 import { propose } from "../src/propose.js";
+import type { CheckResult } from "../src/checks/index.js";
+import { CLEAN, NETWORKED, withFindings } from "./support/checks.js";
 import { MIGRATIONS, Store } from "../src/store.js";
 import { base32Decode, hotp, stepAt } from "../src/totp.js";
 import { hashTree, pluginIdFromPackageName } from "../src/tree.js";
@@ -18,6 +20,8 @@ class Env {
   root = realpathSync(mkdtempSync(join(tmpdir(), "sbb-flow-")));
   snapshots = join(this.root, "snapshots");
   code!: () => string;
+  /** What the checks answer for every directory. */
+  result: CheckResult = NETWORKED;
   constructor() {
     mkdirSync(this.snapshots);
     const db = new Database(":memory:");
@@ -30,6 +34,7 @@ class Env {
       thirdPartyRunning: async () => [],
       externalTotpFile: null,
       snapshotsRoot: this.snapshots,
+      runChecks: async () => this.result,
     });
   }
   async register(): Promise<void> {
@@ -95,6 +100,42 @@ describe("propose", () => {
       rootDir: installs[0]!, contentHash: "sha256:core", trigger: "install",
     });
     expect(decision).toEqual({ action: "proceed" });
+  });
+
+  it("a proposal in a closed window already carries its checks (keyed by the snapshot, before the core hashes it)", async () => {
+    const dir = e.plugin("demo");
+    const res = await propose(deps(), { path: dir, cwd: undefined, threadId: "T1" });
+    expect(res.exitCode).toBe(3);
+    const q = e.store.listQueue()[0]!;
+    expect(q.contentHash).toBeNull();
+    expect(e.gate.checkForQueue(q)).toEqual(NETWORKED);
+    // and once the core hashes it, the same result is linked to the core's hash
+    const p = e.store.getProposal(q.proposalId!)!;
+    await e.gate.decide({ pluginId: "demo", version: "1.0.0", source: `path:${p.snapshotDir}`, sourceKind: "path", gitCommit: null, npmIntegrity: null, rootDir: p.snapshotDir, contentHash: "sha256:core", trigger: "install" });
+    expect(e.store.getCheck("sha256:core")!.result).toEqual(NETWORKED);
+    expect(e.store.listLog().find((l) => l.kind === "check")!.detail).toMatchObject({ blocks: 0, reviews: 0, infos: 0 });
+    expect(Object.keys(e.store.listLog().find((l) => l.kind === "check")!.detail as object)).not.toContain("review");
+  });
+
+  it("a clean safe-class plugin is installed outside a window (spec §5.3)", async () => {
+    e.result = CLEAN;
+    const res = await propose(deps(), { path: e.plugin("demo"), cwd: undefined, threadId: "T1" });
+    expect(res.exitCode).toBe(0);
+    expect(installs).toHaveLength(1);
+  });
+
+  it("a hard sign is not installed even inside an open window; the agent is told, the human sees the entry", async () => {
+    const dir = e.plugin("demo");
+    await propose(deps(), { path: dir, cwd: undefined, threadId: "T1" });
+    e.gate.openWindow(e.store.listQueue()[0]!.id, e.code());
+    installs.length = 0;
+    e.result = withFindings([{ rule: "env-dump", severity: "block", file: "server.ts", line: 4, excerpt: "JSON.stringify(process.env)" }]);
+    const res = await propose(deps(), { path: e.plugin("demo", { "extra.ts": "1" }), cwd: undefined, threadId: "T1" });
+    expect(res.exitCode).toBe(3);
+    expect(res.stdout).toContain("заблокировано проверками: env-dump server.ts:4");
+    expect(installs).toEqual([]);
+    expect(e.store.listQueue()[0]).toMatchObject({ status: "held", reason: expect.stringContaining("env-dump") });
+    expect(e.gate.openWindows()).toHaveLength(1);
   });
 
   it("a thread outside the window is told the window is closed", async () => {

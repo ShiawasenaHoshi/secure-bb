@@ -102,6 +102,8 @@ export const MIGRATIONS: string[] = [
      plugin_id TEXT NOT NULL,
      ts INTEGER NOT NULL,
      result TEXT NOT NULL)`,
+  // Stage 2.2: the capabilities a trust window was opened with (JSON array of tokens); NULL = none known.
+  `ALTER TABLE windows ADD COLUMN caps TEXT`,
 ];
 
 export interface Policy {
@@ -130,7 +132,7 @@ export interface ApprovalRow {
   sourceKind: string;
   gitCommit: string | null;
   npmIntegrity: string | null;
-  via: "touch" | "window" | "pin";
+  via: "touch" | "window" | "pin" | "auto";
   windowId: number | null;
   threadId: string | null;
   approvedAt: number;
@@ -171,6 +173,8 @@ export interface WindowRow {
   hardExpiresAt: number;
   closedAt: number | null;
   closedReason: string | null;
+  /** Capability tokens present when the window was opened (plus those a human accepted since). */
+  caps: string[];
 }
 export interface ProposalRow {
   id: number;
@@ -207,7 +211,7 @@ const approval = (r: Raw): ApprovalRow => ({
   sourceKind: r.source_kind as string,
   gitCommit: (r.git_commit as string | null) ?? null,
   npmIntegrity: (r.npm_integrity as string | null) ?? null,
-  via: r.via as "touch" | "window" | "pin",
+  via: r.via as ApprovalRow["via"],
   windowId: (r.window_id as number | null) ?? null,
   threadId: (r.thread_id as string | null) ?? null,
   approvedAt: r.approved_at as number,
@@ -247,6 +251,7 @@ const windowRow = (r: Raw): WindowRow => ({
   hardExpiresAt: r.hard_expires_at as number,
   closedAt: (r.closed_at as number | null) ?? null,
   closedReason: (r.closed_reason as string | null) ?? null,
+  caps: r.caps ? (JSON.parse(r.caps as string) as string[]) : [],
 });
 const proposalRow = (r: Raw): ProposalRow => ({
   id: r.id as number,
@@ -284,7 +289,7 @@ export interface NewApproval {
   sourceKind: string;
   gitCommit: string | null;
   npmIntegrity: string | null;
-  via: "touch" | "window" | "pin";
+  via: ApprovalRow["via"];
   windowId: number | null;
   threadId: string | null;
   localHash?: string | null;
@@ -409,7 +414,7 @@ export class Store {
     this.db.prepare(`UPDATE approvals SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`).run(this.now(), id);
   }
 
-  // ---- check results (stage 2.1: shown only, nothing is held on them yet) ----
+  // ---- check results (key: the core's content hash, or `local:<localHash>` for a snapshot checked at propose time) ----
   putCheck(contentHash: string, pluginId: string, result: CheckResult): void {
     this.db
       .prepare(`INSERT INTO check_results (content_hash, plugin_id, ts, result) VALUES (?, ?, ?, ?)
@@ -483,10 +488,10 @@ export class Store {
   insertWindow(w: Omit<WindowRow, "id" | "closedAt" | "closedReason">): WindowRow {
     const info = this.db
       .prepare(
-        `INSERT INTO windows (plugin_id, thread_id, scope, mode, size_sec, cap_sec, opened_at, expires_at, hard_expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO windows (plugin_id, thread_id, scope, mode, size_sec, cap_sec, opened_at, expires_at, hard_expires_at, caps)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(w.pluginId, w.threadId, w.scope, w.mode, w.sizeSec, w.capSec, w.openedAt, w.expiresAt, w.hardExpiresAt);
+      .run(w.pluginId, w.threadId, w.scope, w.mode, w.sizeSec, w.capSec, w.openedAt, w.expiresAt, w.hardExpiresAt, JSON.stringify(w.caps));
     return this.getWindow(Number(info.lastInsertRowid))!;
   }
   getWindow(id: number): WindowRow | null {
@@ -502,6 +507,10 @@ export class Store {
   }
   closeWindow(id: number, reason: string, at = this.now()): void {
     this.db.prepare(`UPDATE windows SET closed_at = ?, closed_reason = ? WHERE id = ? AND closed_at IS NULL`).run(at, reason, id);
+  }
+  /** A human accepted a new capability inside the window: it is part of the window's set from now on. */
+  setWindowCaps(id: number, caps: string[]): void {
+    this.db.prepare(`UPDATE windows SET caps = ? WHERE id = ? AND closed_at IS NULL`).run(JSON.stringify(caps), id);
   }
   setWindowExpiry(id: number, expiresAt: number): void {
     this.db.prepare(`UPDATE windows SET expires_at = ? WHERE id = ? AND closed_at IS NULL`).run(expiresAt, id);

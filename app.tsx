@@ -293,7 +293,7 @@ function QrSvg({ matrix }: { matrix: boolean[][] }) {
   );
 }
 
-/** Stage 2.1: what the deterministic checks found in one version. Informational: nothing is held on it yet. */
+/** What the deterministic checks found in one version (the decision table of spec §5.3 acts on it). */
 function ChecksView({ result }: { result: CheckResult | undefined }) {
   if (!result) return <p className={`mt-2 text-xs ${muted}`}>Проверки ещё выполняются или не запускались для этой версии.</p>;
   const sev = (s: string) => (s === "block" ? "блок" : s === "review" ? "на ревью" : "инфо");
@@ -335,6 +335,9 @@ function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; rpc: Re
   const held = q.status === "held";
   const disabled = act.busy || code.length !== 6 || !registered;
   const done = () => setCode("");
+  const found = ov.queueChecks[q.id];
+  const blocked = (q.reason?.startsWith("заблокировано проверками") ?? false) || (found?.findings.some((f) => f.severity === "block") ?? false);
+  const [ack, setAck] = useState(false);
   return (
     <div className={card}>
       <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -352,14 +355,20 @@ function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; rpc: Re
         {q.kind === "proposal" && !q.contentHash ? " · предложен агентом, окно было закрыто" : ""}
       </p>
       {q.contentHash ? <p className={`break-all font-mono text-xs ${muted}`}>{q.contentHash}</p> : null}
-      {q.contentHash ? <ChecksView result={ov.checks[q.contentHash]} /> : null}
+      {q.reason ? <p className={`mt-1 ${blocked ? "font-semibold text-red-600" : muted}`}>{q.reason}</p> : null}
+      <ChecksView result={ov.queueChecks[q.id] ?? (q.contentHash ? ov.checks[q.contentHash] : undefined)} />
       {held ? (
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <CodeField value={code} onChange={setCode} />
-          <button className={btnPrimary} disabled={disabled} onClick={() => void act.run(async () => { const r = await rpc.call("queue.approve", { id: q.id, code }); done(); return r; })}>
-            Одобрить версию
+          <button className={btnPrimary} disabled={disabled} onClick={() => void act.run(async () => { const r = await rpc.call("queue.approve", { id: q.id, code, acknowledgeBlock: ack }); done(); setAck(false); return r; })}>
+            {blocked ? "Снять блок и одобрить" : "Одобрить версию"}
           </button>
-          {q.threadId ? (
+          {blocked ? (
+            <label className="flex items-center gap-1 text-xs">
+              <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} /> понимаю риск: проверки нашли жёсткий признак
+            </label>
+          ) : null}
+          {q.threadId && !blocked ? (
             <button className={btn} disabled={disabled} onClick={() => void act.run(async () => { await rpc.call("window.open", { queueId: q.id, code }); done(); })}>
               Открыть окно
             </button>
@@ -385,7 +394,7 @@ function PluginRow({ p, rpc, refetch, registered, checks }: { p: PluginView; che
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h3 className="font-semibold">{p.id} <span className={muted}>{p.version} · {p.status}</span></h3>
         <span className={muted}>
-          {p.pin ? `${p.frozenPin ? "закреплена при заморозке" : "пин"}: ${p.pin.version} (${p.pin.via === "window" ? "окном" : p.pin.via === "pin" ? "закреплено" : "касанием"}, ${when(p.pin.approvedAt)})` : p.unreviewedBaseline ? "стоял до secure-bb, не проверялся" : "не одобрен"}
+          {p.pin ? `${p.frozenPin ? "закреплена при заморозке" : "пин"}: ${p.pin.version} (${p.pin.via === "window" ? "окном" : p.pin.via === "pin" ? "закреплено" : p.pin.via === "auto" ? "безопасный класс" : "касанием"}, ${when(p.pin.approvedAt)})` : p.unreviewedBaseline ? "стоял до secure-bb, не проверялся" : "не одобрен"}
         </span>
       </div>
       <p className={muted}>{p.window ? windowLine(p.window, remaining) : "окно закрыто"}</p>
@@ -395,7 +404,7 @@ function PluginRow({ p, rpc, refetch, registered, checks }: { p: PluginView; che
           <summary className="cursor-pointer">История ({p.history.length})</summary>
           <ul className="mt-1 list-disc pl-5">
             {p.history.map((h) => (
-              <li key={h.id}>{h.version} · {h.via === "window" ? "окно" : h.via === "pin" ? "закреплено" : "касание"} · {when(h.approvedAt)}</li>
+              <li key={h.id}>{h.version} · {h.via === "window" ? "окно" : h.via === "pin" ? "закреплено" : h.via === "auto" ? "безопасный класс" : "касание"} · {when(h.approvedAt)}</li>
             ))}
           </ul>
         </details>

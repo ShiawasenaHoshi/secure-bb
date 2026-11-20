@@ -47,6 +47,8 @@ export interface Overview {
   log: LogRow[];
   /** Stage 2.1 check results by content hash (held queue entries and approved versions). */
   checks: Record<string, CheckResult>;
+  /** Check results by queue entry id (proposals have them before the core hashes the plugin). */
+  queueChecks: Record<number, CheckResult>;
 }
 
 export interface OverviewDeps {
@@ -114,6 +116,13 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
     if (c) checks[h] = c.result;
   }
 
+  const queue = d.store.listQueue(50);
+  const queueChecks: Record<number, CheckResult> = {};
+  for (const q of queue) {
+    const c = d.gate.checkForQueue(q);
+    if (c) queueChecks[q.id] = c;
+  }
+
   return {
     now: d.now(),
     assessment: assess(probe),
@@ -121,7 +130,8 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
     hookRegistered: d.hookRegistered,
     policy: d.store.policy(),
     thirdPartyRunning: runningThirdParty(plugins),
-    queue: d.store.listQueue(50),
+    queue,
+    queueChecks,
     plugins: views,
     windows,
     log: d.store.listLog(40),
