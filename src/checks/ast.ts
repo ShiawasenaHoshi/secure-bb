@@ -1,11 +1,11 @@
 // Capability and hard-sign detection by AST (spec §5.1), never by regex over
-// source text. Parser: vendored acorn (+ acorn-jsx, acorn-walk); TypeScript
-// types are removed first by node:module's stripTypeScriptTypes (it keeps
-// every character position, so line numbers stay true).
-import { stripTypeScriptTypes } from "node:module";
+// source text. Parser: vendored acorn with acorn-jsx (.jsx) and
+// @sveltejs/acorn-typescript (.ts/.tsx, no type stripping: line numbers are
+// the file's own). Principle for the gate (stage 2.2): whatever the analysis
+// cannot classify with confidence is a `review` finding, never silence.
 import * as acorn from "../../vendor/acorn.mjs";
 import jsx from "../../vendor/acorn-jsx.mjs";
-import * as walk from "../../vendor/walk.mjs";
+import { tsPlugin } from "../../vendor/acorn-typescript.mjs";
 import { excerptOf } from "./files.js";
 import type { CapabilityKind, Finding } from "./types.js";
 
@@ -23,6 +23,7 @@ export interface FileFacts {
   sites: Site[];
   /** Literal hosts seen in this file (url strings). */
   hosts: Array<{ host: string; line: number }>;
+  /** Secret / rc / agent-config paths that reach a file-system, path or process call. */
   secretPaths: Array<{ line: number; text: string }>;
   rcPaths: Array<{ line: number; text: string }>;
   network: boolean;
@@ -36,7 +37,9 @@ export interface FileFacts {
 const NETWORK_MODULES = new Set(["http", "https", "http2", "net", "tls", "dgram", "dns", "dns/promises", "undici", "ws", "axios", "node-fetch", "cross-fetch", "got", "superagent", "request", "needle", "socket.io-client", "isomorphic-ws", "node-ftp", "ssh2", "socks", "net-ping"]);
 const CHILD_MODULES = new Set(["child_process", "cross-spawn", "execa", "shelljs", "node-pty", "cluster"]);
 const FS_MODULES = new Set(["fs", "fs/promises", "fs-extra", "graceful-fs", "original-fs"]);
-const DYNAMIC_MODULES = new Set(["vm", "module", "vm2", "isolated-vm", "worker_threads"]);
+const DYNAMIC_MODULES = new Set(["vm", "module", "vm2", "isolated-vm", "worker_threads", "inspector", "inspector/promises", "repl", "wasi"]);
+/** Node built-ins with no capability of their own. Any other `node:` module is an unknown: review. */
+const PLAIN_BUILTINS = new Set(["assert", "assert/strict", "async_hooks", "buffer", "console", "constants", "crypto", "diagnostics_channel", "events", "os", "path", "path/posix", "path/win32", "perf_hooks", "process", "punycode", "querystring", "readline", "readline/promises", "stream", "stream/promises", "stream/web", "stream/consumers", "string_decoder", "sqlite", "test", "timers", "timers/promises", "tty", "url", "util", "util/types", "v8", "zlib"]);
 const BUILTIN_RPC = new Set(["bb-account", "connect", "mcp", "custom-instructions"]);
 const GLOBAL_OBJECTS = new Set(["globalThis", "global", "window", "self"]);
 const NETWORK_GLOBALS = new Set(["fetch", "WebSocket", "XMLHttpRequest", "EventSource"]);
@@ -52,66 +55,124 @@ const PIPE_SHELL = /\b(curl|wget)\b[^|\n]*\|\s*(sudo\s+)?(ba|z|da)?sh\b/;
 const URL_RE = /\b(?:https?|wss?|ftp):\/\/[^\s'"`<>)\]}\\]+/gi;
 
 // ---- parsing ----------------------------------------------------------------
-const JsxParser = acorn.Parser.extend(jsx());
 const TS_EXT = /\.(m|c)?tsx?$/i;
 const JSX_EXT = /\.(jsx|tsx)$/i;
+const PARSERS = {
+  js: acorn.Parser,
+  jsx: acorn.Parser.extend(jsx()),
+  ts: acorn.Parser.extend(tsPlugin() as never),
+  tsx: acorn.Parser.extend(tsPlugin({ jsx: true }) as never),
+};
 
-export type Parsed = { ok: true; ast: N; code: string } | { ok: false; reason: string };
+export type Parsed = { ok: true; ast: N; code: string; note?: string } | { ok: false; reason: string };
+
+/**
+ * acorn-typescript does not accept `<K extends X>(…) =>` in .tsx. As a last resort the type
+ * parameter list is blanked out (same length, newlines kept, so positions stay true). Only a
+ * list with no calls, templates or arrows in it qualifies: type parameters hold no code.
+ */
+const GENERIC_ARROW = /(?<=(?:=|\(|,|:|\breturn|\basync)\s*)<\s*[A-Za-z_$][\w$]*\s+extends\b[^()`=;{}]*?>(?=\s*\()/g;
+const blank = (m: string): string => m.replace(/[^\n]/g, " ");
 
 export function parseSource(rel: string, text: string): Parsed {
-  let code = text;
-  if (TS_EXT.test(rel)) {
-    try {
-      code = stripTypeScriptTypes(text, { mode: "strip" });
-    } catch (err) {
-      // Node cannot strip types around JSX (.tsx) and does not do enums/namespaces:
-      // a .tsx file gets one more try as plain JSX; anything else is "could not parse".
-      if (!JSX_EXT.test(rel)) return { ok: false, reason: `TypeScript: ${firstLine(err)}` };
+  const kind = rel.endsWith(".tsx") ? "tsx" : TS_EXT.test(rel) ? "ts" : JSX_EXT.test(rel) ? "jsx" : "js";
+  // TypeScript is always an ES module; `.cjs` is a script first; everything else tries module, then script.
+  const types: Array<"module" | "script"> = kind === "ts" || kind === "tsx" ? ["module"] : rel.endsWith(".cjs") ? ["script", "module"] : ["module", "script"];
+  // `<K extends X>(…) =>` generic arrows trip the JSX-enabled TypeScript parser, and a `.ts` file that
+  // the plain parser rejects is retried with JSX on: the second opinion costs nothing.
+  const kinds: Array<keyof typeof PARSERS> = kind === "tsx" ? ["tsx", "ts"] : kind === "ts" ? ["ts", "tsx"] : [kind];
+  let firstErr = "";
+  for (const k of kinds) {
+    for (const sourceType of types) {
+      try {
+        const ast = (PARSERS[k] as typeof acorn.Parser).parse(text, { ecmaVersion: "latest", sourceType, locations: true, allowHashBang: true, allowReturnOutsideFunction: true, allowAwaitOutsideFunction: true });
+        return { ok: true, ast, code: text };
+      } catch (err) {
+        firstErr ||= String(err instanceof Error ? err.message : err).split("\n")[0]!.slice(0, 200);
+      }
     }
   }
-  const P = JSX_EXT.test(rel) ? JsxParser : acorn.Parser;
-  let lastErr = "";
-  for (const sourceType of ["module", "script"] as const) {
-    try {
-      const ast = P.parse(code, { ecmaVersion: "latest", sourceType, locations: true, allowHashBang: true, allowReturnOutsideFunction: true, allowAwaitOutsideFunction: true });
-      return { ok: true, ast, code };
-    } catch (err) {
-      lastErr = firstLine(err);
+  if (kind === "tsx" || kind === "ts") {
+    const padded = text.replace(GENERIC_ARROW, blank);
+    if (padded !== text) {
+      for (const k of kinds) {
+        try {
+          const ast = (PARSERS[k] as typeof acorn.Parser).parse(padded, { ecmaVersion: "latest", sourceType: "module", locations: true, allowHashBang: true });
+          return { ok: true, ast, code: padded, note: "parsed with generic-arrow type parameters blanked out" };
+        } catch {
+          /* fall through to the original error */
+        }
+      }
     }
   }
-  return { ok: false, reason: lastErr };
+  return { ok: false, reason: firstErr };
 }
-const firstLine = (e: unknown): string => String(e instanceof Error ? e.message : e).split("\n")[0]!.slice(0, 200);
 
-// acorn-walk knows no JSX: teach it to descend.
-const base: any = {
-  ...(walk as any).base,
-  JSXElement(n: N, st: N, c: N) {
-    c(n.openingElement, st);
-    for (const ch of n.children) c(ch, st);
-  },
-  JSXFragment(n: N, st: N, c: N) {
-    for (const ch of n.children) c(ch, st);
-  },
-  JSXOpeningElement(n: N, st: N, c: N) {
-    for (const a of n.attributes) c(a, st);
-  },
-  JSXAttribute(n: N, st: N, c: N) {
-    if (n.value) c(n.value, st);
-  },
-  JSXSpreadAttribute(n: N, st: N, c: N) {
-    c(n.argument, st);
-  },
-  JSXExpressionContainer(n: N, st: N, c: N) {
-    c(n.expression, st);
-  },
-  JSXSpreadChild(n: N, st: N, c: N) {
-    c(n.expression, st);
-  },
-  JSXEmptyExpression() {},
-  JSXText() {},
-  JSXIdentifier() {},
-};
+// ---- the walker ---------------------------------------------------------------
+/** Type-only keys of TypeScript nodes: never runtime code. */
+const SKIP_KEYS = new Set(["loc", "start", "end", "type", "typeAnnotation", "typeParameters", "typeArguments", "returnType", "superTypeParameters", "superTypeArguments", "implements", "range"]);
+/** TS nodes that carry runtime code; every other `TS*` node is a type and is not entered. */
+const RUNTIME_TS = new Set(["TSEnumDeclaration", "TSEnumBody", "TSEnumMember", "TSModuleDeclaration", "TSModuleBlock", "TSParameterProperty", "TSAsExpression", "TSSatisfiesExpression", "TSNonNullExpression", "TSTypeAssertion", "TSInstantiationExpression", "TSExportAssignment", "TSImportEqualsDeclaration", "TSExternalModuleReference"]);
+
+/** Pre-order walk with the ancestor chain (the node itself is last). Handles JSX and TypeScript nodes. */
+function walkAst(root: N, visit: (n: N, anc: N[]) => void): void {
+  const anc: N[] = [];
+  const rec = (n: N): void => {
+    if (!n || typeof n.type !== "string") return;
+    if (n.type.startsWith("TS") && !RUNTIME_TS.has(n.type)) return;
+    anc.push(n);
+    visit(n, anc);
+    for (const k of Object.keys(n)) {
+      if (SKIP_KEYS.has(k)) continue;
+      const v = n[k];
+      if (Array.isArray(v)) for (const x of v) rec(x);
+      else if (v && typeof v === "object") rec(v);
+    }
+    anc.pop();
+  };
+  rec(root);
+}
+
+/** Is this Identifier node a *reference* (not a property name, declaration, label or specifier)? */
+function isRef(n: N, parent: N | undefined): boolean {
+  if (!parent) return true;
+  switch (parent.type) {
+    case "MemberExpression":
+      return parent.object === n || parent.computed;
+    case "Property":
+      return parent.value === n || parent.computed;
+    case "MethodDefinition":
+    case "PropertyDefinition":
+    case "TSEnumMember":
+      return parent.value === n || parent.computed;
+    case "VariableDeclarator":
+      return parent.init === n;
+    case "FunctionDeclaration":
+    case "FunctionExpression":
+    case "ArrowFunctionExpression":
+      return parent.body === n;
+    case "ClassDeclaration":
+    case "ClassExpression":
+      return parent.superClass === n;
+    case "ImportSpecifier":
+    case "ImportDefaultSpecifier":
+    case "ImportNamespaceSpecifier":
+    case "ExportSpecifier":
+    case "LabeledStatement":
+    case "BreakStatement":
+    case "ContinueStatement":
+    case "CatchClause":
+    case "RestElement":
+    case "ObjectPattern":
+    case "ArrayPattern":
+    case "TSModuleDeclaration":
+      return false;
+    case "AssignmentPattern":
+      return parent.right === n;
+    default:
+      return true;
+  }
+}
 
 // ---- helpers ------------------------------------------------------------------
 type Consts = Map<string, string | null>;
@@ -223,7 +284,9 @@ function collectConsts(ast: N): Consts {
   const consts: Consts = new Map();
   const declared = new Map<string, number>();
   const decls: N[] = [];
-  (walk as any).simple(ast, { VariableDeclarator: (n: N) => decls.push(n) }, base);
+  walkAst(ast, (n) => {
+    if (n.type === "VariableDeclarator") decls.push(n);
+  });
   for (const d of decls) if (d.id.type === "Identifier") declared.set(d.id.name, (declared.get(d.id.name) ?? 0) + 1);
   for (let pass = 0; pass < 3; pass++) {
     for (const d of decls) {
@@ -265,6 +328,17 @@ function moduleCapability(spec: string): { kind: CapabilityKind; detail: string 
 }
 
 // ---- the analysis -------------------------------------------------------------
+const FS_FUNCS = new Set(["readFile", "readFileSync", "writeFile", "writeFileSync", "appendFile", "appendFileSync", "createReadStream", "createWriteStream", "open", "openSync", "readdir", "readdirSync", "stat", "statSync", "lstat", "lstatSync", "access", "accessSync", "exists", "existsSync", "copyFile", "copyFileSync", "cp", "cpSync", "rename", "renameSync", "unlink", "unlinkSync", "rm", "rmSync", "mkdir", "mkdirSync", "symlink", "symlinkSync", "readlink", "realpath", "chmod", "chmodSync", "opendir", "watch", "truncate", "outputFile", "readJson", "writeJson"]);
+const CHILD_FUNCS = new Set(["exec", "execSync", "spawn", "spawnSync", "execFile", "execFileSync", "fork"]);
+const PATH_FUNCS = new Set(["join", "resolve", "normalize", "relative"]);
+const SINK_NAMES = new Set([...FS_FUNCS, ...CHILD_FUNCS, ...PATH_FUNCS]);
+/** Calls that change files or start processes: where an rc / agent-config path is dangerous. Reading or joining such a path is not. */
+const WRITE_SINKS = new Set([...FS_WRITE, ...CHILD_FUNCS, "mkdir", "mkdirSync", "unlink", "unlinkSync", "rm", "rmSync", "truncate", "writeJson"]);
+const ENV_DUMPERS = new Set(["JSON.stringify", "Object.entries", "Object.keys", "Object.values", "Object.fromEntries", "Object.assign", "structuredClone", "util.inspect", "inspect"]);
+const TIMER_FUNCS = new Set(["setTimeout", "setInterval", "setImmediate"]);
+const SAFE_CONSTRUCTOR_TAILS = new Set(["name", "prototype", "length"]);
+
+
 export function analyze(rel: string, parsed: { ast: N; code: string }): FileFacts {
   const { ast, code } = parsed;
   const lines = code.split("\n");
@@ -286,11 +360,91 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
     if (once(`f:${rule}:${line}`)) facts.findings.push({ rule, severity, file: rel, line, excerpt: excerpt ?? text(line) });
   };
 
+  const propName = (m: N): string | null => (m.computed ? fold(m.property, consts) : m.property.type === "Identifier" ? m.property.name : m.property.type === "PrivateIdentifier" ? `#${m.property.name}` : null);
+  const isGlobalObj = (n: N): boolean => n.type === "Identifier" && GLOBAL_OBJECTS.has(n.name);
+  const isProcess = (n: N): boolean => (n.type === "Identifier" && n.name === "process") || (n.type === "MemberExpression" && isGlobalObj(n.object) && propName(n) === "process");
+  const unwrap = (n: N): N => (n && (n.type === "TSAsExpression" || n.type === "TSSatisfiesExpression" || n.type === "TSNonNullExpression" || n.type === "TSTypeAssertion" ? unwrap(n.expression) : n.type === "ChainExpression" ? unwrap(n.expression) : n));
+  const dottedName = (n0: N): string | null => {
+    const n = unwrap(n0);
+    if (n.type === "Identifier") return n.name;
+    if (n.type === "MemberExpression") {
+      const o = dottedName(n.object);
+      const p = propName(n);
+      return o && p ? `${o}.${p}` : null;
+    }
+    return null;
+  };
+  /** The global/property name an expression denotes when used as a callee: `eval`, `globalThis["ev"+"al"]`, `(0, eval)`. */
+  const resolveName = (n0: N): string | null => {
+    const n = unwrap(n0);
+    if (n.type === "Identifier") return n.name;
+    if (n.type === "SequenceExpression") return resolveName(n.expressions.at(-1));
+    if (n.type === "MemberExpression" && isGlobalObj(n.object)) return propName(n);
+    if (n.type === "MemberExpression" && propName(n) === "require") return "require";
+    return null;
+  };
+  const calleeSimpleName = (c0: N): string | null => {
+    const c = unwrap(c0);
+    return c.type === "Identifier" ? c.name : c.type === "MemberExpression" ? propName(c) : null;
+  };
+
+  // ---- pre-passes: module bindings, env aliases, decoded values, path literals ----
+  const nodes: Array<{ n: N; anc: N[] }> = [];
+  const decls: N[] = [];
+  walkAst(ast, (n, anc) => {
+    if (n.type === "VariableDeclarator") decls.push(n);
+    if (n.type === "AssignmentExpression") decls.push({ id: n.left, init: n.right, type: "VariableDeclarator" });
+    void anc;
+  });
+  void nodes;
+
+  const requireSpec = (init0: N): string | null => {
+    let init = unwrap(init0);
+    if (init?.type === "AwaitExpression") init = unwrap(init.argument);
+    if (!init) return null;
+    if (init.type === "ImportExpression") return fold(init.source, consts);
+    if (init.type === "CallExpression") {
+      const c = unwrap(init.callee);
+      const name = c.type === "Identifier" ? c.name : c.type === "MemberExpression" ? propName(c) : null;
+      if ((name === "require" || name === "getBuiltinModule") && init.arguments[0]) return fold(init.arguments[0], consts);
+    }
+    return null;
+  };
+  /** local name -> module it was bound to (import / require / import() / getBuiltinModule) */
+  const moduleBindings = new Map<string, string>();
+  walkAst(ast, (n) => {
+    if (n.type === "ImportDeclaration") {
+      for (const sp of n.specifiers) moduleBindings.set(sp.local.name, normalizeModule(String(n.source.value)));
+    }
+  });
+  for (const d of decls) {
+    const spec = requireSpec(d.init);
+    if (spec === null) continue;
+    if (d.id.type === "Identifier") moduleBindings.set(d.id.name, normalizeModule(spec));
+    else if (d.id.type === "ObjectPattern") for (const p of d.id.properties) if (p.type === "Property" && p.value.type === "Identifier") moduleBindings.set(p.value.name, normalizeModule(spec));
+  }
+
+  // env aliases: `const e = process.env`, `{...process.env}`, `Object.assign({}, e)`, `structuredClone(e)` …
+  const envAliases = new Set<string>();
+  const isEnvExpr = (n0: N): boolean => {
+    const n = unwrap(n0);
+    if (!n) return false;
+    if (n.type === "MemberExpression") return isProcess(n.object) && propName(n) === "env";
+    if (n.type === "Identifier") return envAliases.has(n.name);
+    if (n.type === "ObjectExpression") return n.properties.some((p: N) => p.type === "SpreadElement" && isEnvExpr(p.argument));
+    if (n.type === "CallExpression") {
+      const d = dottedName(n.callee);
+      return d !== null && ENV_DUMPERS.has(d) && n.arguments.some(isEnvExpr);
+    }
+    return false;
+  };
+  for (let pass = 0; pass < 3; pass++) for (const d of decls) if (d.id.type === "Identifier" && d.init && isEnvExpr(d.init)) envAliases.add(d.id.name);
+
   // decode → eval: names assigned from decoders (two passes so chains resolve)
   const tainted = new Set<string>();
   const isDecodeCall = (n: N): boolean => {
     if (n.type !== "CallExpression") return false;
-    const c = n.callee;
+    const c = unwrap(n.callee);
     if (c.type === "Identifier") return DECODE_FUNCS.has(c.name);
     if (c.type !== "MemberExpression") return false;
     const prop = propName(c);
@@ -304,33 +458,41 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
     return false;
   };
   const decoded = (n: N): boolean => anyNode(n, (x) => isDecodeCall(x) || (x.type === "Identifier" && tainted.has(x.name)));
-  const propName = (m: N): string | null => (m.computed ? fold(m.property, consts) : m.property.type === "Identifier" ? m.property.name : null);
-  const isGlobalObj = (n: N): boolean => n.type === "Identifier" && GLOBAL_OBJECTS.has(n.name);
-  const isProcess = (n: N): boolean => (n.type === "Identifier" && n.name === "process") || (n.type === "MemberExpression" && isGlobalObj(n.object) && propName(n) === "process");
+  for (let pass = 0; pass < 2; pass++) for (const d of decls) if (d.id.type === "Identifier" && d.init && decoded(d.init)) tainted.add(d.id.name);
 
-  /** The global/property name an expression denotes when used as a callee: `eval`, `globalThis["ev"+"al"]`, `(0, eval)`. */
-  const resolveName = (n: N): string | null => {
-    if (n.type === "Identifier") return n.name;
-    if (n.type === "SequenceExpression") return resolveName(n.expressions.at(-1));
-    if (n.type === "ChainExpression") return resolveName(n.expression);
-    if (n.type === "MemberExpression" && isGlobalObj(n.object)) return propName(n);
-    if (n.type === "MemberExpression" && propName(n) === "require") return "require";
-    return null;
+  // Path literals per variable (so `const p = home + "/.ssh/id_rsa"; readFileSync(p)` still reaches the sink).
+  const pathMatches = (value: string): Array<"secret" | "rc"> => {
+    const out: Array<"secret" | "rc"> = [];
+    if (SECRET_PATH.test(value)) out.push("secret");
+    if (RC_PATH.test(value)) out.push("rc");
+    return out;
   };
-  const dottedName = (n: N): string | null => {
-    if (n.type === "Identifier") return n.name;
-    if (n.type === "MemberExpression") {
-      const o = dottedName(n.object);
-      const p = propName(n);
-      return o && p ? `${o}.${p}` : null;
-    }
-    return null;
+  /** Strings in a subtree, including constant-folded concatenations. */
+  const stringsIn = (root: N): Array<{ value: string; n: N }> => {
+    const out: Array<{ value: string; n: N }> = [];
+    const visit = (n: N): void => {
+      if (!n || typeof n !== "object") return;
+      if (Array.isArray(n)) return n.forEach(visit);
+      if (typeof n.type !== "string") return;
+      if (n.type.startsWith("TS") && !RUNTIME_TS.has(n.type)) return;
+      if (n.type === "Literal" && typeof n.value === "string") out.push({ value: n.value, n });
+      else if (n.type === "TemplateElement") out.push({ value: n.value.cooked ?? "", n });
+      else if (n.type === "BinaryExpression" && n.operator === "+") {
+        const f = fold(n, consts);
+        if (f !== null) out.push({ value: f, n });
+      }
+      for (const k of Object.keys(n)) if (!SKIP_KEYS.has(k)) visit(n[k]);
+    };
+    visit(root);
+    return out;
   };
-
-  for (let pass = 0; pass < 2; pass++) {
-    (walk as any).simple(ast, { VariableDeclarator: (d: N) => { if (d.id.type === "Identifier" && d.init && decoded(d.init)) tainted.add(d.id.name); } }, base);
+  const varPaths = new Map<string, Array<{ kind: "secret" | "rc"; value: string }>>();
+  for (const d of decls) {
+    if (d.id.type !== "Identifier" || !d.init) continue;
+    for (const { value } of stringsIn(d.init)) for (const kind of pathMatches(value)) varPaths.set(d.id.name, [...(varPaths.get(d.id.name) ?? []), { kind, value }]);
   }
 
+  // ---- visitors ----------------------------------------------------------------
   const handleSpec = (specNode: N, n: N, how: "import" | "require"): void => {
     const spec = fold(specNode, consts);
     if (spec === null) {
@@ -345,11 +507,63 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
     }
     const mc = moduleCapability(spec);
     if (mc) cap(mc.kind, mc.detail, n);
+    else if (spec.startsWith("node:") && !PLAIN_BUILTINS.has(normalizeModule(spec))) finding("unknown-builtin", "review", n, `unclassified Node built-in: ${spec}`);
   };
 
+  const consumed = new Set<N>();
+  let bareReported = 0;
+  /** A call that touches files, paths or processes: path-like literals in its arguments are real uses, not mentions. */
+  const scanSink = (call: N, simple: string): void => {
+    const writes = WRITE_SINKS.has(simple);
+    const child = CHILD_FUNCS.has(simple);
+    const push = (kind: "secret" | "rc", n: N, value: string): void => {
+      if (kind === "secret") facts.secretPaths.push({ line: lineOf(n), text: excerptOf(value, 100) });
+      else if (writes) facts.rcPaths.push({ line: lineOf(n), text: excerptOf(value, 100) });
+      else finding("config-path", "info", n, excerptOf(value));
+    };
+    for (const arg of call.arguments) {
+      for (const { value, n } of stringsIn(arg)) {
+        consumed.add(n);
+        for (const kind of pathMatches(value)) push(kind, n, value);
+        if (child && PIPE_SHELL.test(value)) finding("download-exec", "block", n, excerptOf(value));
+      }
+      anyNode(arg, (x) => {
+        if (x.type === "Identifier" && varPaths.has(x.name)) for (const m of varPaths.get(x.name)!) push(m.kind, x, m.value);
+        return false;
+      });
+    }
+  };
+
+  /** Whole-environment use: copies and serialisations are `env-dump` (block). `source` is `process.env` or an alias of it. */
+  const checkEnvWhole = (source: N, anc: N[]): void => {
+    let cur = source;
+    for (let i = anc.length - 2; i >= 0; i--) {
+      const p = anc[i];
+      if (p.type === "SpreadElement") {
+        finding("env-dump", "block", p);
+        return;
+      }
+      if (p.type === "CallExpression" && p.arguments.includes(cur)) {
+        const d = dottedName(p.callee);
+        if (d && ENV_DUMPERS.has(d)) finding("env-dump", "block", p);
+        return;
+      }
+      if (["ObjectExpression", "Property", "ArrayExpression"].includes(p.type)) {
+        cur = p;
+        continue;
+      }
+      if (p.type === "TSAsExpression" || p.type === "TSNonNullExpression" || p.type === "TSSatisfiesExpression") {
+        cur = p;
+        continue;
+      }
+      return;
+    }
+  };
   const handleEnvUse = (envNode: N, anc: N[]): void => {
     const parent = anc[anc.length - 2];
     const names: string[] = [];
+    // `const e = process.env`: a plain alias is tracked, and reads through it are counted where they happen.
+    if (parent?.type === "VariableDeclarator" && parent.init === envNode && parent.id.type === "Identifier") return;
     if (parent?.type === "MemberExpression" && parent.object === envNode) {
       const p = propName(parent);
       if (p === null) {
@@ -359,24 +573,17 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
     } else if ((parent?.type === "VariableDeclarator" && parent.init === envNode && parent.id.type === "ObjectPattern") || (parent?.type === "AssignmentExpression" && parent.right === envNode && parent.left.type === "ObjectPattern")) {
       const pat = parent.type === "VariableDeclarator" ? parent.id : parent.left;
       for (const p of pat.properties) {
-        if (p.type === "RestElement") names.push("*");
-        else {
+        if (p.type === "RestElement") {
+          names.push("*");
+          finding("env-dump", "block", p);
+        } else {
           const k = p.computed ? fold(p.key, consts) : p.key.type === "Identifier" ? p.key.name : String(p.key.value);
           names.push(k ?? "*");
         }
       }
     } else {
       names.push("*");
-      // Serialising the whole environment: JSON.stringify(process.env), Object.entries({...process.env}) …
-      for (let i = anc.length - 2; i >= 0 && i >= anc.length - 6; i--) {
-        const a = anc[i];
-        if (a.type === "CallExpression") {
-          const d = dottedName(a.callee);
-          if (d && ENV_SERIALIZERS.has(d)) finding("env-dump", "block", a);
-          break;
-        }
-        if (!["SpreadElement", "ObjectExpression", "Property", "ArrayExpression"].includes(a.type)) break;
-      }
+      checkEnvWhole(envNode, anc);
     }
     for (const name of names) cap("env", name, envNode);
   };
@@ -409,6 +616,7 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
     if (call.arguments.some((a: N) => decoded(a))) finding("decode-eval", "block", call);
   };
 
+  const builtinCandidates: Array<{ n: N; value: string }> = [];
   const stringChecks = (value: string, n: N): void => {
     const line = lineOf(n);
     if (value.length < 3) return;
@@ -419,25 +627,31 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
         /* not a URL */
       }
     }
-    if (SECRET_PATH.test(value)) facts.secretPaths.push({ line, text: excerptOf(value, 100) });
-    if (RC_PATH.test(value)) facts.rcPaths.push({ line, text: excerptOf(value, 100) });
-    if (PIPE_SHELL.test(value)) finding("download-exec", "block", n, excerptOf(value));
+    if (!consumed.has(n) && bareReported < 3) {
+      const kinds = pathMatches(value);
+      if (kinds.length > 0) {
+        bareReported++;
+        finding(kinds[0] === "secret" ? "secret-path-string" : "config-path-string", "info", n, excerptOf(value));
+      }
+    }
+    if (!consumed.has(n) && PIPE_SHELL.test(value)) finding("shell-pipe-string", "info", n, excerptOf(value));
     if (BUILTIN_RPC.has(value)) builtinCandidates.push({ n, value });
   };
-  const builtinCandidates: Array<{ n: N; value: string }> = [];
+  const rpcCall = (call: N): void => {
+    for (const a of call.arguments) {
+      const v = fold(a, consts);
+      if (v !== null && BUILTIN_RPC.has(v)) cap("builtin_rpc", v, call);
+    }
+  };
 
-  const visitors: Record<string, (n: N, st: unknown, anc: N[]) => void> = {
+  const visitors: Record<string, (n: N, anc: N[]) => void> = {
     Literal(n) {
       if (typeof n.value === "string") stringChecks(n.value, n);
     },
-    TemplateLiteral(n, _s, anc) {
-      const parent = anc[anc.length - 2];
-      if (parent?.type === "TaggedTemplateExpression") return;
-      const f = fold(n, consts);
-      if (f !== null) stringChecks(f, n);
-      else for (const q of n.quasis) if (q.value.cooked) stringChecks(q.value.cooked, n);
+    TemplateElement(n) {
+      if (n.value.cooked) stringChecks(n.value.cooked, n);
     },
-    BinaryExpression(n, _s, anc) {
+    BinaryExpression(n, anc) {
       if (n.operator !== "+" || anc[anc.length - 2]?.type === "BinaryExpression") return;
       const f = fold(n, consts);
       if (f !== null) stringChecks(f, n);
@@ -448,6 +662,9 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
         for (const s of n.specifiers) if (s.type === "ImportSpecifier" && s.imported.name === "env") cap("env", "*", n);
       }
     },
+    TSExternalModuleReference(n) {
+      handleSpec(n.expression, n, "require");
+    },
     ExportAllDeclaration(n) {
       if (n.source) handleSpec(n.source, n, "import");
     },
@@ -457,21 +674,31 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
     ImportExpression(n) {
       handleSpec(n.source, n, "import");
     },
-    Identifier(n, _s, anc) {
+    Identifier(n, anc) {
       const parent = anc[anc.length - 2];
+      if (!isRef(n, parent)) return;
       if (n.name === "eval") {
         cap("dynamic_code", "eval", n);
         facts.execSink = true;
       }
       if (NETWORK_GLOBALS.has(n.name)) cap("network", n.name, n);
+      if (n.name === "WebAssembly") {
+        cap("dynamic_code", "WebAssembly", n);
+        finding("webassembly", "review", n);
+      }
       if (n.name === "require") {
         const isCallee = parent?.type === "CallExpression" && parent.callee === n;
         const benign = (parent?.type === "UnaryExpression" && parent.operator === "typeof") || (parent?.type === "MemberExpression" && parent.object === n && ["resolve", "main", "cache", "extensions"].includes(String(propName(parent))));
         if (!isCallee && !benign) finding("require-alias", "review", n);
       }
+      if (envAliases.has(n.name)) {
+        if (parent?.type === "MemberExpression" && parent.object === n) handleEnvUse(n, anc);
+        else if (parent?.type !== "VariableDeclarator" || parent.init === n) handleEnvUse(n, anc);
+      }
     },
-    MemberExpression(n, _s, anc) {
+    MemberExpression(n, anc) {
       const name = propName(n);
+      const parent = anc[anc.length - 2];
       if (isProcess(n.object)) {
         if (name === "env") handleEnvUse(n, anc);
         else if (name === null) {
@@ -481,6 +708,7 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
           cap("dynamic_code", `process.${name}`, n);
           finding("native-load", "review", n);
         } else if (name === "mainModule") finding("require-alias", "review", n);
+        else if (name === "getBuiltinModule") cap("dynamic_code", "process.getBuiltinModule", n);
       } else if (isGlobalObj(n.object)) {
         if (name === null) {
           finding("dynamic-access", "review", n);
@@ -489,6 +717,26 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
           cap("dynamic_code", "eval", n);
           facts.execSink = true;
         } else if (NETWORK_GLOBALS.has(name)) cap("network", name, n);
+        else if (name === "WebAssembly") {
+          cap("dynamic_code", "WebAssembly", n);
+          finding("webassembly", "review", n);
+        }
+      } else if (n.computed && name === null && n.object.type === "Identifier" && moduleBindings.has(n.object.name)) {
+        // `cp[name](…)` on a module namespace: which function is that?
+        const mc = moduleCapability(moduleBindings.get(n.object.name)!);
+        if (mc) {
+          finding("dynamic-access", "review", n, `${text(lineOf(n))}  (computed member of ${moduleBindings.get(n.object.name)})`);
+          cap(mc.kind, mc.detail, n);
+        }
+      }
+      // `.constructor` reaching for Function / Module: called, or followed by another member.
+      if (name === "constructor") {
+        const called = (parent?.type === "CallExpression" && parent.callee === n) || (parent?.type === "NewExpression" && parent.callee === n && /Function|Arrow/.test(unwrap(n.object).type));
+        const chained = parent?.type === "MemberExpression" && parent.object === n && !SAFE_CONSTRUCTOR_TAILS.has(String(propName(parent)));
+        if (called || chained) {
+          cap("dynamic_code", ".constructor", n);
+          finding("dynamic-constructor", "review", n);
+        }
       }
       if (n.object.type === "Identifier" && n.object.name === "bb") {
         if (name === "hosts") cap("host_artifact", "bb.hosts", n);
@@ -499,8 +747,9 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
       if (name === "sendBeacon") cap("network", "navigator.sendBeacon", n);
     },
     CallExpression(n) {
-      const callee = n.callee;
+      const callee = unwrap(n.callee);
       const name = resolveName(callee);
+      const simple = calleeSimpleName(callee);
       if (name === "eval") markExec(n, "eval");
       else if (name === "Function") markExec(n, "Function");
       if (name === "require" || (callee.type === "MemberExpression" && propName(callee) === "require")) {
@@ -509,6 +758,16 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
       if (name === "createRequire") {
         cap("dynamic_code", "createRequire", n);
         finding("require-alias", "review", n);
+      }
+      if (simple === "getBuiltinModule" && n.arguments[0]) handleSpec(n.arguments[0], n, "require");
+      if (simple === "_load") {
+        cap("dynamic_code", "Module._load", n);
+        finding("module-load", "review", n);
+        if (n.arguments[0]) handleSpec(n.arguments[0], n, "require");
+      }
+      if (simple !== null && TIMER_FUNCS.has(simple) && n.arguments[0]) {
+        const a = unwrap(n.arguments[0]);
+        if (a.type === "Literal" ? typeof a.value === "string" : a.type === "TemplateLiteral" || fold(a, consts) !== null) markExec(n, `${simple}(string)`);
       }
       if (callee.type === "MemberExpression") {
         const p = propName(callee);
@@ -532,11 +791,13 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
             cap("http_routes", `${method ?? "?"} ${path ?? "?"} (auth: ${auth})`, n);
           }
         }
-        if (p !== null && FS_WRITE.has(p)) facts.fsWrite = true;
         if (p !== null && /rpc|plugin/i.test(p)) rpcCall(n);
+        // Reflect.get(globalThis, x) and friends reach the same things as globalThis[x]
+        if (callee.object.type === "Identifier" && callee.object.name === "Reflect" && n.arguments[0] && (isGlobalObj(unwrap(n.arguments[0])) || isProcess(unwrap(n.arguments[0])))) finding("dynamic-access", "review", n);
       }
-      if (callee.type === "Identifier" && FS_WRITE.has(callee.name)) facts.fsWrite = true;
+      if (simple !== null && FS_WRITE.has(simple)) facts.fsWrite = true;
       if (callee.type === "Identifier" && /rpc/i.test(callee.name)) rpcCall(n);
+      if (simple !== null && SINK_NAMES.has(simple)) scanSink(n, simple);
     },
     NewExpression(n) {
       const name = resolveName(n.callee);
@@ -546,16 +807,8 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
       else if (name !== null && NETWORK_GLOBALS.has(name)) cap("network", name, n);
     },
   };
-  const rpcCall = (call: N): void => {
-    for (const a of call.arguments) {
-      const v = fold(a, consts);
-      if (v !== null && BUILTIN_RPC.has(v)) cap("builtin_rpc", v, call);
-    }
-  };
 
-  const wrapped: Record<string, any> = {};
-  for (const [type, fn] of Object.entries(visitors)) wrapped[type] = (n: N, st: unknown, anc: N[]) => fn(n, st, anc);
-  (walk as any).ancestor(ast, wrapped, base);
+  walkAst(ast, (n, anc) => visitors[n.type]?.(n, anc));
 
   // `{ pluginId: "connect" }` style references to built-in plugins
   for (const { n, value } of builtinCandidates) {
@@ -564,7 +817,7 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
 
   // download and execute: a network call and an execution sink in one file
   if (facts.network) {
-    const exec = facts.sites.find((s) => s.kind === "dynamic_code" && /^(eval|Function|new Function|vm\.)/.test(s.detail));
+    const exec = facts.sites.find((s) => s.kind === "dynamic_code" && /^(eval|Function|new Function|vm\.|setTimeout|setInterval)/.test(s.detail));
     if (exec) finding("download-exec", "block", { loc: { start: { line: exec.line } } }, `network call and ${exec.detail} in one file`);
     else if (facts.childProcess && facts.fsWrite) {
       const site = facts.sites.find((s) => s.kind === "child_process")!;

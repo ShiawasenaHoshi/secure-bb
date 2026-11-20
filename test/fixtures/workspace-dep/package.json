@@ -1,0 +1,9 @@
+{
+  "name": "w",
+  "devDependencies": {
+    "@bb/plugin-build": "workspace:*"
+  },
+  "dependencies": {
+    "x": "git+https://e.example/x.git"
+  }
+}

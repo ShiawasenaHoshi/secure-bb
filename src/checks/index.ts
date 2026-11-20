@@ -46,6 +46,7 @@ export async function runChecks(dir: string): Promise<CheckResult> {
       continue;
     }
     parsed++;
+    if (res.note) findings.push({ rule: "parse-note", severity: "info", file: src.rel, line: 0, excerpt: res.note });
     let facts: FileFacts;
     try {
       facts = analyze(src.rel, res);
@@ -77,6 +78,16 @@ export async function runChecks(dir: string): Promise<CheckResult> {
   for (const { rel, facts } of perFile) {
     if (!anyNetwork) break;
     for (const h of facts.hosts) addCap(caps, "network", `host:${h.host}`, rel, h.line);
+  }
+
+  // A secret-looking env variable next to any network capability (DNS names are enough to carry it out).
+  const envCap = caps.get("env");
+  if (caps.has("network") && envCap) {
+    const secretish = [...envCap.detail].filter((d) => /TOKEN|KEY|SECRET|PASSW|CREDENTIAL|AUTH/i.test(d));
+    if (secretish.length > 0) {
+      const site = envCap.sites[0]!;
+      findings.push({ rule: "env-secret-network", severity: "review", file: site.file, line: site.line, excerpt: `reads ${secretish.join(", ")} and has network access (${[...caps.get("network")!.detail].filter((d) => !d.startsWith("host:")).join(", ")})` });
+    }
   }
 
   const capabilities: Capability[] = CAPABILITY_KINDS.filter((k) => caps.has(k)).map((kind) => {
