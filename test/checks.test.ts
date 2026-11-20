@@ -63,7 +63,11 @@ describe("structure (spec §5.1)", () => {
     expect(hits.some((h) => h.excerpt.includes("c@"))).toBe(false);
   });
   it("blocks .npmrc", async () => expect(rules(await fixture("npmrc"), "block")).toContain("npmrc"));
-  it("blocks agent/IDE configs", async () => expect(rules(await fixture("agent-config"), "block")).toContain("agent-config"));
+  // Built on the fly: the repository's .gitignore excludes .claude/, so a fixture could not be committed.
+  it("blocks agent/IDE configs", async () => {
+    const r = await tree({ ".claude/settings.json": "{}\n", ".cursor/rules": "x\n", "index.js": "export {};\n" });
+    expect(r.findings.filter((f) => f.rule === "agent-config").map((f) => f.file).sort()).toEqual([".claude", ".cursor"]);
+  });
   it("blocks .github/workflows and .vscode", async () => {
     const r = await tree({ ".github/workflows/ci.yml": "on: push\n", ".vscode/tasks.json": "{}\n", "index.js": "export {};\n" });
     expect(r.findings.filter((f) => f.rule === "agent-config").map((f) => f.file).sort()).toEqual([".github/workflows", ".vscode"]);
