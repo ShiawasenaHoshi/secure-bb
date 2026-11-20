@@ -3,6 +3,7 @@
 import { createHash } from "node:crypto";
 import { lstat, readdir, readFile, readlink } from "node:fs/promises";
 import { dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
+import { parseVersion } from "../deps/semver.js";
 import type { Finding } from "./types.js";
 
 export const MAX_FILES = 20_000;
@@ -17,10 +18,28 @@ export interface SourceFile {
   dist: boolean;
 }
 
+/** A dependency the plugin's own package.json declares. */
+export interface DeclaredDep {
+  name: string;
+  spec: string;
+  line: number;
+}
+/** A package copy found in `node_modules` (name from the directory, as module resolution sees it). */
+export interface InstalledPackage {
+  name: string;
+  /** `version` field of its package.json when it is a valid version; otherwise null. */
+  version: string | null;
+  file: string;
+  /** The package.json names itself differently from its directory. */
+  declaredName: string | null;
+}
+
 export interface TreeScan {
   findings: Finding[];
   sources: SourceFile[];
   rootPackage: Record<string, unknown> | null;
+  declared: DeclaredDep[];
+  installed: InstalledPackage[];
   files: number;
   bytes: number;
 }
@@ -138,13 +157,15 @@ function isUrlSpec(spec: string): boolean {
 /** `workspace:` is how bb's own monorepo plugins refer to each other: not a URL, but not a registry version either. */
 const isWorkspaceSpec = (spec: string): boolean => /^workspace:/i.test(spec);
 
-function packageFindings(rel: string, raw: string, isRoot: boolean): { findings: Finding[]; pkg: Record<string, unknown> | null } {
+const RUNTIME_DEP_FIELDS = ["dependencies", "optionalDependencies"];
+
+function packageFindings(rel: string, raw: string, isRoot: boolean): { findings: Finding[]; pkg: Record<string, unknown> | null; declared: DeclaredDep[] } {
   const findings: Finding[] = [];
   let pkg: Record<string, unknown>;
   try {
     pkg = JSON.parse(raw) as Record<string, unknown>;
   } catch {
-    return { findings: [{ rule: "bad-package-json", severity: "review", file: rel, line: 0, excerpt: "package.json is not valid JSON" }], pkg: null };
+    return { findings: [{ rule: "bad-package-json", severity: "review", file: rel, line: 0, excerpt: "package.json is not valid JSON" }], pkg: null, declared: [] };
   }
   const lineOf = (needle: string): number => {
     const idx = raw.indexOf(`"${needle}"`);
@@ -164,8 +185,29 @@ function packageFindings(rel: string, raw: string, isRoot: boolean): { findings:
       else if (isWorkspaceSpec(spec.trim())) findings.push({ rule: "workspace-dependency", severity: "review", file: rel, line: lineOf(name), excerpt: excerptOf(`${field}: ${name}@${spec}`) });
     }
   }
-  void isRoot;
-  return { findings, pkg };
+  const declared: DeclaredDep[] = [];
+  if (isRoot) {
+    for (const field of RUNTIME_DEP_FIELDS) {
+      const deps = pkg[field];
+      if (!deps || typeof deps !== "object" || Array.isArray(deps)) continue;
+      for (const [name, spec] of Object.entries(deps as Record<string, unknown>)) {
+        if (typeof spec === "string") declared.push({ name, spec: spec.trim(), line: lineOf(name) });
+      }
+    }
+  }
+  return { findings, pkg, declared };
+}
+
+/** `a/node_modules/@scope/pkg/package.json` → `@scope/pkg`; null when this package.json is not a package's own manifest. */
+export function installedPackageName(rel: string): string | null {
+  const segs = rel.split(sep);
+  if (segs.at(-1) !== "package.json") return null;
+  const dir = segs.slice(0, -1);
+  const last = dir.at(-1);
+  if (last === undefined) return null;
+  if (dir.at(-2) === "node_modules") return last;
+  if (dir.at(-3) === "node_modules" && dir.at(-2)!.startsWith("@")) return `${dir.at(-2)}/${last}`;
+  return null;
 }
 
 /** Walks the tree once: structural findings, plus the text of every source file for the AST pass. */
@@ -173,6 +215,8 @@ export async function scanTree(root: string): Promise<TreeScan> {
   const findings: Finding[] = [];
   const sources: SourceFile[] = [];
   let rootPackage: Record<string, unknown> | null = null;
+  let declared: DeclaredDep[] = [];
+  const installed: InstalledPackage[] = [];
   let files = 0;
   let bytes = 0;
   let writable = 0;
@@ -259,9 +303,17 @@ export async function scanTree(root: string): Promise<TreeScan> {
     findings.push(...invisibleFindings(rel, text));
 
     if (name === "package.json") {
-      const { findings: f, pkg } = packageFindings(rel, text, rel === "package.json");
+      const { findings: f, pkg, declared: d } = packageFindings(rel, text, rel === "package.json");
       findings.push(...f);
-      if (rel === "package.json") rootPackage = pkg;
+      if (rel === "package.json") {
+        rootPackage = pkg;
+        declared = d;
+      }
+      const dirName = dep ? installedPackageName(rel) : null;
+      if (dirName !== null && pkg) {
+        const version = typeof pkg.version === "string" && parseVersion(pkg.version) ? pkg.version : null;
+        installed.push({ name: dirName, version, file: rel, declaredName: typeof pkg.name === "string" && pkg.name !== dirName ? pkg.name : null });
+      }
     }
     if (isCodeFile(rel)) {
       if (!exempt && !KNOWN_VENDORED_SHA256.has(createHash("sha256").update(buf).digest("hex"))) {
@@ -274,5 +326,5 @@ export async function scanTree(root: string): Promise<TreeScan> {
 
   await walkDir("");
   if (writable > 3) findings.push({ rule: "writable-by-others", severity: "block", file: "", line: 0, excerpt: `${writable - 3} more entries are writable by group/others` });
-  return { findings, sources, rootPackage, files, bytes };
+  return { findings, sources, rootPackage, declared, installed, files, bytes };
 }

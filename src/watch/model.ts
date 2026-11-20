@@ -51,6 +51,8 @@ export interface Observation {
   items: Item[];
   /** Sources that could not be read this time. */
   failed: Unobserved[];
+  /** Sources that do not exist for this bb or project (not a failure: nothing is there to read). */
+  notApplicable?: Unobserved[];
   /** Things the bb API cannot show at all (constant, honest). */
   blind: Unobserved[];
   /** Instruction text, kept only to restore it (held in the plugin's own database). */

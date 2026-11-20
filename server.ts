@@ -19,6 +19,8 @@ import { Gate, GateError, type HookCtx, type ThreadTree } from "./src/gate.js";
 import { buildOverview } from "./src/overview.js";
 import { collectProbe, runningThirdParty, type InstalledPluginLite } from "./src/probe.js";
 import { formatReport, runChecks } from "./src/checks/index.js";
+import type { FetchLike } from "./src/deps/registry.js";
+import { verifyDependencies } from "./src/deps/verify.js";
 import { propose } from "./src/propose.js";
 import { encodeQr } from "./src/qr.js";
 import { MIGRATIONS, Store } from "./src/store.js";
@@ -87,9 +89,13 @@ export default async function plugin(bb: BbPluginApi) {
     },
   };
 
+  // Registry lookups for dependencies (stage 2.3) are made here, by the server process; answers are cached in our database.
+  const verifyDeps = (result: Parameters<typeof verifyDependencies>[0]) => verifyDependencies(result, { cache: store, fetch: globalThis.fetch as unknown as FetchLike, now });
+
   const gate = new Gate({
     store,
     now,
+    verifyDeps,
     threads,
     thirdPartyRunning: async () => runningThirdParty(await listPlugins()),
     externalTotpFile: process.env.BB_SECURE_BB_TOTP_FILE?.trim() || null,
@@ -318,14 +324,14 @@ export default async function plugin(bb: BbPluginApi) {
           },
         }),
         check: cliCommand({
-          summary: "Run the deterministic checks on a plugin directory without installing it",
+          summary: "Run the checks on a plugin directory without installing it (dependencies are looked up on the npm registry by the server)",
           positionals: [{ name: "path", description: "Plugin directory on this machine", required: true }],
           options: {},
           async run(input, ctx) {
             const dir = resolvePath(ctx.cwd ?? process.cwd(), input.positionals.path);
             let result;
             try {
-              result = await runChecks(dir);
+              result = await verifyDeps(await runChecks(dir));
             } catch (err) {
               throw new PluginCliError(`cannot check ${dir}: ${err instanceof Error ? err.message : String(err)}`, { code: "check_failed" });
             }

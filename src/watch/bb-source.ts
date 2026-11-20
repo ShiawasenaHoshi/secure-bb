@@ -5,7 +5,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { fetchAccountState, type InstalledPluginLite } from "../probe.js";
-import type { SkillLite, WatchSource } from "./collect.js";
+import { NotApplicableError, type SkillLite, type WatchSource } from "./collect.js";
 import type { WatchActions } from "./watchdog.js";
 
 type Sdk = BbPluginApi["sdk"];
@@ -87,6 +87,8 @@ export function bbWatchSource(d: BbSourceDeps): WatchSource {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (ABSENT.test(msg)) return null;
+        // HTTP 409: the project has no local folder (e.g. the personal project), so there is no file to read.
+        if ((err as { status?: unknown } | null)?.status === 409 || /\b409\b/.test(msg)) throw new NotApplicableError(`у проекта нет локального каталога: .bb-env-setup.sh негде лежать (bb: ${msg.slice(0, 120)})`);
         throw err;
       }
     },

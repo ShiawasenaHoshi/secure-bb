@@ -47,6 +47,10 @@ export function formatWatch(v: WatchView, now: number, limit = 20): string {
     lines.push("", "не удалось прочитать сейчас (расхождения здесь не оцениваются):");
     for (const f of v.failed) lines.push(`  ${f.source}: ${f.reason}`);
   }
+  if (v.notApplicable.length > 0) {
+    lines.push("", "не применимо (читать нечего):");
+    for (const f of v.notApplicable) lines.push(`  ${f.source}: ${f.reason}`);
+  }
   if (v.blind.length > 0) {
     lines.push("", "не наблюдается вообще (в API bb этого нет):");
     for (const b of v.blind) lines.push(`  ${b.reason}`);

@@ -68,6 +68,8 @@ export interface WatchView {
   observedCount: number;
   byCategory: Partial<Record<Category, number>>;
   failed: Unobserved[];
+  /** Not read because there is nothing to read here (e.g. a project without a local folder). */
+  notApplicable: Unobserved[];
   blind: Unobserved[];
   drifts: Drift[];
   windows: ConfigWindowView[];
@@ -121,6 +123,7 @@ export class Watchdog {
       observedCount: this.last?.items.length ?? 0,
       byCategory,
       failed: this.last?.failed ?? [],
+      notApplicable: this.last?.notApplicable ?? [],
       blind: this.last?.blind ?? [],
       drifts: this.store.listDrifts(60),
       windows: this.openWindows().map((w) => this.windowView(w)),

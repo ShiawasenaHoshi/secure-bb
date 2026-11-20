@@ -6,6 +6,7 @@ const HASHES: Record<string, string> = {
   "acorn.mjs": "76254fc76529713b4dfd2532972d17a991ffd9aafeebb1f977445b5506b9fb0b",
   "acorn-jsx.mjs": "699f555f7886852da766df6ffe0d8e7787211f1e72acda7a20e76c981dad2e67",
   "acorn-typescript.mjs": "e8e9281a975668bddb679c6cdc266e699cc69ddfeada1e4b3e4dc6def9bbe0e7",
+  "popular-packages.mjs": "f9b806a33d9602f2251ce27eb8ba4e105ae7b0e8d222c82fcf42e51b1b58b65d",
 };
 
 describe("vendored parser", () => {

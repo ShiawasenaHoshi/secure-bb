@@ -1,6 +1,7 @@
 # vendor/
 
-Third-party code used by `src/checks/` to parse plugin source into an AST.
+Third-party code used by `src/checks/` to parse plugin source into an AST, and
+one data file (the popular-packages list, last section).
 This is the **only** exception to secure-bb's "zero runtime dependencies"
 rule: Node has no built-in JavaScript parser, and a regex scanner is easy to
 get around. The files are copied byte for byte from the npm tarballs
@@ -46,12 +47,29 @@ each inside a function that supplies `module` / `require`, between
 markers was edited. To rebuild: concatenate header, `xhtml.js`, the glue
 lines and `index.js` as in the existing file; the result must be identical.
 
+## popular-packages.mjs is data
+
+`popular-packages.mjs` (+ `popular-packages.d.mts`) is the list of popular npm package names that
+`src/deps/lookalike.ts` compares dependency names with (Levenshtein ≤ 2, stage 2.3). It holds no code.
+
+| File | Source | Version | License | sha256 |
+|---|---|---|---|---|
+| `popular-packages.mjs` | [npm-high-impact](https://github.com/wooorm/npm-high-impact) `npmHighImpact` (downloads and dependents on the public npm registry, most impactful first) | 1.13.0, published 2026-06-08 | MIT (`LICENSE.npm-high-impact`) | `f9b806a33d9602f2251ce27eb8ba4e105ae7b0e8d222c82fcf42e51b1b58b65d` |
+
+Taken: the first 5000 names of `npmHighImpact` (17338 in all), lower-cased, in the source's order;
+vendored on 2026-11-21. Source and dates are also exported as `POPULAR_SOURCE`. Rebuild: `npm pack npm-high-impact@<version>`,
+import `npmHighImpact` from its `index.js`, write the first 5000 names one per line between the two
+`export const` markers of the existing file; the header comment and `POPULAR_SOURCE` carry the new version and dates.
+The list is a snapshot: a package that became popular after 2026-06-08 is not in it (its lookalikes are missed, the
+package itself is not flagged). Refresh it when the vendored parser is updated.
+
 ## Known limits
 
 - TypeScript and TSX are parsed directly by acorn-typescript (enum, namespace,
   parameter properties, JSX). Known gaps of that parser: a few constructs it
   rejects (e.g. a generic arrow `<K extends keyof T>(…) =>` after certain code in
-  `tasks/views/manage/preset-dialog.tsx` of bb's own plugins). Such a file is
+  `tasks/views/manage/preset-dialog.tsx` of bb's own plugins; `async <T>(x) =>` in `.ts` files, as in
+  `automations.test.ts`, was fixed in stage 2.3: the type-parameter list is blanked out and the file analysed). Such a file is
   `parse-failed` (severity `review`), never a pass. A `.ts` file is retried with
   JSX on and a `.tsx` without it before giving up.
 - acorn is configured with `ecmaVersion: "latest"`; syntax newer than the

@@ -362,7 +362,46 @@ function ChecksView({ result }: { result: CheckResult | undefined }) {
           ))}
         </ul>
       )}
+      <DependenciesView result={result} />
     </details>
+  );
+}
+
+const DEP_STATUS: Record<string, string> = {
+  ok: "проверена",
+  young: "релиз моложе 3 дней",
+  unchecked: "не проверена",
+  "not-in-registry": "нет в реестре npm",
+  "unknown-version": "версии нет в реестре",
+  skipped: "не из реестра",
+};
+
+/** Dependencies and what the npm registry said about them (stage 2.3). */
+function DependenciesView({ result }: { result: CheckResult }) {
+  const st = result.dependencyStats;
+  const deps = result.dependencies ?? [];
+  if (!st || st.total === 0) return null;
+  return (
+    <>
+      <p className="mt-1 font-semibold">Зависимости</p>
+      <p className={muted}>
+        всего {st.total} (объявлено {st.declared}) ·{" "}
+        {st.registry ? `сверено с реестром npm: ${st.verified} · не проверено: ${st.unchecked} · моложе 3 дней: ${st.young}` : "реестр npm не опрашивался"}
+        {st.lookalikes > 0 ? ` · похожи на популярные: ${st.lookalikes}` : ""}
+      </p>
+      {deps.length > 0 ? (
+        <ul className="list-disc pl-5">
+          {deps.map((d, i) => (
+            <li key={i} className="break-all">
+              <span className="font-mono">{d.name}@{d.version ?? d.installed ?? d.spec ?? "?"}</span>
+              {d.declared ? "" : " (node_modules)"} · {d.status ? (DEP_STATUS[d.status] ?? d.status) : "не опрашивалась"}
+              {d.publishedAt ? ` · выпущена ${d.publishedAt.slice(0, 10)}` : ""}
+              {d.note ? <span className={muted}> — {d.note}</span> : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </>
   );
 }
 
@@ -683,6 +722,12 @@ function WatchSection({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<type
         <div className={`${card} border-yellow-500/60`}>
           <h4 className="font-medium">Не удалось прочитать сейчас (здесь расхождения не оцениваются)</h4>
           <ul className="list-disc pl-5">{w.failed.map((f) => <li key={f.source} className="break-all"><span className="font-mono">{f.source}</span>: {f.reason}</li>)}</ul>
+        </div>
+      ) : null}
+      {w.notApplicable.length > 0 ? (
+        <div className={card}>
+          <h4 className="font-medium">Не применимо (читать нечего)</h4>
+          <ul className="list-disc pl-5">{w.notApplicable.map((f) => <li key={f.source} className="break-all"><span className="font-mono">{f.source}</span>: {f.reason}</li>)}</ul>
         </div>
       ) : null}
       <details className={card}>

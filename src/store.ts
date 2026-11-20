@@ -2,6 +2,7 @@
 // can change settings through the API without authentication).
 import type BetterSqlite3 from "better-sqlite3";
 import type { CheckResult } from "./checks/types.js";
+import { PRUNE_MS, type RegistryCache, type RegistryEntry } from "./deps/registry.js";
 import type { Category, ConfigWindowRow, Drift, DriftKind, DriftStatus, SnapshotRow, WindowScope } from "./watch/model.js";
 
 export type Db = BetterSqlite3.Database;
@@ -143,6 +144,14 @@ export const MIGRATIONS: string[] = [
      hard_expires_at INTEGER NOT NULL,
      closed_at INTEGER,
      closed_reason TEXT)`,
+  // Stage 2.3: what the npm registry said about a package (publish time of every version, tags).
+  // Filled by the server process; read without network. `state` is ok or missing (the registry answered 404).
+  `CREATE TABLE IF NOT EXISTS registry_cache (
+     name TEXT PRIMARY KEY,
+     state TEXT NOT NULL,
+     fetched_at INTEGER NOT NULL,
+     dist_tags TEXT NOT NULL,
+     times TEXT NOT NULL)`,
 ];
 
 export interface Policy {
@@ -339,7 +348,7 @@ export interface NewApproval {
   localHash?: string | null;
 }
 
-export class Store {
+export class Store implements RegistryCache {
   constructor(
     readonly db: Db,
     private readonly now: () => number,
@@ -476,6 +485,20 @@ export class Store {
     return r ? { ts: r.ts as number, result: JSON.parse(r.result as string) as CheckResult } : null;
   }
 
+  // ---- npm registry cache (stage 2.3) -------------------------------------
+  getRegistry(name: string): RegistryEntry | null {
+    const r = this.db.prepare(`SELECT * FROM registry_cache WHERE name = ?`).get(name) as Raw | undefined;
+    if (!r) return null;
+    return { name, state: r.state === "missing" ? "missing" : "ok", fetchedAt: r.fetched_at as number, distTags: JSON.parse(r.dist_tags as string), times: JSON.parse(r.times as string) };
+  }
+  putRegistry(e: RegistryEntry): void {
+    this.db
+      .prepare(`INSERT INTO registry_cache (name, state, fetched_at, dist_tags, times) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET state = excluded.state, fetched_at = excluded.fetched_at, dist_tags = excluded.dist_tags, times = excluded.times`)
+      .run(e.name, e.state, e.fetchedAt, JSON.stringify(e.distTags), JSON.stringify(e.times));
+    this.db.prepare(`DELETE FROM registry_cache WHERE fetched_at < ?`).run(this.now() - PRUNE_MS);
+  }
+
   // ---- queue ------------------------------------------------------------
   /** One held entry per content hash; repeated asks only refresh `last_seen`. */
   upsertQueue(q: NewQueue): QueueRow {
@@ -518,6 +541,13 @@ export class Store {
   }
   setQueueStatus(id: number, status: QueueRow["status"]): void {
     this.db.prepare(`UPDATE queue SET status = ? WHERE id = ?`).run(status, id);
+  }
+  /**
+   * Marks the held entries of a proposal as approved. An entry made by `propose` has no
+   * content hash (the core has not hashed the plugin yet), so the hash alone never finds it.
+   */
+  resolveQueueByProposal(proposalId: number): void {
+    this.db.prepare(`UPDATE queue SET status = 'approved' WHERE proposal_id = ? AND status = 'held'`).run(proposalId);
   }
   /** Marks every held entry for a hash as approved (after any approval path). */
   resolveQueueByHash(contentHash: string): void {
@@ -730,6 +760,21 @@ export class Store {
     this.db
       .prepare(`INSERT INTO log (ts, kind, plugin_id, content_hash, detail) VALUES (?, ?, ?, ?, ?)`)
       .run(this.now(), kind, pluginId, contentHash, detail === null ? null : JSON.stringify(detail));
+  }
+  /**
+   * Logs a decision unless the latest decision about this version says exactly the same
+   * (a held or rejected plugin that is rechecked again and again is one fact, not many).
+   * Returns whether a row was written.
+   */
+  logDecision(kind: string, pluginId: string | null, contentHash: string | null, detail: unknown): boolean {
+    if (contentHash) {
+      const last = this.db
+        .prepare(`SELECT kind, detail FROM log WHERE content_hash = ? AND (kind IN ('hold', 'reject', 'revoked', 'dismissed', 'block.lifted') OR kind LIKE 'approved.%') ORDER BY id DESC LIMIT 1`)
+        .get(contentHash) as { kind: string; detail: string | null } | undefined;
+      if (last && last.kind === kind && last.detail === JSON.stringify(detail)) return false;
+    }
+    this.log(kind, pluginId, contentHash, detail);
+    return true;
   }
   listLog(limit = 100): LogRow[] {
     return (this.db.prepare(`SELECT * FROM log ORDER BY id DESC LIMIT ?`).all(limit) as Raw[]).map((r) => ({
