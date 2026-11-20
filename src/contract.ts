@@ -29,6 +29,22 @@ export const rpcContract = defineRpcContract({
   "watch.rollbackMode": { input: s.object({ enabled: s.boolean(), code }), output: s.json<{ ok: true }>() },
   "watch.window.open": { input: s.object({ scopes: s.array(s.string({ max: 32 }), { max: 16 }), code }), output: s.json<{ ok: true }>() },
   "watch.window.close": { input: s.object({ windowId: id, code }), output: s.json<{ ok: true }>() },
+  "ai.settings": {
+    input: s.object({
+      enabled: s.optional(s.boolean()),
+      autoFreeze: s.optional(s.boolean()),
+      autoExternal: s.optional(s.boolean()),
+      second: s.optional(s.boolean()),
+      secondModel: s.optional(s.string({ max: 64 })),
+      freezePlugin: s.optional(s.object({ id: s.string({ min: 1, max: 128 }), on: s.boolean() })),
+      code: s.optional(code),
+    }),
+    output: s.json<{ ok: true }>(),
+  },
+  "ai.scan": {
+    input: s.object({ pluginId: s.optional(s.string({ min: 1, max: 128 })), queueId: s.optional(id) }),
+    output: s.json<{ ok: true; scan: number; status: string }>(),
+  },
   "policy.set": {
     input: s.object({
       windowMin: s.optional(s.integer({ min: 1, max: 1440 })),

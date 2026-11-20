@@ -6,6 +6,7 @@ import type { ReactNode } from "react";
 import { definePluginApp, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import type { SecureBbRpc } from "./server";
 import type { Overview, PluginView, WindowView } from "./src/overview";
+import type { ScanView } from "./src/scan/view";
 import type { QueueRow } from "./src/store";
 import type { CheckResult } from "./src/checks/types";
 import type { ConfigWindowView } from "./src/watch/watchdog";
@@ -106,6 +107,109 @@ function CodeField({ value, onChange }: { value: string; onChange: (v: string) =
       value={value}
       onChange={(e) => onChange(e.target.value.replace(/\D/g, "").slice(0, 6))}
     />
+  );
+}
+
+// ------------------------------------------------------------- AI scan ----
+type Rpc = ReturnType<typeof useRpc<SecureBbRpc>>;
+
+const MODEL_STATUS: Record<string, string> = { clean: "чисто", flag: "флаг", refusal: "отказ", invalid: "невалидный ответ", timeout: "таймаут", error: "ошибка", unavailable: "недоступна" };
+
+/** Result of a scan next to the version it belongs to: not run / clean (date, models) / flags (what and where). */
+function ScanResultView({ scan, other }: { scan: ScanView | undefined; other?: string }) {
+  if (!scan) return <p className={`mt-1 ${muted}`}>ИИ-скан: не запускался</p>;
+  const asked = scan.models.filter((m) => m.status !== "unavailable").map((m) => m.label).join(", ");
+  const head =
+    scan.status === "running" ? "идёт…" : scan.status === "clean" ? `чисто (${when(scan.finishedAt ?? scan.startedAt)}, ${asked})` : scan.status === "suspect" ? `ПОДОЗРЕНИЕ (${when(scan.finishedAt ?? scan.startedAt)})` : `недоступен${scan.note ? `: ${scan.note}` : ""}`;
+  return (
+    <div className="mt-1">
+      <p className={scan.status === "suspect" ? "font-semibold text-red-600" : muted}>ИИ-скан #{scan.id}, версия {scan.version}: {head}{other ? ` · ${other}` : ""}</p>
+      {scan.flags.length > 0 ? <ul className="list-disc pl-5 text-red-600">{scan.flags.map((f, i) => <li key={i}>{f}</li>)}</ul> : null}
+      {scan.models.some((m) => m.status === "unavailable") ? <p className={muted}>Не отвечала: {scan.models.filter((m) => m.status === "unavailable").map((m) => `${m.label} (${m.detail})`).join("; ")}</p> : null}
+      {scan.models.some((m) => m.report) ? (
+        <details className="mt-1">
+          <summary className="cursor-pointer">Что нашли модели</summary>
+          {scan.models.map((m) => (
+            <div key={m.model} className="mt-1">
+              <h4 className="font-medium">{m.label} — {MODEL_STATUS[m.status] ?? m.status}</h4>
+              {m.report ? (
+                <div className={muted}>
+                  <p>{m.report.summary}</p>
+                  <p>Совпадает с описанием: {m.report.matchesDescription ? "да" : "нет"}{m.report.descriptionNote ? ` — ${m.report.descriptionNote}` : ""}</p>
+                  {m.report.capabilities.length > 0 ? <ul className="list-disc pl-5">{m.report.capabilities.map((c, i) => <li key={i}>{c.kind}: {c.detail} ({c.file}{c.line ? `:${c.line}` : ""})</li>)}</ul> : null}
+                  {m.report.dataFlows.length > 0 ? <ul className="list-disc pl-5">{m.report.dataFlows.map((f, i) => <li key={i}>{f.from} → {f.to} ({f.file}{f.line ? `:${f.line}` : ""}){f.note ? ` — ${f.note}` : ""}</li>)}</ul> : null}
+                </div>
+              ) : <p className={muted}>{m.detail}</p>}
+            </div>
+          ))}
+          <p className={muted}>Отправлено файлов: {scan.files}, {scan.chars} знаков (без комментариев). Модели одобрить версию не могут.</p>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
+function ScanButton({ ov, target, rpc, refetch }: { ov: Overview; target: { pluginId: string } | { queueId: number }; rpc: Rpc; refetch: () => void }) {
+  const act = useCodeAction(refetch);
+  if (!ov.ai.settings.enabled) return null;
+  return (
+    <>
+      <button className={btn} disabled={act.busy} onClick={() => void act.run(async () => { await rpc.call("ai.scan", target); return { note: "Скан запущен: он идёт несколько минут." }; })}>
+        Сканировать
+      </button>
+      <Msg error={act.error} ok={act.ok} />
+    </>
+  );
+}
+
+function AiCard({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; refetch: () => void }) {
+  const ai = ov.ai;
+  const [code, setCode] = useState("");
+  const [model, setModel] = useState(ai.settings.secondModel);
+  const act = useCodeAction(refetch);
+  const registered = ov.totp.state === "locked" || ov.totp.state === "external";
+  useEffect(() => setModel(ai.settings.secondModel), [ai.settings.secondModel]);
+  const set = (patch: Record<string, unknown>) =>
+    void act.run(async () => {
+      await rpc.call("ai.settings", { ...patch, ...(code.length === 6 ? { code } : {}) });
+      setCode("");
+    });
+  const box = (label: string, key: "enabled" | "autoFreeze" | "autoExternal" | "second", dependsOnModule = true) => (
+    <label className="flex items-center gap-2">
+      <input type="checkbox" checked={ai.settings[key]} disabled={act.busy || (dependsOnModule && !ai.settings.enabled)} onChange={(e) => set({ [key]: e.target.checked })} /> {label}
+    </label>
+  );
+  return (
+    <div className={card}>
+      <h3 className="font-semibold">ИИ-скан плагинов (необязательный модуль)</h3>
+      <p className={muted}>
+        Выключен по умолчанию. Включённый, отправляет код плагина (без комментариев) в облако моделей. Модели только добавляют подозрение: одобрить версию они не могут. Включать — без кода; выключать включённую опцию — только с кодом.
+      </p>
+      <div className="mt-2 space-y-1">
+        {box("Модуль включён (кнопка «Сканировать»)", "enabled", false)}
+        {box("Автоскан при заморозке (все плагины; отдельные — у плагина)", "autoFreeze")}
+        {box("Автоскан внешних (каждая версия до решения)", "autoExternal")}
+        {box("Вторая модель (cursor-agent, другой вендор, параллельно)", "second")}
+        <label className="flex items-center justify-between gap-2">Имя второй модели (не Anthropic)
+          <input className={`${input} w-48 tracking-normal`} value={model} onChange={(e) => setModel(e.target.value)} placeholder="например gpt-5" />
+        </label>
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        {registered ? <CodeField value={code} onChange={setCode} /> : <span className={muted}>Код нужен только для выключения; второй фактор ещё не зарегистрирован.</span>}
+        <button className={btn} disabled={act.busy || model === ai.settings.secondModel} onClick={() => set({ secondModel: model })}>Сохранить имя модели</button>
+      </div>
+      <p className={`mt-2 ${muted}`}>
+        Claude: {ai.availability.claude.mode === "unavailable" ? "недоступен — " : ""}{ai.availability.claude.detail}
+        {ai.availability.cursor ? ` · cursor-agent: ${ai.availability.cursor.found ? "" : "недоступен — "}${ai.availability.cursor.detail}` : ""}
+      </p>
+      {ai.recent.length > 0 ? (
+        <details className="mt-1">
+          <summary className="cursor-pointer">Последние сканы ({ai.recent.length})</summary>
+          {ai.recent.map((r) => <ScanResultView key={r.id} scan={r} other={r.trigger} />)}
+        </details>
+      ) : null}
+      <Msg error={act.error} ok={act.ok} />
+    </div>
   );
 }
 
@@ -434,9 +538,11 @@ function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; rpc: Re
       {q.contentHash ? <p className={`break-all font-mono text-xs ${muted}`}>{q.contentHash}</p> : null}
       {q.reason ? <p className={`mt-1 ${blocked ? "font-semibold text-red-600" : muted}`}>{q.reason}</p> : null}
       <ChecksView result={ov.queueChecks[q.id] ?? (q.contentHash ? ov.checks[q.contentHash] : undefined)} />
+      <ScanResultView scan={ov.ai.queueScans[q.id]} />
       {held ? (
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <CodeField value={code} onChange={setCode} />
+          <ScanButton ov={ov} target={{ queueId: q.id }} rpc={rpc} refetch={refetch} />
           <button className={btnPrimary} disabled={disabled} onClick={() => void act.run(async () => { const r = await rpc.call("queue.approve", { id: q.id, code, acknowledgeBlock: ack }); done(); setAck(false); return r; })}>
             {blocked ? "Снять блок и одобрить" : "Одобрить версию"}
           </button>
@@ -461,7 +567,7 @@ function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; rpc: Re
   );
 }
 
-function PluginRow({ p, rpc, refetch, registered, checks }: { p: PluginView; checks: Record<string, CheckResult>; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void; registered: boolean }) {
+function PluginRow({ p, ov, rpc, refetch, registered, checks }: { p: PluginView; ov: Overview; checks: Record<string, CheckResult>; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void; registered: boolean }) {
   const now = useNow();
   const [code, setCode] = useState("");
   const act = useCodeAction(refetch);
@@ -476,6 +582,16 @@ function PluginRow({ p, rpc, refetch, registered, checks }: { p: PluginView; che
       </div>
       <p className={muted}>{p.window ? windowLine(p.window, remaining) : "окно закрыто"}</p>
       {p.pin ? <ChecksView result={checks[p.pin.contentHash]} /> : null}
+      <ScanResultView scan={ov.ai.pluginScans[p.id]} other={ov.ai.pluginScans[p.id] ? (ov.ai.pluginScans[p.id]!.current ? "это закреплённая версия" : "не закреплённая версия") : undefined} />
+      {ov.ai.settings.enabled ? (
+        <div className="mt-1 flex flex-wrap items-center gap-3">
+          <ScanButton ov={ov} target={{ pluginId: p.id }} rpc={rpc} refetch={refetch} />
+          <label className="flex items-center gap-1 text-xs">
+            <input type="checkbox" checked={ov.ai.settings.freezePlugins.includes(p.id)} disabled={act.busy || (ov.ai.settings.freezePlugins.includes(p.id) && code.length !== 6)} onChange={(e) => void act.run(async () => { await rpc.call("ai.settings", { freezePlugin: { id: p.id, on: e.target.checked }, ...(code.length === 6 ? { code } : {}) }); setCode(""); })} />
+            автоскан при заморозке этого плагина{ov.ai.settings.freezePlugins.includes(p.id) ? " (снять — с кодом)" : ""}
+          </label>
+        </div>
+      ) : null}
       {p.history.length > 1 ? (
         <details className="mt-1">
           <summary className="cursor-pointer">История ({p.history.length})</summary>
@@ -486,12 +602,14 @@ function PluginRow({ p, rpc, refetch, registered, checks }: { p: PluginView; che
           </ul>
         </details>
       ) : null}
-      {registered && p.pin ? (
+      {registered && (p.pin || ov.ai.settings.freezePlugins.includes(p.id)) ? (
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <CodeField value={code} onChange={setCode} />
-          <button className={btn} disabled={act.busy || code.length !== 6} onClick={() => void act.run(async () => { await rpc.call("approval.revoke", { approvalId: p.pin!.id, code }); setCode(""); })}>
-            Отозвать
-          </button>
+          {p.pin ? (
+            <button className={btn} disabled={act.busy || code.length !== 6} onClick={() => void act.run(async () => { await rpc.call("approval.revoke", { approvalId: p.pin!.id, code }); setCode(""); })}>
+              Отозвать
+            </button>
+          ) : null}
         </div>
       ) : null}
       <Msg error={act.error} />
@@ -778,9 +896,10 @@ function GatePage() {
           ) : null}
         </Section>
         <Section title="Гейт плагинов — сторонние плагины">
-          {ov.plugins.length === 0 ? <div className={`${card} ${muted}`}>Сторонних плагинов нет.</div> : ov.plugins.map((p) => <PluginRow key={p.id} p={p} rpc={rpc} refetch={refetch} registered={registered} checks={ov.checks} />)}
+          {ov.plugins.length === 0 ? <div className={`${card} ${muted}`}>Сторонних плагинов нет.</div> : ov.plugins.map((p) => <PluginRow key={p.id} p={p} ov={ov} rpc={rpc} refetch={refetch} registered={registered} checks={ov.checks} />)}
         </Section>
         <Section title="Гейт плагинов — окна доверия"><PolicyCard ov={ov} rpc={rpc} refetch={refetch} /></Section>
+        <Section title="Гейт плагинов — ИИ-скан"><AiCard ov={ov} rpc={rpc} refetch={refetch} /></Section>
         <Section title={`Сторож конфигурации${ov.watch.drifts.some((d) => d.status === "open" || d.status === "rollback-failed") ? " (!)" : ""}`}><WatchSection ov={ov} rpc={rpc} refetch={refetch} /></Section>
         <Section title="Журнал"><LogCard ov={ov} /></Section>
       </div>

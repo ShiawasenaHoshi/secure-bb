@@ -17,13 +17,16 @@ import { AfterFactScanner } from "./src/afterfact.js";
 import { rpcContract } from "./src/contract.js";
 import { Gate, GateError, type HookCtx, type ThreadTree } from "./src/gate.js";
 import { buildOverview } from "./src/overview.js";
-import { collectProbe, runningThirdParty, type InstalledPluginLite } from "./src/probe.js";
+import { collectProbe, isThirdParty, runningThirdParty, type InstalledPluginLite } from "./src/probe.js";
 import { formatReport, runChecks } from "./src/checks/index.js";
 import type { FetchLike } from "./src/deps/registry.js";
 import { verifyDependencies } from "./src/deps/verify.js";
 import { propose } from "./src/propose.js";
+import { runProcess } from "./src/scan/process.js";
+import { flagReason, ScanError, Scanner, type ScanTarget } from "./src/scan/scanner.js";
+import { scanLine, scanView } from "./src/scan/view.js";
 import { encodeQr } from "./src/qr.js";
-import { MIGRATIONS, Store } from "./src/store.js";
+import { MIGRATIONS, Store, type ApprovalRow } from "./src/store.js";
 import { hashTree } from "./src/tree.js";
 import { bbWatchActions, bbWatchSource } from "./src/watch/bb-source.js";
 import { formatWatch } from "./src/watch/format.js";
@@ -43,6 +46,7 @@ function refusal(err: unknown): never {
     const code = err.code === "invalid_code" || err.code === "blocked" ? "forbidden" : err.code === "not_registered" ? "conflict" : err.code;
     throw new experimental_PluginRpcRefusal({ code, message: err.message });
   }
+  if (err instanceof ScanError) throw new experimental_PluginRpcRefusal({ code: err.code === "invalid" ? "invalid" : "conflict", message: err.message });
   if (err instanceof WatchError) throw new experimental_PluginRpcRefusal({ code: err.code, message: err.message });
   throw err;
 }
@@ -92,8 +96,44 @@ export default async function plugin(bb: BbPluginApi) {
   // Registry lookups for dependencies (stage 2.3) are made here, by the server process; answers are cached in our database.
   const verifyDeps = (result: Parameters<typeof verifyDependencies>[0]) => verifyDependencies(result, { cache: store, fetch: globalThis.fetch as unknown as FetchLike, now });
 
+  // ---- optional AI scan (stage 3, spec §8): off until a human turns it on ------------------
+  store.interruptRunningScans();
+  const aiScanner = new Scanner({
+    store,
+    now,
+    run: runProcess,
+    env: process.env,
+    log: (m) => bb.log.warn(m),
+    onDone: () => {
+      changed();
+      recheck(); // a flagged or failed scan may now hold a version that waited for it
+    },
+  });
+  const backgroundScan = (t: ScanTarget) =>
+    void aiScanner.scan(t).catch((err) => bb.log.warn(`scan of ${t.pluginId} not started: ${err instanceof Error ? err.message : String(err)}`));
+  /** The directory and version a freeze scan should look at: the snapshot that was reviewed, else the installed copy. */
+  const freezeTarget = async (pluginId: string, pin: ApprovalRow | null): Promise<{ dir: string; version: string } | null> => {
+    const proposal = pin?.localHash ? store.proposalByLocalHash(pluginId, pin.localHash) : null;
+    if (proposal && pin) return { dir: proposal.snapshotDir, version: pin.version };
+    const installed = (await listPlugins()).find((p) => p.id === pluginId && isThirdParty(p));
+    return installed ? { dir: installed.rootDir, version: installed.version } : null;
+  };
+
   const gate = new Gate({
     store,
+    scanFlag: (k) => flagReason(store.latestScanFor(k)),
+    onFreeze: (pluginId, pin) => {
+      const ai = store.aiSettings();
+      if (!ai.enabled || !(ai.autoFreeze || ai.freezePlugins.includes(pluginId))) return;
+      void freezeTarget(pluginId, pin)
+        .then((t) => (t ? backgroundScan({ pluginId, version: t.version, dir: t.dir, contentHash: pin?.contentHash ?? null, trigger: "freeze" }) : undefined))
+        .catch((err) => bb.log.warn(`freeze scan failed: ${String(err)}`));
+    },
+    onExternal: (ctx) => {
+      const ai = store.aiSettings();
+      if (!ai.enabled || !ai.autoExternal || store.latestScanFor({ contentHash: ctx.contentHash })) return;
+      backgroundScan({ pluginId: ctx.pluginId, version: ctx.version, dir: ctx.rootDir, contentHash: ctx.contentHash, trigger: "external" });
+    },
     now,
     verifyDeps,
     threads,
@@ -146,7 +186,7 @@ export default async function plugin(bb: BbPluginApi) {
     touch: (purpose, code) => gate.touch(purpose, code),
     log: (m) => bb.log.warn(m),
   });
-  const overview = () => buildOverview({ store, gate, now, hookRegistered, listPlugins, probe, descendants: threads.descendants, watch });
+  const overview = () => buildOverview({ scanner: aiScanner, store, gate, now, hookRegistered, listPlugins, probe, descendants: threads.descendants, watch });
 
   // ---- after-the-fact mode ------------------------------------------------
   const scanner = new AfterFactScanner({
@@ -266,6 +306,30 @@ export default async function plugin(bb: BbPluginApi) {
       changed();
       return { ok: true as const };
     }),
+    "ai.settings": wrap(({ code, ...patch }) => {
+      gate.setAiSettings(patch, code);
+      changed();
+      return { ok: true as const };
+    }),
+    "ai.scan": wrap(async ({ pluginId, queueId }) => {
+      if ((pluginId === undefined) === (queueId === undefined)) throw new ScanError("invalid", "укажите плагин или запись очереди");
+      let target: ScanTarget;
+      if (queueId !== undefined) {
+        const q = store.getQueue(queueId);
+        if (!q) throw new ScanError("invalid", `нет записи #${queueId}`);
+        const proposal = q.proposalId === null ? null : store.getProposal(q.proposalId);
+        const dir = proposal?.snapshotDir ?? q.rootDir;
+        if (!dir) throw new ScanError("invalid", "у записи нет каталога с кодом");
+        target = { pluginId: q.pluginId, version: q.version, dir, contentHash: q.contentHash, trigger: "manual" };
+      } else {
+        const installed = (await listPlugins()).find((p) => p.id === pluginId && isThirdParty(p));
+        if (!installed) throw new ScanError("invalid", "такого стороннего плагина нет");
+        target = { pluginId: installed.id, version: installed.version, dir: installed.rootDir, contentHash: null, trigger: "manual" };
+      }
+      const { row } = await aiScanner.start(target);
+      changed();
+      return { ok: true as const, scan: row.id, status: row.status };
+    }),
     "policy.set": wrap(({ code, ...patch }) => {
       gate.setPolicy(patch, code);
       changed();
@@ -321,6 +385,33 @@ export default async function plugin(bb: BbPluginApi) {
           async run(input) {
             if (input.options.scan) await watch.scan().then((r) => (r.found + r.accepted + r.rolledBack > 0 ? changed() : undefined));
             return { exitCode: 0, stdout: formatWatch(watch.view(), now(), input.options.limit) };
+          },
+        }),
+        scan: cliCommand({
+          summary: "Optional AI scan: print the settings and the latest results, or start a scan of an installed third-party plugin (off unless a human turned it on)",
+          positionals: [{ name: "plugin", description: "Plugin id to scan; omit to only print", required: false }],
+          options: {},
+          async run(input) {
+            const ai = store.aiSettings();
+            const lines: string[] = [`AI scan: ${ai.enabled ? "on" : "off"}${ai.enabled ? `; on freeze: ${ai.autoFreeze ? "yes" : "no"}; externals: ${ai.autoExternal ? "yes" : "no"}; second model: ${ai.second ? ai.secondModel : "no"}` : ""}`];
+            const id = input.positionals.plugin;
+            if (id) {
+              if (!ai.enabled) throw new PluginCliError("AI scan is off; a human turns it on in the secure-bb page", { code: "scan_off" });
+              const installed = (await listPlugins()).find((p) => p.id === id && isThirdParty(p));
+              if (!installed) throw new PluginCliError(`no installed third-party plugin ${id}`, { code: "not_found" });
+              try {
+                const { row } = await aiScanner.start({ pluginId: installed.id, version: installed.version, dir: installed.rootDir, contentHash: null, trigger: "cli" });
+                changed();
+                lines.push(`scan #${row.id} of ${installed.id}@${installed.version}: ${row.status === "running" ? "started (takes a few minutes)" : row.status}`);
+              } catch (err) {
+                if (err instanceof ScanError) throw new PluginCliError(err.message, { code: "scan_failed" });
+                throw err;
+              }
+            } else {
+              const recent = store.listScans(5).map((r) => scanLine(scanView(r)));
+              lines.push(...(recent.length > 0 ? recent : ["no scans yet"]));
+            }
+            return { exitCode: 0, stdout: lines.join("\n") };
           },
         }),
         check: cliCommand({

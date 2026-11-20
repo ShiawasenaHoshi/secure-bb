@@ -87,7 +87,9 @@ const GENERIC_ARROW = /(?<=(?:=|\(|,|:|\breturn|\basync)\s*)<\s*[A-Za-z_$][\w$]*
 const GENERIC_ARROW_TS = /(?<=(?:=|\(|,|:|\breturn|\basync)\s*)<\s*[A-Za-z_$][\w$]*\s*(?:\bextends\b[^()`=;{}]*?|,[^()`=;{}]*?)?>(?=\s*\()/g;
 const blank = (m: string): string => m.replace(/[^\n]/g, " ");
 
-export function parseSource(rel: string, text: string): Parsed {
+export function parseSource(rel: string, text: string, comments?: Array<{ start: number; end: number }>): Parsed {
+  // Every attempt starts over, so comments seen by a failed attempt must not stay.
+  const onComment = comments ? (_block: boolean, _text: string, start: number, end: number) => void comments.push({ start, end }) : undefined;
   const kind = rel.endsWith(".tsx") ? "tsx" : TS_EXT.test(rel) ? "ts" : JSX_EXT.test(rel) ? "jsx" : "js";
   // TypeScript is always an ES module; `.cjs` is a script first; everything else tries module, then script.
   const types: Array<"module" | "script"> = kind === "ts" || kind === "tsx" ? ["module"] : rel.endsWith(".cjs") ? ["script", "module"] : ["module", "script"];
@@ -97,8 +99,9 @@ export function parseSource(rel: string, text: string): Parsed {
   let firstErr = "";
   for (const k of kinds) {
     for (const sourceType of types) {
+      if (comments) comments.length = 0;
       try {
-        const ast = (PARSERS[k] as typeof acorn.Parser).parse(text, { ecmaVersion: "latest", sourceType, locations: true, allowHashBang: true, allowReturnOutsideFunction: true, allowAwaitOutsideFunction: true });
+        const ast = (PARSERS[k] as typeof acorn.Parser).parse(text, { ecmaVersion: "latest", sourceType, locations: true, allowHashBang: true, allowReturnOutsideFunction: true, allowAwaitOutsideFunction: true, onComment });
         return { ok: true, ast, code: text };
       } catch (err) {
         firstErr ||= String(err instanceof Error ? err.message : err).split("\n")[0]!.slice(0, 200);
@@ -109,8 +112,9 @@ export function parseSource(rel: string, text: string): Parsed {
     const padded = text.replace(kind === "ts" ? GENERIC_ARROW_TS : GENERIC_ARROW, blank);
     if (padded !== text) {
       for (const k of kinds) {
+        if (comments) comments.length = 0;
         try {
-          const ast = (PARSERS[k] as typeof acorn.Parser).parse(padded, { ecmaVersion: "latest", sourceType: "module", locations: true, allowHashBang: true });
+          const ast = (PARSERS[k] as typeof acorn.Parser).parse(padded, { ecmaVersion: "latest", sourceType: "module", locations: true, allowHashBang: true, onComment });
           return { ok: true, ast, code: padded, note: "parsed with generic-arrow type parameters blanked out" };
         } catch {
           /* fall through to the original error */

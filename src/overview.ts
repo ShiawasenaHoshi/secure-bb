@@ -4,6 +4,9 @@ import { assess, type Assessment, type Probe } from "./detect.js";
 import type { Gate, TotpState } from "./gate.js";
 import type { InstalledPluginLite } from "./probe.js";
 import { isThirdParty, runningThirdParty } from "./probe.js";
+import type { Availability, Scanner } from "./scan/scanner.js";
+import { scanView, type ScanView } from "./scan/view.js";
+import type { AiSettings } from "./scan/types.js";
 import type { Watchdog, WatchView } from "./watch/watchdog.js";
 import type { ApprovalRow, LogRow, Policy, QueueRow, Store, WindowRow } from "./store.js";
 
@@ -35,6 +38,15 @@ export interface PluginView {
   /** Installed before secure-bb and never reviewed. */
   unreviewedBaseline: boolean;
 }
+export interface AiView {
+  settings: AiSettings;
+  availability: Availability;
+  /** Latest scan of each installed third-party plugin; `current` = it covers the pinned version. */
+  pluginScans: Record<string, ScanView & { current: boolean }>;
+  /** Scan of the version a queue entry holds. */
+  queueScans: Record<number, ScanView>;
+  recent: ScanView[];
+}
 export interface Overview {
   now: number;
   assessment: Assessment;
@@ -52,9 +64,13 @@ export interface Overview {
   queueChecks: Record<number, CheckResult>;
   /** Stage 2a: config watchdog (approved snapshot, differences, configuration windows). */
   watch: WatchView;
+  /** Stage 3: the optional AI scan. */
+  ai: AiView;
 }
 
 export interface OverviewDeps {
+  /** Absent in tests that do not touch the AI scan. */
+  scanner?: Scanner;
   watch: Watchdog;
   store: Store;
   gate: Gate;
@@ -127,6 +143,28 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
     if (c) queueChecks[q.id] = c;
   }
 
+  const settings = d.store.aiSettings();
+  const pluginScans: AiView["pluginScans"] = {};
+  for (const v of views) {
+    const row = d.store.latestScanOfPlugin(v.id);
+    if (!row) continue;
+    const current = v.pin !== null && (row.contentHash === v.pin.contentHash || (v.pin.localHash !== null && v.pin.localHash === row.localHash));
+    pluginScans[v.id] = { ...scanView(row), current };
+  }
+  const queueScans: AiView["queueScans"] = {};
+  for (const q of queue) {
+    const proposal = q.proposalId === null ? null : d.store.getProposal(q.proposalId);
+    const row = d.store.latestScanFor({ contentHash: q.contentHash, localHash: proposal?.localHash ?? null });
+    if (row) queueScans[q.id] = scanView(row);
+  }
+  const ai: AiView = {
+    settings,
+    availability: d.scanner?.availability(settings) ?? { claude: { mode: "unavailable", detail: "скан не подключён" }, cursor: null },
+    pluginScans,
+    queueScans,
+    recent: d.store.listScans(8).map(scanView),
+  };
+
   return {
     now: d.now(),
     assessment: assess(probe),
@@ -141,5 +179,6 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
     log: d.store.listLog(40),
     checks,
     watch: d.watch.view(),
+    ai,
   };
 }
