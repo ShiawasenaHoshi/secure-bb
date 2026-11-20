@@ -14,6 +14,10 @@ import {
   type BbPluginApi,
 } from "@get-bb/plugin-sdk";
 import { AfterFactScanner } from "./src/afterfact.js";
+import { bbSkillSource } from "./src/skills/bb-source.js";
+import { SkillError, SkillGuard } from "./src/skills/guard.js";
+import { SkillReader } from "./src/skills/reader.js";
+import { SkillStore } from "./src/skills/store.js";
 import { rpcContract } from "./src/contract.js";
 import { Gate, GateError, type HookCtx, type ThreadTree } from "./src/gate.js";
 import { buildOverview } from "./src/overview.js";
@@ -51,6 +55,7 @@ function refusal(err: unknown): never {
   }
   if (err instanceof ScanError) throw new experimental_PluginRpcRefusal({ code: err.code === "invalid" ? "invalid" : "conflict", message: err.message });
   if (err instanceof WatchError) throw new experimental_PluginRpcRefusal({ code: err.code, message: err.message });
+  if (err instanceof SkillError) throw new experimental_PluginRpcRefusal({ code: err.code, message: err.message });
   throw err;
 }
 
@@ -96,12 +101,17 @@ export default async function plugin(bb: BbPluginApi) {
     },
   };
 
+  // ---- skills (stage 6): read whole through bb's API, pinned and checked by the guard below ---------------
+  const skillSource = bbSkillSource(bb.sdk);
+  const skillReader = new SkillReader(skillSource);
+
   // ---- pollution tracker (stage 5, spec §6): threads that read untrusted content ----------------
   const watchSource = bbWatchSource({
     sdk: bb.sdk,
     listPlugins,
     loopbackBaseUrl: () => bb.server.loopbackBaseUrl,
     dataDir: () => bb.server.experimental_dataDir,
+    skillReader,
   });
   const taint = new TaintMonitor({ store, source: bbTaintSource(bb.sdk, (projectId) => watchSource.envSetup(projectId)), tree: threads, now, trustedRepos: () => store.trustedRepos() });
 
@@ -185,6 +195,18 @@ export default async function plugin(bb: BbPluginApi) {
       },
     });
 
+  // ---- skills guard (stage 6): after the fact, driven by the watchdog's scans -----------------------------
+  const skillGuard = new SkillGuard({
+    store,
+    skills: new SkillStore(db, now),
+    reader: skillReader,
+    source: skillSource,
+    builtinPlugins: async () => new Set((await listPlugins()).filter((p) => p.provenance === "builtin").map((p) => p.id)),
+    now,
+    touch: (purpose, code) => gate.touch(purpose, code),
+    log: (m) => bb.log.warn(m),
+  });
+
   // ---- config watchdog (spec §7) -----------------------------------------
   const watch = new Watchdog({
     store,
@@ -192,6 +214,7 @@ export default async function plugin(bb: BbPluginApi) {
     source: watchSource,
     actions: bbWatchActions(bb.sdk),
     touch: (purpose, code) => gate.touch(purpose, code),
+    skills: skillGuard,
     log: (m) => bb.log.warn(m),
   });
   // ---- journal integrity (stage 5): verified at start, on every tick, and on demand --------------------
@@ -214,7 +237,7 @@ export default async function plugin(bb: BbPluginApi) {
   };
   journal(true);
   const overview = () =>
-    buildOverview({ scanner: aiScanner, store, gate, now, hookRegistered, listPlugins, probe, descendants: threads.descendants, watch, journal: () => journal(), taintedThreads: () => store.taintedThreads(20) });
+    buildOverview({ scanner: aiScanner, store, gate, now, hookRegistered, listPlugins, probe, descendants: threads.descendants, watch, skills: skillGuard, journal: () => journal(), taintedThreads: () => store.taintedThreads(20) });
 
   // ---- after-the-fact mode ------------------------------------------------
   const scanner = new AfterFactScanner({
@@ -344,6 +367,28 @@ export default async function plugin(bb: BbPluginApi) {
       changed();
       return { ok: true as const };
     }),
+    "skills.scan": wrap(async () => {
+      await watch.scan();
+      changed();
+      return { ok: true as const };
+    }),
+    "skills.approve": wrap(async ({ id, code, acknowledgeBlock }) => {
+      const r = await skillGuard.approve(id, code, { acknowledgeBlock });
+      await watch.scan().catch((e) => bb.log.warn(`scan after skill approval failed: ${String(e)}`));
+      changed();
+      return { ok: true as const, note: r.note };
+    }),
+    "skills.remove": wrap(async ({ id }) => {
+      await skillGuard.removeQueued(id);
+      changed();
+      return { ok: true as const };
+    }),
+    "skills.removed": wrap(({ id }) => skillGuard.removedContent(id)),
+    "skills.trusted": wrap(({ code, ...change }) => {
+      const sources = skillGuard.setTrustedSource(change, code);
+      changed();
+      return { ok: true as const, sources };
+    }),
     "ai.settings": wrap(({ code, ...patch }) => {
       gate.setAiSettings(patch, code);
       changed();
@@ -434,6 +479,24 @@ export default async function plugin(bb: BbPluginApi) {
           async run(input) {
             if (input.options.scan) await watch.scan().then((r) => (r.found + r.accepted + r.rolledBack > 0 ? changed() : undefined));
             return { exitCode: 0, stdout: formatWatch(watch.view(), now(), input.options.limit) };
+          },
+        }),
+        skills: cliCommand({
+          summary: "Skills guard: which installed skills are pinned, which wait for a human or were removed (no reasons: they are for the person on the page)",
+          options: {
+            scan: { type: "boolean", description: "Check right now before printing" },
+          },
+          async run(input) {
+            if (input.options.scan) await watch.scan().then((r) => (r.found + r.accepted > 0 ? changed() : undefined));
+            const v = skillGuard.view();
+            const lines = [
+              `skills pinned: ${v.pinned.total} (${v.pinned.builtin} built-in, ${v.pinned.baseline} existing before the module, ${v.pinned.approved} approved)`,
+              `waiting for a human: ${v.open.length}`,
+              ...v.open.map((r) => `  #${r.id} ${r.name} (${r.scope}): ${r.state === "alarm" ? "alarm" : "held by secure-bb"}`),
+            ];
+            const removed = v.recent.filter((r) => r.state === "removed").slice(0, 5);
+            if (removed.length > 0) lines.push("removed by secure-bb:", ...removed.map((r) => `  #${r.id} ${r.name} (${r.scope})`));
+            return { exitCode: 0, stdout: lines.join("\n") };
           },
         }),
         scan: cliCommand({

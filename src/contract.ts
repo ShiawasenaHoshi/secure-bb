@@ -32,6 +32,11 @@ export const rpcContract = defineRpcContract({
   "watch.rollbackMode": { input: s.object({ enabled: s.boolean(), code }), output: s.json<{ ok: true }>() },
   "watch.window.open": { input: s.object({ scopes: s.array(s.string({ max: 32 }), { max: 16 }), code }), output: s.json<{ ok: true }>() },
   "watch.window.close": { input: s.object({ windowId: id, code }), output: s.json<{ ok: true }>() },
+  "skills.scan": { input: s.nullValue(), output: s.json<{ ok: true }>() },
+  "skills.approve": { input: s.object({ id, code, acknowledgeBlock: s.optional(s.boolean()) }), output: s.json<{ ok: true; note: string }>() },
+  "skills.remove": { input: s.object({ id }), output: s.json<{ ok: true }>() },
+  "skills.removed": { input: s.object({ id }), output: s.json<Array<{ path: string; content: string | null }>>() },
+  "skills.trusted": { input: s.object({ add: s.optional(s.string({ min: 1, max: 140 })), remove: s.optional(s.string({ min: 1, max: 140 })), code }), output: s.json<{ ok: true; sources: string[] }>() },
   "ai.settings": {
     input: s.object({
       enabled: s.optional(s.boolean()),

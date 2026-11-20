@@ -6,6 +6,7 @@ import { join } from "node:path";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { fetchAccountState, type InstalledPluginLite } from "../probe.js";
 import { NotApplicableError, type SkillLite, type WatchSource } from "./collect.js";
+import type { SkillReader } from "../skills/reader.js";
 import type { WatchActions } from "./watchdog.js";
 
 type Sdk = BbPluginApi["sdk"];
@@ -16,6 +17,8 @@ export interface BbSourceDeps {
   listPlugins: () => Promise<InstalledPluginLite[]>;
   loopbackBaseUrl: () => string;
   dataDir: () => string;
+  /** Reads whole skills (all files), so a change to any file of a skill is a change. */
+  skillReader?: SkillReader;
 }
 
 const ABSENT = /not.?found|no such file|enoent|does not exist|404/i;
@@ -50,11 +53,13 @@ export function bbWatchSource(d: BbSourceDeps): WatchSource {
     },
     async skills(projectId): Promise<SkillLite[]> {
       const res = await sdk.skills.list({ projectId, environmentId: null });
-      return res.skills.map((s) => ({ id: s.id, name: s.name, scope: s.scope, pluginId: s.pluginId, manageable: s.manageable }));
+      return res.skills.map((s) => ({ id: s.id, name: s.name, scope: s.scope, pluginId: s.pluginId, manageable: s.manageable, registrySkillId: s.registrySkillId }));
     },
     async skillRevision(projectId, skillId) {
-      const res = await sdk.skills.getContent({ projectId, environmentId: null, skillId, path: "SKILL.md" });
-      return res.revision;
+      if (!d.skillReader) return (await sdk.skills.getContent({ projectId, environmentId: null, skillId, path: "SKILL.md" })).revision;
+      // The hash of every file of the skill (not SKILL.md alone); memoised per scan with the guard's own read.
+      const ref = { key: "", id: skillId, projectId, name: "", scope: "", pluginId: null, manageable: false, registrySkillId: null };
+      return (await d.skillReader.snapshot(ref)).hash;
     },
     async machineEnv() {
       return (await sdk.system.machineEnvironment()).variables.map((v) => v.name);

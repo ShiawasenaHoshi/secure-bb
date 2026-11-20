@@ -4,6 +4,7 @@ import type BetterSqlite3 from "better-sqlite3";
 import type { CheckResult } from "./checks/types.js";
 import { appendRecord, lastHead, sealLegacy, verifyChain, type JournalAnchor, type JournalReport } from "./journal.js";
 import { PRUNE_MS, type RegistryCache, type RegistryEntry } from "./deps/registry.js";
+import { SKILL_MIGRATIONS } from "./skills/store.js";
 import { DEFAULT_AI, type AiSettings, type ScanResult, type ScanRow, type ScanStatus, type ScanTrigger } from "./scan/types.js";
 import type { Category, ConfigWindowRow, Drift, DriftKind, DriftStatus, SnapshotRow, WindowScope } from "./watch/model.js";
 
@@ -186,6 +187,8 @@ export const MIGRATIONS: string[] = [
      scanned_at INTEGER NOT NULL)`,
   // Stage 5: repositories whose use does not taint a thread (`owner/name`, `owner/*`, github.com). Empty by default; changed only with a code.
   `CREATE TABLE IF NOT EXISTS trusted_repos (pattern TEXT PRIMARY KEY, added_at INTEGER NOT NULL)`,
+  // Stage 6: skills module (pins, queue, trusted registry sources).
+  ...SKILL_MIGRATIONS,
 ];
 
 export interface Policy {
