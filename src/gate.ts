@@ -65,6 +65,12 @@ export interface GateDeps {
   snapshotsRoot: string;
   /** Deterministic plugin checks; injectable for tests. */
   runChecks?: (dir: string) => Promise<CheckResult>;
+  /**
+   * The registry stage of the dependency checks (stage 2.3), run after the offline checks:
+   * adds publish-age findings. Must not throw (it reports what it could not verify as a finding).
+   * Absent: dependencies are listed but not looked up.
+   */
+  verifyDeps?: (result: CheckResult) => Promise<CheckResult>;
   /** Called after a check result was stored (the page refreshes, held versions are rechecked). */
   onChecked?: () => void;
   /** How long the hook waits for the checks before holding (the core gives the hook 10 s). Default 8000. */
@@ -74,6 +80,8 @@ export interface GateDeps {
 export type TotpState = "none" | "pending" | "locked" | "external" | "external-broken";
 
 const HOUR_MS = 3_600_000;
+/** A stored result with unverified dependencies (no network at the time) is verified again after this long, when its version is next decided. */
+const DEP_RETRY_MS = 10 * 60_000;
 const MAX_FAILURES = 5;
 
 export const isOpen = (w: WindowRow, now: number): boolean =>
@@ -200,9 +208,13 @@ export class Gate {
    * throws), stored under `key`. Concurrent calls share one run. Null = the checks
    * failed twice; the caller must hold (fail closed).
    */
+  private depsDueForRetry(stored: { ts: number; result: CheckResult }): boolean {
+    return this.d.verifyDeps !== undefined && this.now - stored.ts >= DEP_RETRY_MS && stored.result.findings.some((f) => f.rule === "dep-unchecked");
+  }
+
   private startCheck(key: string, pluginId: string, dir: string, logHash: string | null): Promise<CheckResult | null> {
     const stored = this.store.getCheck(key);
-    if (stored) return Promise.resolve(stored.result);
+    if (stored && !this.depsDueForRetry(stored)) return Promise.resolve(stored.result);
     const running = this.checking.get(key);
     if (running) return running;
     const run = this.d.runChecks ?? defaultRunChecks;
@@ -214,12 +226,14 @@ export class Gate {
         } catch {
           result = await run(dir); // one retry
         }
+        if (this.d.verifyDeps) result = await this.d.verifyDeps(result);
         this.store.putCheck(key, pluginId, result);
         this.store.log("check", pluginId, logHash, {
           blocks: bySeverity(result, "block").length,
           reviews: bySeverity(result, "review").length,
           infos: bySeverity(result, "info").length,
           capabilities: result.capabilities.map((c) => c.kind),
+          ...(result.dependencyStats ? { dependencies: result.dependencyStats.total, unverified: result.dependencyStats.unchecked, young: result.dependencyStats.young } : {}),
           key,
         });
         this.d.onChecked?.();
@@ -349,13 +363,18 @@ export class Gate {
     const dir = verifiedDir ?? ctx.rootDir;
     const result = await this.awaitCheck(this.startCheck(key, ctx.pluginId, dir, ctx.contentHash));
     if (result === null) return this.hold(ctx, proposal, reason ?? "проверки не завершились");
-    if (key !== ctx.contentHash && !this.store.getCheck(ctx.contentHash)) this.store.putCheck(ctx.contentHash, ctx.pluginId, result);
+    if (key !== ctx.contentHash) {
+      // The core's hash gets the snapshot's result, and a newer one (dependencies verified again later) replaces an older one.
+      const linked = this.store.getCheck(ctx.contentHash);
+      const own = this.store.getCheck(key);
+      if (!linked || (own && own.ts > linked.ts)) this.store.putCheck(ctx.contentHash, ctx.pluginId, result);
+    }
 
     const blocks = bySeverity(result, "block");
     if (blocks.length > 0) {
       const why = `${BLOCKED_REASON}: ${summarize(blocks)}`;
       const q = this.queue(ctx, proposal, reason ?? why);
-      this.store.log("reject", ctx.pluginId, ctx.contentHash, { review: q.id, version: ctx.version, rules: blocks.map((f) => f.rule) });
+      this.store.logDecision("reject", ctx.pluginId, ctx.contentHash, { review: q.id, version: ctx.version, rules: blocks.map((f) => f.rule) });
       return { action: "reject", message: `secure-bb: ${why} (review #${q.id}); снять блок может только человек кодом` };
     }
 
@@ -405,7 +424,7 @@ export class Gate {
 
   private hold(ctx: HookCtx, proposal: ProposalRow | null, reason: string | null): Decision {
     const q = this.queue(ctx, proposal, reason);
-    this.store.log("hold", ctx.pluginId, ctx.contentHash, { review: q.id, version: ctx.version, trigger: ctx.trigger, ...(reason ? { reason } : {}) });
+    this.store.logDecision("hold", ctx.pluginId, ctx.contentHash, { review: q.id, version: ctx.version, trigger: ctx.trigger, ...(reason ? { reason } : {}) });
     return { action: "wait", reason: `held by secure-bb: review #${q.id}` };
   }
 
@@ -434,6 +453,8 @@ export class Gate {
     });
     if (proposal) this.store.markProposalLoaded(proposal.id);
     this.store.supersedeTampered(ctx.pluginId, ctx.contentHash);
+    // The entry `propose` made has no content hash (the core had not hashed the plugin yet), so find it by the proposal.
+    if (proposal) this.store.resolveQueueByProposal(proposal.id);
     this.store.resolveQueueByHash(ctx.contentHash);
     // A touch-approved proposal was already logged as "approved.touch" at approval time; its load is a separate event.
     this.store.log(via === "window" ? "approved.window" : via === "pin" ? "approved.pin" : via === "auto" ? "approved.auto" : "approved.load", ctx.pluginId, ctx.contentHash, {
@@ -481,6 +502,7 @@ export class Gate {
       this.store.resolveQueueByHash(q.contentHash);
     }
     this.store.setQueueStatus(q.id, "approved");
+    if (q.proposalId !== null) this.store.resolveQueueByProposal(q.proposalId);
     this.store.log("approved.touch", q.pluginId, q.contentHash, { review: q.id, version: q.version });
     let installDir: string | null = null;
     if (q.proposalId !== null) {

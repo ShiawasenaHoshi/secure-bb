@@ -37,6 +37,12 @@ export interface WatchSource {
   envSetup(projectId: string): Promise<string | null>;
 }
 
+/**
+ * Thrown by a source for a thing that cannot exist here (a project without a local folder has no
+ * `.bb-env-setup.sh`). It is listed as "not applicable", not as "could not be read".
+ */
+export class NotApplicableError extends Error {}
+
 /** Provider settings that decide how much an agent is fenced in (spec §7, §9). */
 export const WATCHED_PROVIDER_SETTINGS: Record<string, string[]> = {
   "provider-claude-code": ["sandboxEnabled", "fullAccessApprovalsEnabled", "chromeEnabled", "artifactsEnabled"],
@@ -58,8 +64,9 @@ const builtinKey = (id: string): string => id.replace(/^bb--/, "");
 export async function collect(src: WatchSource, now: () => number): Promise<Observation> {
   const items: Item[] = [];
   const failed: Unobserved[] = [];
+  const notApplicable: Unobserved[] = [];
   let instructionsText: string | null = null;
-  const fail = (source: string, err: unknown) => failed.push({ source, reason: err instanceof Error ? err.message : String(err) });
+  const fail = (source: string, err: unknown) => (err instanceof NotApplicableError ? notApplicable : failed).push({ source, reason: err instanceof Error ? err.message : String(err) });
   const step = async (source: string, fn: () => Promise<void> | void) => {
     try {
       await fn();
@@ -207,5 +214,5 @@ export async function collect(src: WatchSource, now: () => number): Promise<Obse
 
   // Deterministic order (tests, stable page).
   items.sort((a, b) => a.key.localeCompare(b.key));
-  return { at: now(), items, failed, blind: BLIND, instructionsText };
+  return { at: now(), items, failed, notApplicable, blind: BLIND, instructionsText };
 }

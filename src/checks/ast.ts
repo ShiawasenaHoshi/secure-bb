@@ -31,6 +31,14 @@ export interface FileFacts {
   execSink: boolean;
   fsWrite: boolean;
   parsed: boolean;
+  /**
+   * Cross-file resolution of `env-passed` (see runChecks): calls that hand the whole environment to a
+   * function this file does not define, the relative imports that could define it, and, for the functions
+   * this file defines, which parameters are only used to read named variables.
+   */
+  envCalls: Array<{ callee: string; argIndex: number; line: number }>;
+  relImports: Map<string, { from: string; imported: string }>;
+  envReaders: Map<string, boolean[]>;
 }
 
 // ---- module tables --------------------------------------------------------
@@ -72,6 +80,11 @@ export type Parsed = { ok: true; ast: N; code: string; note?: string } | { ok: f
  * list with no calls, templates or arrows in it qualifies: type parameters hold no code.
  */
 const GENERIC_ARROW = /(?<=(?:=|\(|,|:|\breturn|\basync)\s*)<\s*[A-Za-z_$][\w$]*\s+extends\b[^()`=;{}]*?>(?=\s*\()/g;
+/**
+ * In a `.ts` file (no JSX, so `<` cannot start an element) the plain form `async <T>(x: T) =>` and
+ * `<T, U>(…) =>` are also type parameters; acorn-typescript rejects them after `async`.
+ */
+const GENERIC_ARROW_TS = /(?<=(?:=|\(|,|:|\breturn|\basync)\s*)<\s*[A-Za-z_$][\w$]*\s*(?:\bextends\b[^()`=;{}]*?|,[^()`=;{}]*?)?>(?=\s*\()/g;
 const blank = (m: string): string => m.replace(/[^\n]/g, " ");
 
 export function parseSource(rel: string, text: string): Parsed {
@@ -93,7 +106,7 @@ export function parseSource(rel: string, text: string): Parsed {
     }
   }
   if (kind === "tsx" || kind === "ts") {
-    const padded = text.replace(GENERIC_ARROW, blank);
+    const padded = text.replace(kind === "ts" ? GENERIC_ARROW_TS : GENERIC_ARROW, blank);
     if (padded !== text) {
       for (const k of kinds) {
         try {
@@ -348,7 +361,7 @@ const TIMER_FUNCS = new Set(["setTimeout", "setInterval", "setImmediate"]);
 export function analyze(rel: string, parsed: { ast: N; code: string }): FileFacts {
   const { ast, code } = parsed;
   const lines = code.split("\n");
-  const facts: FileFacts = { findings: [], sites: [], hosts: [], secretPaths: [], rcPaths: [], network: false, childProcess: false, execSink: false, fsWrite: false, parsed: true };
+  const facts: FileFacts = { findings: [], sites: [], hosts: [], secretPaths: [], rcPaths: [], network: false, childProcess: false, execSink: false, fsWrite: false, parsed: true, envCalls: [], relImports: new Map(), envReaders: new Map() };
   const consts = collectConsts(ast);
   const lineOf = (n: N): number => n.loc?.start.line ?? 0;
   const text = (line: number): string => excerptOf(lines[line - 1] ?? "");
@@ -397,12 +410,41 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
   // ---- pre-passes: module bindings, env aliases, decoded values, path literals ----
   const nodes: Array<{ n: N; anc: N[] }> = [];
   const decls: N[] = [];
+  /** Functions declared in this file by name (null: the name is declared more than once, so it is not known which one runs). */
+  const localFns = new Map<string, N | null>();
+  const noteFn = (name: string, fn: N): void => void localFns.set(name, localFns.has(name) ? null : fn);
   walkAst(ast, (n, anc) => {
     if (n.type === "VariableDeclarator") decls.push(n);
     if (n.type === "AssignmentExpression") decls.push({ id: n.left, init: n.right, type: "VariableDeclarator" });
+    if (n.type === "FunctionDeclaration" && n.id) noteFn(n.id.name, n);
+    if (n.type === "VariableDeclarator" && n.id.type === "Identifier" && n.init && (n.init.type === "ArrowFunctionExpression" || n.init.type === "FunctionExpression")) noteFn(n.id.name, n.init);
     void anc;
   });
   void nodes;
+
+  /**
+   * Does `fn` use its `index`-th parameter only to read named variables (`env.HOME`, `env[key]`,
+   * `({ HOME, PATH })`)? Then handing it the whole environment cannot leak the environment as a
+   * whole. Anything else — passing it on, spreading, serialising, assigning to it — is not that.
+   */
+  const readsOnlyNamedProps = (fn: N, index: number): boolean => {
+    if (index < 0) return false;
+    const param0 = fn.params[index];
+    const param = param0?.type === "AssignmentPattern" ? param0.left : param0;
+    if (!param) return false;
+    if (param.type === "ObjectPattern") return param.properties.every((p: N) => p.type === "Property" && !p.computed);
+    if (param.type !== "Identifier") return false;
+    let ok = true;
+    walkAst(fn.body, (n, anc) => {
+      if (!ok || n.type !== "Identifier" || n.name !== param.name) return;
+      const parent = anc[anc.length - 2];
+      if (!isRef(n, parent)) return;
+      const grand = anc[anc.length - 3];
+      const readsMember = parent?.type === "MemberExpression" && parent.object === n && !(grand && ((grand.type === "AssignmentExpression" && grand.left === parent) || grand.type === "UpdateExpression" || (grand.type === "UnaryExpression" && grand.operator === "delete")));
+      if (!readsMember) ok = false;
+    });
+    return ok;
+  };
 
   const requireSpec = (init0: N): string | null => {
     let init = unwrap(init0);
@@ -621,10 +663,16 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
             cur = p; // a copy: keep following it
             continue;
           }
+          const local = p.callee.type === "Identifier" ? localFns.get(p.callee.name) : null;
           if (isSinkCall(p)) finding("env-dump", "block", p);
-          else if (!(simple !== null && CHILD_FUNCS.has(simple)) && !(d !== null && /^(Object|Array|Reflect|Number|Boolean|Math|Map|Set)\./.test(d)) && p.arguments.includes(cur))
+          else if (local && p.arguments.includes(cur) && readsOnlyNamedProps(local, p.arguments.indexOf(cur)))
+            // a function of this file that only reads named variables from what it is given: still listed, but not a finding to review
+            finding("env-passed", "info", p, `the whole environment is passed to ${simple}(…), which only reads named variables`);
+          else if (!(simple !== null && CHILD_FUNCS.has(simple)) && !(d !== null && /^(Object|Array|Reflect|Number|Boolean|Math|Map|Set)\./.test(d)) && p.arguments.includes(cur)) {
             // spawn/exec/fork(env) is ordinary; handing the whole environment to any other function is not a leak we can show, but it is not nothing
             finding("env-passed", "review", p, `the whole environment is passed to ${d ?? simple ?? "a function"}(…)`);
+            if (p.callee.type === "Identifier" && !local) facts.envCalls.push({ callee: p.callee.name, argIndex: p.arguments.indexOf(cur), line: lineOf(p) });
+          }
           return;
         }
         case "NewExpression":
@@ -745,6 +793,12 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
     },
     ImportDeclaration(n) {
       handleSpec(n.source, n, "import");
+      if (typeof n.source.value === "string" && /^\.\.?(\/|$)/.test(n.source.value)) {
+        for (const sp of n.specifiers) {
+          if (sp.type === "ImportSpecifier") facts.relImports.set(sp.local.name, { from: n.source.value, imported: sp.imported.type === "Identifier" ? sp.imported.name : String(sp.imported.value) });
+          else if (sp.type === "ImportDefaultSpecifier") facts.relImports.set(sp.local.name, { from: n.source.value, imported: "default" });
+        }
+      }
       if (normalizeModule(String(n.source.value)) === "process") {
         for (const s of n.specifiers) if (s.type === "ImportSpecifier" && s.imported.name === "env") cap("env", "*", n);
       }
@@ -925,6 +979,10 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
       const site = facts.sites.find((s) => s.kind === "child_process")!;
       finding("download-exec", "block", { loc: { start: { line: site.line } } }, "network call, file write and child_process in one file");
     }
+  }
+  // For cross-file resolution: which parameters of this file's functions only read named variables.
+  for (const [name, fn] of localFns) {
+    if (fn) facts.envReaders.set(name, fn.params.map((_: N, i: number) => readsOnlyNamedProps(fn, i)));
   }
   return facts;
 }

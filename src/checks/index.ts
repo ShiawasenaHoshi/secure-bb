@@ -1,8 +1,10 @@
 // Deterministic checks of a plugin directory (spec §5.1): no network, no
 // model, seconds. Input: a directory (a snapshot). Output: findings and the
 // list of capabilities the code can use.
+import { posix, sep } from "node:path";
 import { analyze, parseSource, type FileFacts, type Site } from "./ast.js";
 import { excerptOf, scanTree } from "./files.js";
+import { collectDependencies, nameFindings } from "../deps/collect.js";
 import { CAPABILITY_KINDS, type Capability, type CapabilityKind, type CheckResult, type Finding } from "./types.js";
 
 export type { Capability, CapabilityKind, CheckResult, Finding, Severity } from "./types.js";
@@ -17,6 +19,38 @@ function addCap(map: Map<CapabilityKind, { detail: Set<string>; sites: Array<{ f
   if (!c) map.set(kind, (c = { detail: new Set(), sites: [] }));
   if (detail !== null) c.detail.add(detail);
   if (c.sites.length < SITE_CAP && !c.sites.some((s) => s.file === file && s.line === line)) c.sites.push({ file, line });
+}
+
+/** `./host.js` imported from `src/a.ts` → candidate file names in the tree. */
+function importCandidates(fromFile: string, spec: string): string[] {
+  const joined = posix.normalize(posix.join(posix.dirname(fromFile.split(sep).join("/")), spec));
+  const stem = joined.replace(/\.(m|c)?jsx?$/, "");
+  const exts = ["", ".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs", ".jsx"];
+  return [joined, ...exts.map((e) => stem + e), ...exts.slice(1).map((e) => `${joined}/index${e}`)];
+}
+
+/**
+ * Cross-file part of the `env-passed` rule. Handing `process.env` to a function that another file of
+ * the same plugin defines, and that only reads named variables from it, is ordinary (`resolveHome(process.env)`):
+ * the finding stays in the list as `info`. Everything not resolved this way — packages, re-exports,
+ * functions that pass the environment on — remains a `review`.
+ */
+function resolveEnvPassed(perFile: Array<{ rel: string; facts: FileFacts }>, findings: Finding[]): void {
+  const byRel = new Map(perFile.map((f) => [f.rel.split(sep).join("/"), f.facts]));
+  for (const { rel, facts } of perFile) {
+    for (const call of facts.envCalls) {
+      const imp = facts.relImports.get(call.callee);
+      if (!imp) continue;
+      const target = importCandidates(rel, imp.from).map((c) => byRel.get(c)).find((x) => x !== undefined);
+      if (!target || imp.imported === "default") continue;
+      if (target.envReaders.get(imp.imported)?.[call.argIndex] !== true) continue;
+      const f = findings.find((x) => x.rule === "env-passed" && x.file === rel && x.line === call.line);
+      if (f) {
+        f.severity = "info";
+        f.excerpt = `the whole environment is passed to ${call.callee}(…) from ${imp.from}, which only reads named variables`;
+      }
+    }
+  }
 }
 
 export async function runChecks(dir: string): Promise<CheckResult> {
@@ -74,6 +108,8 @@ export async function runChecks(dir: string): Promise<CheckResult> {
       for (const s of facts.rcPaths.slice(0, 3)) findings.push({ rule: "rc-or-agent-config-write", severity: "block", file: rel, line: s.line, excerpt: `${s.text} (and the plugin can write files / run commands)` });
     }
   }
+  // `env-passed` where the callee is a function of another file of this plugin that only reads named variables.
+  resolveEnvPassed(perFile, findings);
   // Literal hosts belong to the network capability.
   for (const { rel, facts } of perFile) {
     if (!anyNetwork) break;
@@ -90,6 +126,10 @@ export async function runChecks(dir: string): Promise<CheckResult> {
     }
   }
 
+  // Dependencies: what the plugin uses, and names that look like popular packages (offline; the registry stage is verify.ts).
+  const dependencies = collectDependencies(tree.declared, tree.installed);
+  findings.push(...nameFindings(dependencies, tree.installed));
+
   const capabilities: Capability[] = CAPABILITY_KINDS.filter((k) => caps.has(k)).map((kind) => {
     const c = caps.get(kind)!;
     return { kind, detail: [...c.detail].sort(), sites: c.sites };
@@ -101,7 +141,7 @@ export async function runChecks(dir: string): Promise<CheckResult> {
   const sorted = [...uniq.values()].sort(
     (a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity] || (a.file < b.file ? -1 : a.file > b.file ? 1 : 0) || a.line - b.line || (a.rule < b.rule ? -1 : 1),
   );
-  return { findings: sorted, capabilities, stats: { files: tree.files, parsed, bytes: tree.bytes, ms: Date.now() - t0 } };
+  return { findings: sorted, capabilities, stats: { files: tree.files, parsed, bytes: tree.bytes, ms: Date.now() - t0 }, dependencies };
 }
 
 /** Plain-text report for `bb secure-bb check` and logs. */
@@ -113,5 +153,15 @@ export function formatReport(r: CheckResult): string {
   for (const f of r.findings) out.push(`  [${f.severity}] ${f.rule}  ${f.file}${f.line ? `:${f.line}` : ""}  ${f.excerpt}`);
   out.push(r.capabilities.length === 0 ? "capabilities: none (safe class)" : "capabilities:");
   for (const c of r.capabilities) out.push(`  ${c.kind}${c.detail.length ? `: ${c.detail.join(", ")}` : ""}`);
+  const st = r.dependencyStats;
+  if (st && st.total > 0) {
+    out.push(`dependencies: ${st.total} (${st.declared} declared), ${st.registry ? `${st.verified} verified against the npm registry, ${st.unchecked} not verified, ${st.young} younger than 3 days` : "registry not consulted"}`);
+    for (const d of r.dependencies ?? []) {
+      const when = d.publishedAt ? `, published ${d.publishedAt.slice(0, 10)}` : "";
+      out.push(`  ${d.name}@${d.version ?? d.installed ?? d.spec ?? "?"}${d.declared ? "" : " (node_modules)"}: ${d.status ?? "not looked up"}${when}${d.note ? ` — ${d.note}` : ""}`);
+    }
+  } else if (r.dependencies && r.dependencies.length > 0) {
+    out.push(`dependencies: ${r.dependencies.length}, registry not consulted`);
+  }
   return out.join("\n");
 }
