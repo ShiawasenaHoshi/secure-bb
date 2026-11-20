@@ -2,6 +2,7 @@
 // can change settings through the API without authentication).
 import type BetterSqlite3 from "better-sqlite3";
 import type { CheckResult } from "./checks/types.js";
+import { appendRecord, lastHead, sealLegacy, verifyChain, type JournalAnchor, type JournalReport } from "./journal.js";
 import { PRUNE_MS, type RegistryCache, type RegistryEntry } from "./deps/registry.js";
 import { DEFAULT_AI, type AiSettings, type ScanResult, type ScanRow, type ScanStatus, type ScanTrigger } from "./scan/types.js";
 import type { Category, ConfigWindowRow, Drift, DriftKind, DriftStatus, SnapshotRow, WindowScope } from "./watch/model.js";
@@ -167,6 +168,22 @@ export const MIGRATIONS: string[] = [
      result TEXT)`,
   `CREATE INDEX IF NOT EXISTS scans_local ON scans (local_hash)`,
   `CREATE INDEX IF NOT EXISTS scans_content ON scans (content_hash)`,
+  // Stage 5: the journal is a hash chain (every record holds the hash of the one before it).
+  `ALTER TABLE log ADD COLUMN prev_hash TEXT`,
+  `ALTER TABLE log ADD COLUMN hash TEXT`,
+  // Stage 5: threads that read untrusted content. One row per event that did (thread, event seq);
+  // `note` says what kind of thing, never what was read. The cursor is the last event seq looked at.
+  `CREATE TABLE IF NOT EXISTS taint_hits (
+     thread_id TEXT NOT NULL,
+     seq INTEGER NOT NULL,
+     kind TEXT NOT NULL,
+     at INTEGER NOT NULL,
+     note TEXT NOT NULL,
+     PRIMARY KEY (thread_id, seq))`,
+  `CREATE TABLE IF NOT EXISTS taint_cursor (
+     thread_id TEXT PRIMARY KEY,
+     last_seq INTEGER NOT NULL,
+     scanned_at INTEGER NOT NULL)`,
 ];
 
 export interface Policy {
@@ -227,6 +244,13 @@ export interface QueueRow {
   reason: string | null;
   firstSeen: number;
   lastSeen: number;
+}
+export interface TaintHitRow {
+  threadId: string;
+  seq: number;
+  kind: string;
+  at: number;
+  note: string;
 }
 export interface WindowRow {
   id: number;
@@ -380,7 +404,26 @@ export class Store implements RegistryCache {
   constructor(
     readonly db: Db,
     private readonly now: () => number,
-  ) {}
+    /** Where the journal head is also kept (a file next to the database); absent in tests. */
+    private readonly anchor: JournalAnchor | null = null,
+  ) {
+    if (this.getMeta("journal_sealed") === null) {
+      const sealed = sealLegacy(db);
+      this.setMeta("journal_sealed", String(this.now()));
+      this.setMeta("journal_sealed_count", String(sealed));
+      this.pinHead();
+    }
+  }
+
+  private pinHead(): void {
+    const head = lastHead(this.db);
+    if (!head || !this.anchor) return;
+    try {
+      this.anchor.write(head);
+    } catch {
+      /* the head file is a second witness; failing to write it must not stop the journal (verify shows a stale file as "behind", which is harmless) */
+    }
+  }
 
   // ---- policy -----------------------------------------------------------
   policy(): Policy {
@@ -559,6 +602,10 @@ export class Store implements RegistryCache {
       )
       .run(q.kind, q.contentHash, q.pluginId, q.version, q.source, q.sourceKind, q.rootDir, q.gitCommit, q.npmIntegrity, q.trigger, q.threadId, q.proposalId, q.reason, now, now);
     return this.getQueue(Number(info.lastInsertRowid))!;
+  }
+  /** A held entry's reason that starts with `prefix` no longer applies (e.g. the directory was fixed). */
+  clearQueueReason(contentHash: string, prefix: string): void {
+    this.db.prepare(`UPDATE queue SET reason = NULL WHERE content_hash = ? AND status = 'held' AND reason LIKE ? ESCAPE '\\'`).run(contentHash, `${prefix.replace(/[\\%_]/g, "\\$&")}%`);
   }
   getQueue(id: number): QueueRow | null {
     const r = this.db.prepare(`SELECT * FROM queue WHERE id = ?`).get(id) as Raw | undefined;
@@ -861,9 +908,22 @@ export class Store implements RegistryCache {
 
   // ---- log --------------------------------------------------------------
   log(kind: string, pluginId: string | null, contentHash: string | null, detail: unknown = null): void {
-    this.db
-      .prepare(`INSERT INTO log (ts, kind, plugin_id, content_hash, detail) VALUES (?, ?, ?, ?, ?)`)
-      .run(this.now(), kind, pluginId, contentHash, detail === null ? null : JSON.stringify(detail));
+    const head = appendRecord(this.db, this.now(), kind, pluginId, contentHash, detail === null ? null : JSON.stringify(detail));
+    if (this.anchor) {
+      try {
+        this.anchor.write(head);
+      } catch {
+        /* see pinHead */
+      }
+    }
+  }
+  /** Checks the hash chain, the head file and that every approval has a journal record. */
+  verifyJournal(): JournalReport {
+    return verifyChain(this.db, this.now(), this.anchor);
+  }
+  /** How many records existed before the chain began (their history before that cannot be proven). */
+  journalSealedLegacy(): number {
+    return Number(this.getMeta("journal_sealed_count") ?? 0);
   }
   /**
    * Logs a decision unless the latest decision about this version says exactly the same
@@ -889,6 +949,42 @@ export class Store implements RegistryCache {
       contentHash: (r.content_hash as string | null) ?? null,
       detail: r.detail ? JSON.parse(r.detail as string) : null,
     }));
+  }
+
+  // ---- taint (stage 5): threads that read untrusted content ---------------------
+  taintCursor(threadId: string): number | null {
+    const r = this.db.prepare(`SELECT last_seq FROM taint_cursor WHERE thread_id = ?`).get(threadId) as { last_seq: number } | undefined;
+    return r ? r.last_seq : null;
+  }
+  setTaintCursor(threadId: string, seq: number): void {
+    this.db
+      .prepare(`INSERT INTO taint_cursor (thread_id, last_seq, scanned_at) VALUES (?, ?, ?) ON CONFLICT(thread_id) DO UPDATE SET last_seq = excluded.last_seq, scanned_at = excluded.scanned_at`)
+      .run(threadId, seq, this.now());
+  }
+  /** Returns true when the hit is new. */
+  addTaintHit(h: TaintHitRow): boolean {
+    const info = this.db.prepare(`INSERT OR IGNORE INTO taint_hits (thread_id, seq, kind, at, note) VALUES (?, ?, ?, ?, ?)`).run(h.threadId, h.seq, h.kind, h.at, h.note);
+    return info.changes > 0;
+  }
+  clearTaintHit(threadId: string, seq: number): void {
+    this.db.prepare(`DELETE FROM taint_hits WHERE thread_id = ? AND seq = ?`).run(threadId, seq);
+  }
+  /** Hits in the given threads (all threads when `threadIds` is null) at or after `since`; a project's `.bb-env-setup.sh` counts whenever it was first seen. */
+  taintHits(threadIds: readonly string[] | null, since: number): TaintHitRow[] {
+    const rows =
+      threadIds === null
+        ? (this.db.prepare(`SELECT * FROM taint_hits WHERE (at >= ? OR kind = 'env-setup') ORDER BY at, thread_id, seq`).all(since) as Raw[])
+        : threadIds.length === 0
+          ? []
+          : (this.db
+              .prepare(`SELECT * FROM taint_hits WHERE (at >= ? OR kind = 'env-setup') AND thread_id IN (${threadIds.map(() => "?").join(",")}) ORDER BY at, thread_id, seq`)
+              .all(since, ...threadIds) as Raw[]);
+    return rows.map((r) => ({ threadId: r.thread_id as string, seq: r.seq as number, kind: r.kind as string, at: r.at as number, note: r.note as string }));
+  }
+  /** A hit that exists in the thread regardless of when (the "this thread is tainted" fact, for the page). */
+  taintedThreads(limit = 50): Array<{ threadId: string; kinds: string[]; first: number; last: number }> {
+    const rows = this.db.prepare(`SELECT thread_id, GROUP_CONCAT(DISTINCT kind) AS kinds, MIN(at) AS first, MAX(at) AS last FROM taint_hits GROUP BY thread_id ORDER BY last DESC LIMIT ?`).all(limit) as Raw[];
+    return rows.map((r) => ({ threadId: r.thread_id as string, kinds: String(r.kinds).split(","), first: r.first as number, last: r.last as number }));
   }
 
   // ---- seen plugins (after-the-fact baseline) ---------------------------

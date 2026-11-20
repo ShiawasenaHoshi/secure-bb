@@ -5,8 +5,11 @@ import { readFileSync } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
 import { runChecks as defaultRunChecks, type CheckResult } from "./checks/index.js";
 import { BLOCKED_REASON, bySeverity, capabilityTokens, localCheckKey, newTokens, summarize } from "./decision.js";
+import { describeIssues, serverIds, writableByOthers, type PermIssue } from "./perms.js";
 import { validateSecondModel } from "./scan/commands.js";
+import type { TaintAssessment } from "./taint/monitor.js";
 import type { AiSettings } from "./scan/types.js";
+import { T } from "./text.js";
 import { generateSecret, otpauthUri, verifyTotp, stepAt } from "./totp.js";
 import type { ApprovalRow, Policy, ProposalRow, QueueRow, Store, WindowRow } from "./store.js";
 import { hashTree, isInsideSnapshots } from "./tree.js";
@@ -37,6 +40,8 @@ export type GateErrorCode =
 
 /** Hold reason for a snapshot whose files differ from what was proposed. */
 export const TAMPERED_REASON = "снимок изменён после предложения";
+/** Prefix of a queue entry's reason when the directory could be changed by someone other than the server's user: such a version cannot be approved. */
+export const UNSAFE_DIR_REASON = "каталог доступен на запись другим";
 
 export class GateError extends Error {
   constructor(
@@ -81,6 +86,10 @@ export interface GateDeps {
   scanFlag?: (k: { contentHash: string; localHash: string | null }) => string | null;
   /** Stage 3: a trust window closed and `pin` stays pinned (the "scan on freeze" option). Must not throw. */
   onFreeze?: (pluginId: string, pin: ApprovalRow | null) => void;
+  /** Stage 5: has a thread of the window's tree read untrusted content since `since`? Absent: windows are not closed by pollution. */
+  taint?: { assessTree(rootThreadId: string, scope: "tree" | "thread", since: number): Promise<TaintAssessment> };
+  /** Stage 5: who other than the server user can write to this directory (injectable for tests). Default: the real file system. */
+  unsafeDirs?: (dir: string) => Promise<PermIssue[]>;
   /** Stage 3: a version that did not come through `propose` is held (the "scan externals" option). Must not throw. */
   onExternal?: (ctx: HookCtx) => void;
 }
@@ -302,7 +311,7 @@ export class Gate {
     } catch (err) {
       // Fail closed: any internal error holds the plugin.
       this.store.log("hook.error", ctx.pluginId, ctx.contentHash, { message: err instanceof Error ? err.message : String(err) });
-      return { action: "wait", reason: "held by secure-bb: internal error" };
+      return { action: "wait", reason: T.agentHeldNoReview };
     }
   }
 
@@ -337,7 +346,17 @@ export class Gate {
     let proposal: ProposalRow | null = null;
     let reason: string | null = null;
     let verifiedDir: string | null = null;
-    if (await isInsideSnapshots(this.d.snapshotsRoot, ctx.rootDir)) {
+    const inSnapshots = await isInsideSnapshots(this.d.snapshotsRoot, ctx.rootDir);
+    if (!inSnapshots) {
+      // Not one of our snapshots (those are checked by hash): the directory must not be changeable by anyone but the server's user.
+      const unsafe = await this.unsafeDirs(ctx.rootDir);
+      if (unsafe !== null) {
+        this.scheduleCheck(ctx);
+        return this.hold(ctx, null, `${UNSAFE_DIR_REASON}: ${unsafe}`);
+      }
+      this.store.clearQueueReason(ctx.contentHash, UNSAFE_DIR_REASON); // fixed since the last look
+    }
+    if (inSnapshots) {
       const real = await realpath(ctx.rootDir);
       proposal = this.store.proposalByDir(real);
       if (proposal && proposal.pluginId === ctx.pluginId) {
@@ -386,14 +405,20 @@ export class Gate {
       const why = `${BLOCKED_REASON}: ${summarize(blocks)}`;
       const q = this.queue(ctx, proposal, reason ?? why);
       this.store.logDecision("reject", ctx.pluginId, ctx.contentHash, { review: q.id, version: ctx.version, rules: blocks.map((f) => f.rule) });
-      return { action: "reject", message: `secure-bb: ${why} (review #${q.id}); снять блок может только человек кодом` };
+      return { action: "reject", message: T.agentRejected(q.id) };
     }
 
     if (verifiedDir && proposal && reason === null) {
       const reviews = bySeverity(result, "review");
       const w = proposal.windowId === null ? null : this.store.getWindow(proposal.windowId);
-      const windowOpen = w !== null && w.pluginId === ctx.pluginId && isOpen(w, this.now);
+      let windowOpen = w !== null && w.pluginId === ctx.pluginId && isOpen(w, this.now);
       if (windowOpen) {
+        // Pollution is looked at right before the window is used, not only on the sweep: a tainted tree closes it now.
+        const guard = await this.guardWindow(w!);
+        if (guard === "unknown") return this.hold(ctx, proposal, "не удалось проверить загрязнение дерева тредов");
+        if (guard === "closed") windowOpen = false;
+      }
+      if (windowOpen && w) {
         const fresh = newTokens(result, w.caps);
         if (reviews.length === 0 && fresh.length === 0 && aiFlag === null) {
           this.recordApproval(ctx, "window", w.id, proposal);
@@ -418,6 +443,18 @@ export class Gate {
       return this.hold(ctx, proposal, why);
     }
     return this.holdExternal(ctx, proposal, reason ?? aiFlag);
+  }
+
+  /** Null: only the server's user can write there (or the check cannot run on this OS). Otherwise a description for the page. */
+  private async unsafeDirs(dir: string): Promise<string | null> {
+    let issues: PermIssue[];
+    if (this.d.unsafeDirs) issues = await this.d.unsafeDirs(dir);
+    else {
+      const ids = serverIds();
+      if (ids === null) return null;
+      issues = await writableByOthers(dir, ids);
+    }
+    return issues.length === 0 ? null : describeIssues(issues);
   }
 
   private queue(ctx: HookCtx, proposal: ProposalRow | null, reason: string | null): QueueRow {
@@ -453,7 +490,7 @@ export class Gate {
   private hold(ctx: HookCtx, proposal: ProposalRow | null, reason: string | null): Decision {
     const q = this.queue(ctx, proposal, reason);
     this.store.logDecision("hold", ctx.pluginId, ctx.contentHash, { review: q.id, version: ctx.version, trigger: ctx.trigger, ...(reason ? { reason } : {}) });
-    return { action: "wait", reason: `held by secure-bb: review #${q.id}` };
+    return { action: "wait", reason: T.agentHeld(q.id) };
   }
 
   /** After bb installed (and built) a snapshot: remember the built tree so later loads can be verified. */
@@ -500,6 +537,9 @@ export class Gate {
    */
   approveQueue(queueId: number, code: string, opts: { acknowledgeBlock?: boolean } = {}): { installDir: string | null; pluginId: string; enable: boolean } {
     const q = this.requireHeld(queueId);
+    // No code lifts this: the directory itself must be fixed (nobody but the server's user may write there), then the version is looked at again.
+    if (q.reason?.startsWith(UNSAFE_DIR_REASON))
+      throw new GateError("invalid", "this version lies in a directory that others can write to; it cannot be approved from there (see the page)", { unsafeDir: true });
     const result = this.checkForQueue(q);
     const blocked = (q.reason?.startsWith(BLOCKED_REASON) ?? false) || (result !== null && bySeverity(result, "block").length > 0);
     // A block is lifted only knowingly: the page shows the findings and asks for explicit confirmation along with the code.
@@ -647,10 +687,49 @@ export class Gate {
   async windowCovering(pluginId: string, threadId: string | null): Promise<WindowRow | null> {
     const w = this.openWindows().find((x) => x.pluginId === pluginId);
     if (!w || threadId === null) return null;
-    if (threadId === w.threadId) return w;
-    if (w.scope === "thread") return null;
-    const ancestors = await this.d.threads.ancestors(threadId);
-    return ancestors.includes(w.threadId) ? w : null;
+    let covers = threadId === w.threadId;
+    if (!covers && w.scope === "tree") covers = (await this.d.threads.ancestors(threadId)).includes(w.threadId);
+    if (!covers) return null;
+    // A window whose tree read untrusted content is closed, and one we cannot vouch for is not used.
+    return (await this.guardWindow(w)) === "ok" ? w : null;
+  }
+
+  /**
+   * Pollution (spec §6): if any thread of the window's tree has read untrusted content since the window opened,
+   * the window is closed for good. "unknown": the history could not be read in full; the window stays open but is not used.
+   */
+  async guardWindow(w: WindowRow): Promise<"ok" | "closed" | "unknown"> {
+    if (!this.d.taint || w.closedAt !== null) return "ok";
+    let verdict: TaintAssessment;
+    try {
+      verdict = await this.d.taint.assessTree(w.threadId, w.scope, w.openedAt);
+    } catch (err) {
+      this.store.log("taint.error", w.pluginId, null, { windowId: w.id, message: err instanceof Error ? err.message : String(err) });
+      return "unknown";
+    }
+    if (verdict.state === "tainted") {
+      // The window may have been closed by someone else while we were reading.
+      const now = this.store.getWindow(w.id);
+      if (now && now.closedAt === null) {
+        this.store.closeWindow(w.id, "tainted");
+        const pin = this.store.latestApproval(w.pluginId);
+        this.store.log("window.taint", w.pluginId, pin?.contentHash ?? null, { windowId: w.id, thread: w.threadId, kinds: verdict.kinds, threads: verdict.threads.slice(0, 10), lines: verdict.lines.slice(0, 5), pinnedVersion: pin?.version ?? null });
+        try {
+          this.d.onFreeze?.(w.pluginId, pin);
+        } catch {
+          /* optional */
+        }
+      }
+      return "closed";
+    }
+    return verdict.state === "unknown" ? "unknown" : "ok";
+  }
+
+  /** Background pass: closes every open plugin window whose tree is tainted. Returns how many were closed. */
+  async sweepTaint(): Promise<number> {
+    let closed = 0;
+    for (const w of this.openWindows()) if ((await this.guardWindow(w)) === "closed") closed++;
+    return closed;
   }
 
   // ---- policy -------------------------------------------------------------

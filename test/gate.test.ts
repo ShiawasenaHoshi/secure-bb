@@ -38,7 +38,7 @@ class Harness {
       threads,
       thirdPartyRunning: async () => this.running,
       externalTotpFile: this.externalFile,
-      snapshotsRoot: this.snaps,
+      snapshotsRoot: this.snaps, unsafeDirs: async () => [],
       runChecks: async () => NETWORKED,
     });
   }
@@ -228,7 +228,7 @@ describe("touch", () => {
       threads: { ancestors: async () => [], descendants: async () => [] },
       thirdPartyRunning: async () => [],
       externalTotpFile: file,
-      snapshotsRoot: h.snaps,
+      snapshotsRoot: h.snaps, unsafeDirs: async () => [],
     });
     expect(g.totpState()).toBe("external");
     await g.decide(ctx());

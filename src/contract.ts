@@ -1,5 +1,6 @@
 // RPC contract shared by server.ts and app.tsx (the app imports only its type).
 import { defineRpcContract } from "@get-bb/plugin-sdk";
+import type { JournalReport } from "./journal.js";
 import type { Overview } from "./overview.js";
 import * as s from "./schema.js";
 
@@ -8,6 +9,7 @@ const id = s.integer({ min: 1 });
 
 export const rpcContract = defineRpcContract({
   overview: { input: s.nullValue(), output: s.json<Overview>() },
+  "journal.verify": { input: s.nullValue(), output: s.json<JournalReport>() },
   "page.ping": { input: s.nullValue(), output: s.json<{ ok: true }>() },
   "totp.begin": {
     input: s.nullValue(),

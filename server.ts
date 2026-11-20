@@ -21,6 +21,7 @@ import { collectProbe, isThirdParty, runningThirdParty, type InstalledPluginLite
 import { formatReport, runChecks } from "./src/checks/index.js";
 import type { FetchLike } from "./src/deps/registry.js";
 import { verifyDependencies } from "./src/deps/verify.js";
+import { fileAnchor, agentLine, type JournalReport } from "./src/journal.js";
 import { propose } from "./src/propose.js";
 import { runProcess } from "./src/scan/process.js";
 import { flagReason, ScanError, Scanner, type ScanTarget } from "./src/scan/scanner.js";
@@ -28,6 +29,8 @@ import { scanLine, scanView } from "./src/scan/view.js";
 import { encodeQr } from "./src/qr.js";
 import { MIGRATIONS, Store, type ApprovalRow } from "./src/store.js";
 import { hashTree } from "./src/tree.js";
+import { bbTaintSource } from "./src/taint/bb-source.js";
+import { TaintMonitor } from "./src/taint/monitor.js";
 import { bbWatchActions, bbWatchSource } from "./src/watch/bb-source.js";
 import { formatWatch } from "./src/watch/format.js";
 import { WatchError, Watchdog } from "./src/watch/watchdog.js";
@@ -61,9 +64,9 @@ export default async function plugin(bb: BbPluginApi) {
   const now = () => Date.now();
   const db = bb.storage.database();
   bb.storage.migrate(db, MIGRATIONS);
-  const store = new Store(db, now);
-
   const dataDir = dirname(db.name);
+  // The journal head is also kept in a file next to the database: a database rolled back or cut at the tail no longer matches it.
+  const store = new Store(db, now, fileAnchor(join(dataDir, "journal.head")));
   const snapshotsDir = join(dataDir, "snapshots");
   mkdirSync(snapshotsDir, { recursive: true });
   const snapshotsRoot = realpathSync(snapshotsDir);
@@ -92,6 +95,15 @@ export default async function plugin(bb: BbPluginApi) {
       return res.threads.find((t) => t.threadId === threadId)?.descendantIds ?? [];
     },
   };
+
+  // ---- pollution tracker (stage 5, spec §6): threads that read untrusted content ----------------
+  const watchSource = bbWatchSource({
+    sdk: bb.sdk,
+    listPlugins,
+    loopbackBaseUrl: () => bb.server.loopbackBaseUrl,
+    dataDir: () => bb.server.experimental_dataDir,
+  });
+  const taint = new TaintMonitor({ store, source: bbTaintSource(bb.sdk, (projectId) => watchSource.envSetup(projectId)), tree: threads, now });
 
   // Registry lookups for dependencies (stage 2.3) are made here, by the server process; answers are cached in our database.
   const verifyDeps = (result: Parameters<typeof verifyDependencies>[0]) => verifyDependencies(result, { cache: store, fetch: globalThis.fetch as unknown as FetchLike, now });
@@ -137,6 +149,7 @@ export default async function plugin(bb: BbPluginApi) {
     now,
     verifyDeps,
     threads,
+    taint,
     thirdPartyRunning: async () => runningThirdParty(await listPlugins()),
     externalTotpFile: process.env.BB_SECURE_BB_TOTP_FILE?.trim() || null,
     snapshotsRoot,
@@ -176,17 +189,32 @@ export default async function plugin(bb: BbPluginApi) {
   const watch = new Watchdog({
     store,
     now,
-    source: bbWatchSource({
-      sdk: bb.sdk,
-      listPlugins,
-      loopbackBaseUrl: () => bb.server.loopbackBaseUrl,
-      dataDir: () => bb.server.experimental_dataDir,
-    }),
+    source: watchSource,
     actions: bbWatchActions(bb.sdk),
     touch: (purpose, code) => gate.touch(purpose, code),
     log: (m) => bb.log.warn(m),
   });
-  const overview = () => buildOverview({ scanner: aiScanner, store, gate, now, hookRegistered, listPlugins, probe, descendants: threads.descendants, watch });
+  // ---- journal integrity (stage 5): verified at start, on every tick, and on demand --------------------
+  let journalReport: JournalReport = store.verifyJournal();
+  let alarmed = "";
+  const journal = (fresh = false): JournalReport => {
+    if (fresh || now() - journalReport.checkedAt > 30_000) {
+      journalReport = store.verifyJournal();
+      const signature = journalReport.ok ? "" : journalReport.problems.map((p) => `${p.kind}:${p.id}`).join(",");
+      if (signature !== alarmed) {
+        alarmed = signature;
+        if (!journalReport.ok) {
+          bb.log.error(`secure-bb journal chain is BROKEN: ${journalReport.problems.length} problem(s)`);
+          store.log("journal.alarm", null, null, { problems: journalReport.problems.slice(0, 10).map((p) => ({ kind: p.kind, id: p.id })) });
+          changed();
+        }
+      }
+    }
+    return journalReport;
+  };
+  journal(true);
+  const overview = () =>
+    buildOverview({ scanner: aiScanner, store, gate, now, hookRegistered, listPlugins, probe, descendants: threads.descendants, watch, journal: () => journal(), taintedThreads: () => store.taintedThreads(20) });
 
   // ---- after-the-fact mode ------------------------------------------------
   const scanner = new AfterFactScanner({
@@ -213,6 +241,11 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.rpc.register(rpcContract, {
     overview: () => overview(),
+    "journal.verify": () => {
+      const r = journal(true);
+      changed();
+      return r;
+    },
     "page.ping": () => {
       lastPagePing = now();
       return { ok: true as const };
@@ -354,22 +387,32 @@ export default async function plugin(bb: BbPluginApi) {
             const lines = [
               `gate before load: ${hookRegistered ? "yes" : "no (after the fact)"}`,
               `trust window for this thread: ${open.length > 0 ? `open (${open.map((w) => `${w.pluginId}, ${Math.ceil((Math.min(w.expiresAt, w.hardExpiresAt) - now()) / 60_000)} min`).join("; ")})` : "closed"}`,
+              agentLine(journal()),
             ];
             return { exitCode: 0, stdout: lines.join("\n") };
           },
         }),
         log: cliCommand({
-          summary: "Recent gate decisions",
-          options: { limit: { type: "integer", min: 1, max: 100, default: 20, description: "How many entries (1-100)" } },
+          summary: "Recent gate decisions; --verify checks the integrity of the journal (hash chain)",
+          options: {
+            limit: { type: "integer", min: 1, max: 100, default: 20, description: "How many entries (1-100)" },
+            verify: { type: "boolean", description: "Check the hash chain of the journal instead of listing it; exit code 2 when it is broken" },
+          },
           async run(input) {
+            if (input.options.verify) {
+              const report = journal(true);
+              if (!report.ok) changed();
+              // For an agent: only whether it holds. Which record, and how, is for the human on the page.
+              return { exitCode: report.ok ? 0 : 2, stdout: agentLine(report) };
+            }
             const rows = store.listLog(input.options.limit);
+            // No reasons here: agents read this too (spec §11). The page has them.
             const text = rows
               .map((r) => {
                 const d = (r.detail && typeof r.detail === "object" ? r.detail : {}) as Record<string, unknown>;
                 const parts = [new Date(r.ts).toISOString(), r.kind];
                 if (r.pluginId) parts.push(d.version ? `${r.pluginId}@${String(d.version)}` : r.pluginId);
                 if (d.review !== undefined) parts.push(`review #${String(d.review)}`);
-                if (typeof d.reason === "string") parts.push(`— ${d.reason}`);
                 return parts.join(" ");
               })
               .join("\n");
@@ -487,6 +530,11 @@ export default async function plugin(bb: BbPluginApi) {
           .scan()
           .then((r) => (r.found + r.accepted + r.rolledBack + r.rollbackFailed > 0 ? changed() : undefined))
           .catch((e) => bb.log.error(`config watch failed: ${String(e)}`));
+      const sweepTaint = () =>
+        void Promise.all([gate.sweepTaint(), watch.taintSweep((since) => taint.assessAll(since))])
+          .then(([a, b]) => (a + b > 0 ? changed() : undefined))
+          .catch((e) => bb.log.error(`taint sweep failed: ${String(e)}`));
+      const kickTaint = debounced(sweepTaint);
       const kickAfterFact = debounced(scanAfterFact);
       const kickConfig = debounced(scanConfig);
       try {
@@ -500,6 +548,20 @@ export default async function plugin(bb: BbPluginApi) {
       } catch (err) {
         bb.log.warn(`cannot subscribe to system changes: ${String(err)}`);
       }
+      let unsubscribeThreads: (() => void) | null = null;
+      try {
+        // New events in any thread: remember which, and look at the open windows soon (spec §6: pollution closes them).
+        unsubscribeThreads = bb.sdk.subscribe({
+          event: "thread:changed",
+          callback: (event) => {
+            if (!event.changes?.includes("events-appended") || !event.id) return;
+            taint.note(event.id);
+            if (gate.openWindows().length > 0 || watch.openWindows().length > 0) kickTaint();
+          },
+        });
+      } catch (err) {
+        bb.log.warn(`cannot subscribe to thread changes (windows are then checked once a tick): ${String(err)}`);
+      }
       if (!hookRegistered) kickAfterFact();
       kickConfig();
       let lastScan = now();
@@ -510,6 +572,8 @@ export default async function plugin(bb: BbPluginApi) {
         try {
           if (gate.sweep() > 0) changed();
           if (watch.sweep() > 0) changed();
+          if (gate.openWindows().length > 0 || watch.openWindows().length > 0) sweepTaint();
+          journal(now() - journalReport.checkedAt > 60_000);
           if (!hookRegistered && now() - lastScan >= AFTER_FACT_MS) {
             lastScan = now();
             if ((await scanner.scan()).length > 0) changed();
@@ -523,6 +587,7 @@ export default async function plugin(bb: BbPluginApi) {
         }
       }
       unsubscribe?.();
+      unsubscribeThreads?.();
     },
   });
 

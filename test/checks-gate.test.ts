@@ -25,6 +25,7 @@ function setup(runChecks?: (dir: string) => Promise<CheckResult>) {
     thirdPartyRunning: async () => [],
     externalTotpFile: null,
     snapshotsRoot: join(root, "snapshots"),
+    unsafeDirs: async () => [],
     runChecks,
     onChecked: () => checked++,
   });
