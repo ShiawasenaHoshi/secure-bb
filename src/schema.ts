@@ -41,6 +41,14 @@ export const integer = (opts: { min?: number; max?: number } = {}): Schema<numbe
     return { value: v };
   });
 
+export const number = (opts: { min?: number; max?: number } = {}): Schema<number> =>
+  make((v) => {
+    if (typeof v !== "number" || !Number.isFinite(v)) return fail("expected a number");
+    if (opts.min !== undefined && v < opts.min) return fail(`must be >= ${opts.min}`);
+    if (opts.max !== undefined && v > opts.max) return fail(`must be <= ${opts.max}`);
+    return { value: v };
+  });
+
 export const boolean = (): Schema<boolean> =>
   make((v) => (typeof v === "boolean" ? { value: v } : fail("expected a boolean")));
 

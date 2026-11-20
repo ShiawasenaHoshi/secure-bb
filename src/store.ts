@@ -4,6 +4,7 @@ import type BetterSqlite3 from "better-sqlite3";
 import type { CheckResult } from "./checks/types.js";
 import { appendRecord, lastHead, sealLegacy, verifyChain, type JournalAnchor, type JournalReport } from "./journal.js";
 import { PRUNE_MS, type RegistryCache, type RegistryEntry } from "./deps/registry.js";
+import { SENTINEL_MIGRATIONS } from "./sentinel/store.js";
 import { SKILL_MIGRATIONS } from "./skills/store.js";
 import { DEFAULT_PUBLISH, type PublishRow, type PublishSettings, type PublishStatus, type PublishTrigger } from "./publish/types.js";
 import { DEFAULT_AI, type AiSettings, type ScanResult, type ScanRow, type ScanStatus, type ScanTrigger } from "./scan/types.js";
@@ -206,6 +207,8 @@ export const MIGRATIONS: string[] = [
      tag TEXT,
      detail TEXT)`,
   `CREATE INDEX IF NOT EXISTS publications_plugin ON publications (plugin_id, local_hash)`,
+  // Stage 7: the sentinel's settings and feed (observation only).
+  ...SENTINEL_MIGRATIONS,
 ];
 
 export interface Policy {

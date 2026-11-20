@@ -64,6 +64,19 @@ export const rpcContract = defineRpcContract({
     output: s.json<{ ok: true }>(),
   },
   "publish.run": { input: s.object({ pluginId: s.string({ min: 1, max: 128 }) }), output: s.json<{ ok: true; status: string; note: string }>() },
+  "sentinel.settings": {
+    input: s.object({
+      enabled: s.optional(s.boolean()),
+      allThreads: s.optional(s.boolean()),
+      timeoutMs: s.optional(s.integer({ min: 1000, max: 60000 })),
+      maxPerMinute: s.optional(s.integer({ min: 1, max: 600 })),
+      riskThreshold: s.optional(s.number({ min: 0, max: 2 })),
+      threshold: s.optional(s.object({ id: s.string({ min: 1, max: 40 }), value: s.number({ min: 0, max: 1 }) })),
+      instruction: s.optional(s.object({ id: s.string({ min: 1, max: 40 }), text: s.string({ max: 2000 }) })),
+      code: s.optional(code),
+    }),
+    output: s.json<{ ok: true }>(),
+  },
   "policy.set": {
     input: s.object({
       windowMin: s.optional(s.integer({ min: 1, max: 1440 })),
