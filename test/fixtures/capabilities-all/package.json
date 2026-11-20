@@ -1,0 +1,8 @@
+{
+  "name": "caps",
+  "bb": {
+    "app": "./app.tsx",
+    "host": "./host.js",
+    "server": "./server.js"
+  }
+}

@@ -1,3 +1,6 @@
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { describe, expect, it } from "vitest";
 import plugin from "../server.js";
@@ -107,5 +110,21 @@ describe("secure-bb server", () => {
   it("refuses registration while a third-party plugin runs and names it", async () => {
     const { harness } = await boot({ plugins: [installedPlugin({ id: "nosy" })] });
     await expect(harness.behavior.callRpc("totp.begin", null)).rejects.toThrow(/third-party plugins/);
+  });
+
+  it("`check <path>` runs the checks without installing anything", async () => {
+    const { harness, calls } = await boot();
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "sbb-cli-")));
+    chmodSync(dir, 0o755);
+    mkdirSync(join(dir, "p"), { mode: 0o755 });
+    writeFileSync(join(dir, "p", "index.js"), "export const s = JSON.stringify(process.env);\nfetch('https://x.example');\n", { mode: 0o644 });
+    const res = await harness.behavior.runCli(["check", join(dir, "p")]);
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout).toContain("[block] env-dump  index.js:1");
+    expect(res.stdout).toContain("network: fetch, host:x.example");
+    expect(calls.filter(([k]) => k === "install")).toEqual([]);
+    const missing = await harness.behavior.runCli(["check", join(dir, "missing")]);
+    expect(missing.exitCode).toBe(1);
+    expect(missing.stderr).toMatch(/cannot check/);
   });
 });

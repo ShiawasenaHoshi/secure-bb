@@ -1,0 +1,6 @@
+{
+  "name": "safe",
+  "bb": {
+    "server": "./server.ts"
+  }
+}

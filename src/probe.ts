@@ -109,7 +109,13 @@ export async function collectProbe(src: ProbeSource): Promise<Probe> {
 
   return {
     hookRegistered: src.hookRegistered,
-    env: { ...process.env },
+    // Only the variables the assessment reads: the page never needs the rest of the environment.
+    env: {
+      BB_PLUGIN_ACTIVATION_GUARDS: process.env.BB_PLUGIN_ACTIVATION_GUARDS,
+      BB_TELEMETRY: process.env.BB_TELEMETRY,
+      BB_MARKETPLACE_URL: process.env.BB_MARKETPLACE_URL,
+      BB_SECURE_BB_TOTP_FILE: process.env.BB_SECURE_BB_TOTP_FILE,
+    },
     serverUid: typeof process.getuid === "function" ? process.getuid() : null,
     agentUid: agent,
     accountState: account,

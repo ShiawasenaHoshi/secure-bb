@@ -5,10 +5,26 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "jsx": "react-jsx",
-    "lib": ["ES2022", "DOM"],
-    "types": ["node"],
+    "lib": [
+      "ES2022",
+      "DOM"
+    ],
+    "types": [
+      "node"
+    ],
     "noEmit": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "paths": {
+      "acorn": [
+        "./vendor/acorn.d.mts"
+      ]
+    }
   },
-  "include": ["server.ts", "app.tsx", "src", "test"]
+  "include": [
+    "server.ts",
+    "app.tsx",
+    "src",
+    "test",
+    "vendor/*.d.mts"
+  ]
 }

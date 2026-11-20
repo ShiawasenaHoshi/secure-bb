@@ -4,7 +4,7 @@
 // root of trust, so it ships no third-party code. Policy and secrets live in
 // its own SQLite database, never in plugin settings (anyone can change those
 // through the unauthenticated API, and secret settings are plain files).
-import { dirname, join } from "node:path";
+import { dirname, join, resolve as resolvePath } from "node:path";
 import { mkdirSync, realpathSync } from "node:fs";
 import {
   PluginCliError,
@@ -18,6 +18,7 @@ import { rpcContract } from "./src/contract.js";
 import { Gate, GateError, type HookCtx, type ThreadTree } from "./src/gate.js";
 import { buildOverview } from "./src/overview.js";
 import { collectProbe, runningThirdParty, type InstalledPluginLite } from "./src/probe.js";
+import { formatReport, runChecks } from "./src/checks/index.js";
 import { propose } from "./src/propose.js";
 import { encodeQr } from "./src/qr.js";
 import { MIGRATIONS, Store } from "./src/store.js";
@@ -87,6 +88,7 @@ export default async function plugin(bb: BbPluginApi) {
     thirdPartyRunning: async () => runningThirdParty(await listPlugins()),
     externalTotpFile: process.env.BB_SECURE_BB_TOTP_FILE?.trim() || null,
     snapshotsRoot,
+    onChecked: () => changed(),
   });
 
   // ---- the hook ----------------------------------------------------------
@@ -244,6 +246,21 @@ export default async function plugin(bb: BbPluginApi) {
               })
               .join("\n");
             return { exitCode: 0, stdout: text || "(empty)" };
+          },
+        }),
+        check: cliCommand({
+          summary: "Run the deterministic checks on a plugin directory without installing it",
+          positionals: [{ name: "path", description: "Plugin directory on this machine", required: true }],
+          options: {},
+          async run(input, ctx) {
+            const dir = resolvePath(ctx.cwd ?? process.cwd(), input.positionals.path);
+            let result;
+            try {
+              result = await runChecks(dir);
+            } catch (err) {
+              throw new PluginCliError(`cannot check ${dir}: ${err instanceof Error ? err.message : String(err)}`, { code: "check_failed" });
+            }
+            return { exitCode: 0, stdout: formatReport(result) };
           },
         }),
         propose: cliCommand({
