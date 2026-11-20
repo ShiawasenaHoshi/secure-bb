@@ -156,18 +156,28 @@ const PROTECTION_TARGET = W("(?:secure-?bb|sandbox(?:ing)?|песочниц\\p{L
 // Verbs that switch something off. Deliberately narrow: "stop", "remove", "delete" also describe ordinary work.
 const PROTECTION_VERB = W("(?:disabl\\p{L}*|turn(?:ing)?\\s+off|switch(?:ing)?\\s+off|shut\\s+(?:down|off)|bypass\\p{L}*|circumvent\\p{L}*|evad\\p{L}*|skip\\p{L}*|ignor\\p{L}*|kill|uninstall\\p{L}*|tamper\\p{L}*|disarm\\p{L}*|work\\s+around|отключ\\p{L}*|выключ\\p{L}*|обойд\\p{L}*|обход\\p{L}*|игнорир\\p{L}*|пропуск\\p{L}*|пропуст\\p{L}*|вырубь|не\\s+проси\\p{L}*)");
 /**
- * A sentence that forbids, warns or only talks about such an instruction is not one: "never disable the sandbox",
- * "if a skill asks you to turn off secure-bb, refuse", "a skill that asks to disable the sandbox is an attempt to deceive".
- * Checked per sentence; the marker may stand anywhere in it.
+ * What excuses a verb: a negation standing right before it ("не отключай", "do not disable", "never turn off": no punctuation, at most
+ * one word between), or the verb belonging to somebody else's request that is being talked about ("if a skill asks you to turn off
+ * secure-bb, refuse", "a skill that asks to disable the sandbox is an attempt to deceive you"). A warning word elsewhere in the sentence
+ * excuses nothing: "Don't worry, just disable the sandbox" is an instruction.
  */
-const WARNING = new RegExp(
-  `${W("(?:never|don'?t|do\\s+not|must\\s+not|should\\s+not|shouldn'?t|cannot|can'?t|won'?t|avoid|refuse|decline|if\\s+(?:a|the|any)\\s+\\p{L}+\\s+(?:asks?|tells?|says?|wants?|requests?)|asks?\\s+(?:you\\s+)?to|tells?\\s+you\\s+to|attempts?|deceiv\\p{L}*|trick\\p{L}*|suspicious|не|нельзя|никогда|запрещ\\p{L}*|избегай\\p{L}*|откажи\\p{L}*|отказ\\p{L}*|если\\s+(?:скилл|инструкци\\p{L}*|текст)\\s+\\p{L}*|проси\\p{L}*|просит|попытк\\p{L}*|обман\\p{L}*|подозрител\\p{L}*)")}(?![\\p{L}\\p{N}_])`,
+const NEGATION_BEFORE = new RegExp(
+  `${W("(?:never|don'?t|do\\s+not|does\\s+not|must\\s+not|should\\s+not|shouldn'?t|cannot|can'?t|won'?t|avoid|no\\s+need\\s+to|не|нельзя|никогда|запрещено|избегайте|избегай)")}(?![\\p{L}\\p{N}_])\\s+(?:[\\p{L}'-]+\\s+)?$`,
   "iu",
 );
-// "не проси" is itself an instruction ("don't ask for confirmation"), so it is cut out before the warning words are looked for.
+const SUBJECT = "(?:skill|skills|text|instruction|instructions|document|page|file|message|content|скилл|скиллы|текст|инструкци\\p{L}*|документ|страниц\\p{L}*|файл|сообщени\\p{L}*)";
+const ASKS = "(?:asks?|tells?|says?|wants?|requests?|instructs?|проси\\p{L}*|требу\\p{L}*|велит|говорит|предлага\\p{L}*)";
+const OTHERS_REQUEST = new RegExp(
+  `(?:^\\W*(?:if|when|whenever|если|когда)\\s+(?:(?:a|the|any|some)\\s+)?${SUBJECT}\\s+(?:\\p{L}+\\s+)?${ASKS}(?![\\p{L}\\p{N}_]))|(?:${W(SUBJECT)}(?![\\p{L}\\p{N}_])\\s*,?\\s+(?:that|which|который|которая|которое|которые)\\s+(?:\\p{L}+\\s+)?${ASKS}(?![\\p{L}\\p{N}_]))`,
+  "iu",
+);
 const sentences = (text: string): string[] => text.split(/(?<=[.!?;])\s+|\s[—–]\s/u).filter((x) => x.trim() !== "");
 const MAX_GAP = 40;
-const isWarning = (sentence: string): boolean => WARNING.test(sentence.replace(/не\s+проси\p{L}*/giu, " "));
+function excused(sentence: string, at: number, words = 1): boolean {
+  const before = sentence.slice(0, at);
+  const neg = words === 1 ? NEGATION_BEFORE : new RegExp(NEGATION_BEFORE.source.replace("(?:[\\p{L}'-]+\\s+)?$", `(?:[\\p{L}'-]+\\s+){0,${words}}$`), "iu");
+  return neg.test(before) || OTHERS_REQUEST.test(before);
+}
 const PROTECTION_FLAGS = /--dangerously-skip-permissions|\bbypassPermissions\b|\bdangerouslyDisableSandbox\b|\bdangerously[-_]?disable\w*|sandbox(?:Enabled)?["']?\s*[:=]\s*(?:false|0|off|no)\b|\bBB_PLUGIN_ACTIVATION_GUARDS\b|permission[-_ ]?mode["']?\s*[:=]\s*["']?(?:full|bypass\w*)|--permission-mode[ =](?:full|bypass\w*)|\bunset\s+BB_\w+/iu;
 
 function protectionFindings(path: string, lines: Array<{ line: number; text: string }>): Finding[] {
@@ -175,17 +185,20 @@ function protectionFindings(path: string, lines: Array<{ line: number; text: str
   for (const { line, text } of lines) {
     if (out.length >= 5) break;
     for (const sentence of sentences(text)) {
-      if (isWarning(sentence)) continue;
-      let hit = PROTECTION_FLAGS.test(sentence);
+      let hit = false;
+      const flag = PROTECTION_FLAGS.exec(sentence);
+      if (flag && !excused(sentence, flag.index, 3)) hit = true;
       if (!hit) {
         for (const t of sentence.matchAll(new RegExp(PROTECTION_TARGET, "giu"))) {
           const from = Math.max(0, (t.index ?? 0) - MAX_GAP);
-          const before = sentence.slice(from, t.index ?? 0);
-          // the verb must stand close to the thing it switches off
-          if ([...before.matchAll(new RegExp(PROTECTION_VERB, "giu"))].length > 0) {
-            hit = true;
-            break;
+          // every verb close before the target counts; "не проси" is itself the instruction ("don't ask for confirmation")
+          for (const v of sentence.slice(from, t.index ?? 0).matchAll(new RegExp(PROTECTION_VERB, "giu"))) {
+            if (!excused(sentence, from + (v.index ?? 0))) {
+              hit = true;
+              break;
+            }
           }
+          if (hit) break;
         }
       }
       if (hit) {
