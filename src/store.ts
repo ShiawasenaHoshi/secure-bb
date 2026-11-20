@@ -817,6 +817,15 @@ export class Store implements RegistryCache {
   finishScan(id: number, result: ScanResult): void {
     this.db.prepare(`UPDATE scans SET status = ?, finished_at = ?, result = ? WHERE id = ?`).run(result.status, this.now(), JSON.stringify(result), id);
   }
+  /** Scans that were really run (a model was asked, or is being asked) since `ts`; `unavailable` ones cost nothing. */
+  countScansSince(ts: number): number {
+    return (this.db.prepare(`SELECT COUNT(*) AS n FROM scans WHERE started_at > ? AND status != 'unavailable'`).get(ts) as { n: number }).n;
+  }
+  /** The last such scan of exactly this tree since `ts`. */
+  recentScanOfTree(localHash: string, ts: number): ScanRow | null {
+    const r = this.db.prepare(`SELECT * FROM scans WHERE local_hash = ? AND started_at > ? AND status != 'unavailable' ORDER BY id DESC LIMIT 1`).get(localHash, ts) as Raw | undefined;
+    return r ? scanRow(r) : null;
+  }
   /** An earlier scan of the same tree also answers for this core hash. */
   linkScan(id: number, contentHash: string): void {
     this.db.prepare(`UPDATE scans SET content_hash = ? WHERE id = ? AND content_hash IS NULL`).run(contentHash, id);

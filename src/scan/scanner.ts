@@ -12,7 +12,7 @@ import type { AiSettings, ModelOutcome, ScanResult, ScanRow, ScanTrigger } from 
 
 export class ScanError extends Error {
   constructor(
-    readonly code: "off" | "busy" | "invalid",
+    readonly code: "off" | "busy" | "limit" | "invalid",
     message: string,
   ) {
     super(message);
@@ -45,6 +45,10 @@ export interface ScannerDeps {
 
 /** At most this many scans at once: each one sends a plugin's code to a cloud model. */
 const MAX_RUNNING = 3;
+/** A scan spends the subscription: one scan of one version per 10 minutes, and 20 scans a day, whoever asks. */
+export const SAME_VERSION_MS = 10 * 60_000;
+export const DAY_MS = 24 * 3_600_000;
+export const MAX_SCANS_PER_DAY = 20;
 
 export interface Availability {
   /** Where Claude's login comes from. */
@@ -92,6 +96,14 @@ export class Scanner {
         return { row, done: Promise.resolve(row) };
       }
     }
+    const now = this.d.now();
+    const recent = this.d.store.recentScanOfTree(localHash, now - SAME_VERSION_MS);
+    if (recent) {
+      const wait = Math.ceil((recent.startedAt + SAME_VERSION_MS - now) / 60_000);
+      throw new ScanError("limit", `эта версия уже сканировалась недавно (скан #${recent.id}); повторить можно через ${wait} мин`);
+    }
+    if (this.d.store.countScansSince(now - DAY_MS) >= MAX_SCANS_PER_DAY)
+      throw new ScanError("limit", `достигнут суточный предел сканов (${MAX_SCANS_PER_DAY}); он бережёт подписку, попробуйте позже`);
     if (this.running.size >= MAX_RUNNING) throw new ScanError("busy", "уже идут другие сканы; повторите позже");
     const row = this.d.store.insertScan({ pluginId: t.pluginId, version: t.version, localHash, contentHash: t.contentHash, trigger: t.trigger });
     const done = this.execute(row, t.dir, settings).finally(() => this.running.delete(key));

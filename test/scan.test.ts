@@ -212,7 +212,7 @@ describe("the command lines", () => {
     const b = cursorCommand({ prompt: "CODE", cwd: dirs.cwd, model: "gpt-5", server });
     if (!b.ok) throw new Error("unavailable");
     expect(b.spec.file).toBe("cursor-agent");
-    expect(b.spec.args).toEqual(["-p", "--mode", "ask", "--model", "gpt-5"]);
+    expect(b.spec.args).toEqual(["-p", "--trust", "--mode", "ask", "--model", "gpt-5"]);
     expect(b.spec.stdin).toBe("CODE");
     expect(b.spec.env).toEqual({ PATH: "/usr/bin", HOME: "/home/svc", USER: "svc" });
     for (const bad of ["claude-sonnet-4", "Opus", "anthropic/x", "--force", "a b", "", "x;rm"]) expect(validateSecondModel(bad)).not.toBeNull();
@@ -334,6 +334,7 @@ describe("the scanner", () => {
     ];
     for (const [name, raw] of cases) {
       h.reply = () => raw;
+      h.t += 11 * 60_000;
       const row = await h.scanner.scan(h.target());
       expect(row.status, name).toBe("suspect");
       expect(flagReason(row), name).toMatch(/подозрение ИИ-скана/);
@@ -360,7 +361,7 @@ describe("the scanner", () => {
     const row = await h.scanner.scan(h.target());
     expect(peak).toBe(2);
     expect(h.calls.map((c) => c.file).sort()).toEqual(["claude", "cursor-agent"]);
-    expect(h.calls.find((c) => c.file === "cursor-agent")!.args).toEqual(["-p", "--mode", "ask", "--model", "gpt-5"]);
+    expect(h.calls.find((c) => c.file === "cursor-agent")!.args).toEqual(["-p", "--trust", "--mode", "ask", "--model", "gpt-5"]);
     expect(row.status).toBe("suspect");
     expect(row.result!.models.map((m) => [m.label, m.status])).toEqual([["claude", "clean"], ["cursor-agent (gpt-5)", "flag"]]);
     expect(scanView(row).flags.join("\n")).toContain("cursor-agent (gpt-5): код не совпадает с описанием");
@@ -432,9 +433,40 @@ describe("the scanner", () => {
     expect(again.id).toBe(a.id);
     expect(again.contentHash).toBe("sha256:core");
     expect(h.calls).toHaveLength(1);
+    h.t += 11 * 60_000;
     const manual = await h.scanner.scan(h.target());
     expect(manual.id).not.toBe(a.id);
     expect(h.calls).toHaveLength(2);
+  });
+
+  it("spares the subscription: one scan of a version per 10 minutes, 20 scans a day", async () => {
+    h.enable();
+    await h.scanner.scan(h.target());
+    await expect(h.scanner.scan(h.target())).rejects.toMatchObject({ code: "limit", message: expect.stringMatching(/повторить можно через 10 мин/) });
+    expect(h.calls).toHaveLength(1);
+    h.t += 9 * 60_000;
+    await expect(h.scanner.scan(h.target())).rejects.toBeInstanceOf(ScanError);
+    h.t += 61_000;
+    await h.scanner.scan(h.target());
+    expect(h.calls).toHaveLength(2);
+
+    // other versions are not limited by that rule, but the day has a ceiling (2 are used so far)
+    for (let i = 0; i < 18; i++) await h.scanner.scan(h.target({ dir: plugin({ "package.json": PKG, "server.ts": `export default () => ${i};\n` }) }));
+    expect(h.calls).toHaveLength(20);
+    const extra = plugin({ "package.json": PKG, "server.ts": "export default () => 'extra';\n" });
+    await expect(h.scanner.scan(h.target({ dir: extra }))).rejects.toMatchObject({ code: "limit", message: expect.stringMatching(/суточный предел/) });
+    expect(h.calls).toHaveLength(20);
+    h.t += 24 * 3_600_000 + 1;
+    await h.scanner.scan(h.target({ dir: extra }));
+    expect(h.calls).toHaveLength(21);
+  });
+
+  it("a scan that asked nobody (unavailable) does not count against either limit", async () => {
+    h.enable();
+    h.reply = () => ({ kind: "spawn-failed", errno: "ENOENT", message: "x" });
+    for (let i = 0; i < 25; i++) expect((await h.scanner.scan(h.target())).status).toBe("unavailable");
+    h.reply = () => envelope(answer());
+    expect((await h.scanner.scan(h.target())).status).toBe("clean");
   });
 
   it("an interrupted scan is not left `running`", async () => {

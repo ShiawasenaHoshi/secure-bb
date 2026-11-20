@@ -217,7 +217,7 @@ describe("the AI scan through the server entry", () => {
     expect(scan.status).toBe("suspect");
     expect(scan.models.map((m) => [m.label, m.status])).toEqual([["claude", "clean"], ["cursor-agent (gpt-5)", "flag"]]);
     const cap = JSON.parse(readFileSync(cursor.capture, "utf8")) as { argv: string[]; cwdEntries: string[] };
-    expect(cap.argv).toEqual(["-p", "--mode", "ask", "--model", "gpt-5"]);
+    expect(cap.argv).toEqual(["-p", "--trust", "--mode", "ask", "--model", "gpt-5"]);
     expect(cap.cwdEntries).toEqual([]);
   });
 

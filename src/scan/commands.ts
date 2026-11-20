@@ -118,7 +118,8 @@ export function cursorCommand(o: { prompt: string; cwd: string; model: string; s
     secret: null,
     spec: {
       file: o.server[CURSOR_BIN_ENV]?.trim() || "cursor-agent",
-      args: ["-p", "--mode", "ask", "--model", o.model],
+      // --trust: headless cursor-agent refuses an untrusted workspace; ours is an empty directory made for this one run.
+      args: ["-p", "--trust", "--mode", "ask", "--model", o.model],
       env: baseEnv(o.server),
       cwd: o.cwd,
       stdin: o.prompt,
