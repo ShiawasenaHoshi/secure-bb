@@ -294,6 +294,7 @@ export class Gate {
       localHash: proposal?.localHash ?? null,
     });
     if (proposal) this.store.markProposalLoaded(proposal.id);
+    this.store.supersedeTampered(ctx.pluginId, ctx.contentHash);
     this.store.resolveQueueByHash(ctx.contentHash);
     // A touch-approved proposal was already logged as "approved.touch" at approval time; its load is a separate event.
     this.store.log(via === "window" ? "approved.window" : via === "pin" ? "approved.pin" : "approved.load", ctx.pluginId, ctx.contentHash, {
