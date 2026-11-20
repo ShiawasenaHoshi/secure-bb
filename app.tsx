@@ -8,6 +8,9 @@ import type { SecureBbRpc } from "./server";
 import type { Overview, PluginView, WindowView } from "./src/overview";
 import type { QueueRow } from "./src/store";
 import type { CheckResult } from "./src/checks/types";
+import type { ConfigWindowView } from "./src/watch/watchdog";
+import { CATEGORY_LABEL, WINDOW_SCOPES, SCOPE_LABEL } from "./src/watch/model";
+import type { Drift, WindowScope } from "./src/watch/model";
 
 // ---------------------------------------------------------------- helpers --
 
@@ -114,14 +117,49 @@ function windowLine(w: WindowView, remainingSec: number): string {
   return `Окно доверия: плагин ${w.pluginId} из треда ${w.threadId}${subs}${only} — ещё ${minutes(remainingSec)}`;
 }
 
-function WindowRows({ windows, rpc, refetch }: { windows: WindowView[]; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void }) {
+function cfgWindowLine(w: ConfigWindowView, remainingSec: number): string {
+  return `Окно доверия: ${w.scopeLabels.join(", ")} — ещё ${minutes(remainingSec)}`;
+}
+
+function WindowRows({ windows, cfgWindows, rpc, refetch }: { windows: WindowView[]; cfgWindows: ConfigWindowView[]; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void }) {
   const now = useNow();
   const act = useCodeAction(refetch);
   const [code, setCode] = useState("");
   const [closing, setClosing] = useState<number | null>(null);
-  if (windows.length === 0) return null;
+  const [closingCfg, setClosingCfg] = useState<number | null>(null);
+  if (windows.length === 0 && cfgWindows.length === 0) return null;
   return (
     <div className="space-y-2">
+      {cfgWindows.map((w) => {
+        const remaining = Math.max(0, Math.ceil((Math.min(w.expiresAt, w.hardExpiresAt) - now) / 1000));
+        return (
+          <div key={`cfg-${w.id}`} className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted px-3 py-2 text-sm">
+            <span className="min-w-0 flex-1">{cfgWindowLine(w, remaining)}</span>
+            {closingCfg === w.id ? (
+              <>
+                <CodeField value={code} onChange={setCode} />
+                <button
+                  className={btnPrimary}
+                  disabled={act.busy || code.length !== 6}
+                  onClick={() =>
+                    void act.run(async () => {
+                      await rpc.call("watch.window.close", { windowId: w.id, code });
+                      setCode("");
+                      setClosingCfg(null);
+                    })
+                  }
+                >
+                  Закрыть
+                </button>
+              </>
+            ) : (
+              <button className={btn} onClick={() => setClosingCfg(w.id)}>
+                Закрыть
+              </button>
+            )}
+          </div>
+        );
+      })}
       {windows.map((w) => {
         const remaining = Math.max(0, Math.ceil((Math.min(w.expiresAt, w.hardExpiresAt) - now) / 1000));
         return (
@@ -160,10 +198,10 @@ function WindowRows({ windows, rpc, refetch }: { windows: WindowView[]; rpc: Ret
 /** Always-on-screen strip: open windows are never hidden. */
 function WindowOverlay() {
   const { rpc, data, refetch } = useOverview();
-  if (!data || data.windows.length === 0) return null;
+  if (!data || (data.windows.length === 0 && data.watch.windows.length === 0)) return null;
   return (
     <div className="pointer-events-auto fixed bottom-3 left-3 z-50 max-w-[min(32rem,calc(100vw-1.5rem))] rounded-lg border border-border bg-card p-2 shadow-lg" data-secure-bb-banner>
-      <WindowRows windows={data.windows} rpc={rpc} refetch={refetch} />
+      <WindowRows windows={data.windows} cfgWindows={data.watch.windows} rpc={rpc} refetch={refetch} />
     </div>
   );
 }
@@ -428,6 +466,9 @@ function PolicyCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof
   const [capMin, setCapMin] = useState(String(p.capMin));
   const [mode, setMode] = useState<"sliding" | "fixed">(p.mode);
   const [scope, setScope] = useState<"tree" | "thread">(p.scope);
+  const [cfgWindowMin, setCfgWindowMin] = useState(String(p.cfgWindowMin));
+  const [cfgCapMin, setCfgCapMin] = useState(String(p.cfgCapMin));
+  const [cfgMode, setCfgMode] = useState<"sliding" | "fixed">(p.cfgMode);
   const [code, setCode] = useState("");
   const act = useCodeAction(refetch);
   useEffect(() => {
@@ -435,7 +476,10 @@ function PolicyCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof
     setCapMin(String(p.capMin));
     setMode(p.mode);
     setScope(p.scope);
-  }, [p.windowMin, p.capMin, p.mode, p.scope]);
+    setCfgWindowMin(String(p.cfgWindowMin));
+    setCfgCapMin(String(p.cfgCapMin));
+    setCfgMode(p.cfgMode);
+  }, [p.windowMin, p.capMin, p.mode, p.scope, p.cfgWindowMin, p.cfgCapMin, p.cfgMode]);
   return (
     <div className={card}>
       <h3 className="font-semibold">Окна доверия: настройки</h3>
@@ -459,6 +503,18 @@ function PolicyCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof
             <option value="thread">только этот тред</option>
           </select>
         </label>
+        <label className="flex items-center justify-between gap-2">Окно «конфигурация», мин
+          <input className={input} inputMode="numeric" value={cfgWindowMin} onChange={(e) => setCfgWindowMin(e.target.value.replace(/\D/g, ""))} />
+        </label>
+        <label className="flex items-center justify-between gap-2">Потолок «конфигурации», мин
+          <input className={input} inputMode="numeric" value={cfgCapMin} onChange={(e) => setCfgCapMin(e.target.value.replace(/\D/g, ""))} />
+        </label>
+        <label className="flex items-center justify-between gap-2">Режим «конфигурации»
+          <select className={input} value={cfgMode} onChange={(e) => setCfgMode(e.target.value as "sliding" | "fixed")}>
+            <option value="sliding">скользящее</option>
+            <option value="fixed">фиксированное</option>
+          </select>
+        </label>
       </div>
       <div className="mt-3 flex items-center gap-2">
         <CodeField value={code} onChange={setCode} />
@@ -467,7 +523,7 @@ function PolicyCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof
           disabled={act.busy}
           onClick={() =>
             void act.run(async () => {
-              await rpc.call("policy.set", { windowMin: Number(windowMin), capMin: Number(capMin), mode, scope, ...(code.length === 6 ? { code } : {}) });
+              await rpc.call("policy.set", { windowMin: Number(windowMin), capMin: Number(capMin), mode, scope, cfgWindowMin: Number(cfgWindowMin), cfgCapMin: Number(cfgCapMin), cfgMode, ...(code.length === 6 ? { code } : {}) });
               setCode("");
             })
           }
@@ -499,6 +555,144 @@ function LogCard({ ov }: { ov: Overview }) {
   );
 }
 
+// ------------------------------------------------------- config watchdog ---
+
+const driftStatus: Record<Drift["status"], string> = {
+  open: "открыто",
+  "rollback-failed": "откат не удался",
+  "rolled-back": "откатано",
+  "accepted-window": "принято окном",
+  "accepted-touch": "принято вами",
+  reverted: "вернулось",
+};
+
+function DriftRow({ d, registered, rpc, refetch }: { d: Drift; registered: boolean; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void }) {
+  const [code, setCode] = useState("");
+  const act = useCodeAction(refetch);
+  const isOpen = d.status === "open" || d.status === "rollback-failed";
+  const change = d.kind === "added" ? `новое: ${d.after}` : d.kind === "removed" ? `пропало (было: ${d.before})` : `${d.before} → ${d.after}`;
+  return (
+    <div className={`${card} ${isOpen ? "border-yellow-500/60" : ""}`}>
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h3 className="font-semibold">{d.label}</h3>
+        <span className={muted}>{driftStatus[d.status]} · {when(d.firstSeen)}</span>
+      </div>
+      <p className="break-all">{CATEGORY_LABEL[d.category]}: {change}</p>
+      {d.note ? <p className={muted}>{d.note}</p> : null}
+      {isOpen && registered ? (
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <CodeField value={code} onChange={setCode} />
+          <button className={btn} disabled={act.busy || code.length !== 6} onClick={() => void act.run(async () => { await rpc.call("watch.accept", { id: d.id, code }); setCode(""); })}>
+            Принять
+          </button>
+          {d.rollbackable ? (
+            <button className={btn} disabled={act.busy || code.length !== 6} onClick={() => void act.run(async () => { await rpc.call("watch.rollback", { id: d.id, code }); setCode(""); })}>
+              Откатить
+            </button>
+          ) : (
+            <span className={`text-xs ${muted}`}>безопасного отката нет</span>
+          )}
+        </div>
+      ) : null}
+      <Msg error={act.error} />
+    </div>
+  );
+}
+
+function WatchSection({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void }) {
+  const w = ov.watch;
+  const registered = ov.totp.state === "locked" || ov.totp.state === "external";
+  const [code, setCode] = useState("");
+  const [scopes, setScopes] = useState<WindowScope[]>([]);
+  const act = useCodeAction(refetch);
+  const open = w.drifts.filter((d) => d.status === "open" || d.status === "rollback-failed");
+  const settled = w.drifts.filter((d) => d.status !== "open" && d.status !== "rollback-failed");
+  const toggle = (s: WindowScope) => setScopes((cur) => (cur.includes(s) ? cur.filter((x) => x !== s) : [...cur, s]));
+  const need = code.length !== 6 || act.busy || !registered;
+  return (
+    <div className="space-y-3">
+      <div className={card}>
+        <p>
+          {w.baselineAt === null ? (
+            <b>Эталон не принят: сторож только показывает, что видит, и ничего не оценивает.</b>
+          ) : (
+            <>Эталон принят {when(w.baselineAt)}.</>
+          )}{" "}
+          Проверка раз в минуту и по событиям{w.lastScanAt ? `; последняя — ${when(w.lastScanAt)}, объектов: ${w.observedCount}` : ""}.
+        </p>
+        <p className={`mt-1 ${muted}`}>
+          Пока агенты работают от того же пользователя (ступени 0–2) и API без токенов, агент может вернуть изменение обратно: это сигнализация, не замок.
+        </p>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <CodeField value={code} onChange={setCode} />
+          <button className={btnPrimary} disabled={need} onClick={() => void act.run(async () => { const r = await rpc.call("watch.acceptAll", { code }); setCode(""); return { note: `Эталон принят, объектов: ${r.items}` }; })}>
+            {w.baselineAt === null ? "Принять текущую конфигурацию как эталон" : "Принять всё текущее как эталон"}
+          </button>
+          <button className={btn} disabled={act.busy} onClick={() => void act.run(async () => { await rpc.call("watch.scan"); })}>
+            Проверить сейчас
+          </button>
+        </div>
+        {!registered ? <p className={`mt-2 ${muted}`}>Сначала зарегистрируйте второй фактор.</p> : null}
+        <Msg error={act.error} ok={act.ok} />
+      </div>
+
+      <div className={card}>
+        <h3 className="font-semibold">Откат: {w.rollbackEnabled ? "включён" : "выключен"}</h3>
+        <p className={muted}>
+          Откатывает только безопасное и только вне окна: выключает включённый встроенный плагин из списка, удаляет новую переменную окружения, возвращает инструкции. Остальное только показывается.
+          Переключается кодом (в обе стороны).
+        </p>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <CodeField value={code} onChange={setCode} />
+          <button className={btn} disabled={need} onClick={() => void act.run(async () => { await rpc.call("watch.rollbackMode", { enabled: !w.rollbackEnabled, code }); setCode(""); })}>
+            {w.rollbackEnabled ? "Выключить откат" : "Включить откат"}
+          </button>
+        </div>
+      </div>
+
+      <div className={card}>
+        <h3 className="font-semibold">Окно доверия «конфигурация»</h3>
+        <p className={muted}>
+          Изменения выбранного в окне принимаются в эталон без кода; по умолчанию 10 минут, скользящее. Вход в аккаунт, потолки разрешений, настройки провайдеров, эксперименты и safe-mode окном не принимаются.
+        </p>
+        <div className="mt-2 flex flex-wrap gap-3">
+          {WINDOW_SCOPES.map((s) => (
+            <label key={s} className="flex items-center gap-1">
+              <input type="checkbox" checked={scopes.includes(s)} onChange={() => toggle(s)} /> {SCOPE_LABEL[s]}
+            </label>
+          ))}
+        </div>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <CodeField value={code} onChange={setCode} />
+          <button className={btnPrimary} disabled={need || scopes.length === 0 || w.baselineAt === null} onClick={() => void act.run(async () => { await rpc.call("watch.window.open", { scopes, code }); setCode(""); setScopes([]); })}>
+            Открыть окно
+          </button>
+        </div>
+      </div>
+
+      <h3 className="font-semibold">Расхождения ({open.length})</h3>
+      {open.length === 0 ? <div className={`${card} ${muted}`}>Открытых расхождений нет.</div> : open.map((d) => <DriftRow key={d.id} d={d} registered={registered} rpc={rpc} refetch={refetch} />)}
+      {settled.length > 0 ? (
+        <details>
+          <summary className={`cursor-pointer ${muted}`}>Лента ({settled.length})</summary>
+          <div className="mt-2 space-y-2">{settled.map((d) => <DriftRow key={d.id} d={d} registered={registered} rpc={rpc} refetch={refetch} />)}</div>
+        </details>
+      ) : null}
+
+      {w.failed.length > 0 ? (
+        <div className={`${card} border-yellow-500/60`}>
+          <h4 className="font-medium">Не удалось прочитать сейчас (здесь расхождения не оцениваются)</h4>
+          <ul className="list-disc pl-5">{w.failed.map((f) => <li key={f.source} className="break-all"><span className="font-mono">{f.source}</span>: {f.reason}</li>)}</ul>
+        </div>
+      ) : null}
+      <details className={card}>
+        <summary className="cursor-pointer font-medium">Что не наблюдается вообще ({w.blind.length})</summary>
+        <ul className="mt-2 list-disc pl-5">{w.blind.map((b) => <li key={b.source}>{b.reason}</li>)}</ul>
+      </details>
+    </div>
+  );
+}
+
 // -------------------------------------------------------------------- page --
 
 /** Tells the server this page is open, so a registration started now counts as attended. */
@@ -526,7 +720,7 @@ function GatePage() {
         {ov.totp.blockedUntil > 0 ? (
           <p className="rounded-md border border-destructive p-2 text-destructive">Слишком много неверных кодов: одобрения заблокированы до {when(ov.totp.blockedUntil)}.</p>
         ) : null}
-        <WindowRows windows={ov.windows} rpc={rpc} refetch={refetch} />
+        <WindowRows windows={ov.windows} cfgWindows={ov.watch.windows} rpc={rpc} refetch={refetch} />
         <Section title="Защита этого bb"><StageCard ov={ov} /></Section>
         <Section title="Второй фактор"><Registration ov={ov} rpc={rpc} refetch={refetch} /></Section>
         <Section title={`Гейт плагинов — очередь (${held.length})`}>
@@ -542,6 +736,7 @@ function GatePage() {
           {ov.plugins.length === 0 ? <div className={`${card} ${muted}`}>Сторонних плагинов нет.</div> : ov.plugins.map((p) => <PluginRow key={p.id} p={p} rpc={rpc} refetch={refetch} registered={registered} checks={ov.checks} />)}
         </Section>
         <Section title="Гейт плагинов — окна доверия"><PolicyCard ov={ov} rpc={rpc} refetch={refetch} /></Section>
+        <Section title={`Сторож конфигурации${ov.watch.drifts.some((d) => d.status === "open" || d.status === "rollback-failed") ? " (!)" : ""}`}><WatchSection ov={ov} rpc={rpc} refetch={refetch} /></Section>
         <Section title="Журнал"><LogCard ov={ov} /></Section>
       </div>
     </div>

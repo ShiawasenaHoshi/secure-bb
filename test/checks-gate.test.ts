@@ -7,6 +7,8 @@ import type { CheckResult } from "../src/checks/index.js";
 import { Gate, type HookCtx } from "../src/gate.js";
 import { buildOverview } from "../src/overview.js";
 import { MIGRATIONS, Store } from "../src/store.js";
+import { Watchdog } from "../src/watch/watchdog.js";
+import { FakeBb } from "./support/watch.js";
 
 const root = realpathSync(mkdtempSync(join(tmpdir(), "sbb-cg-")));
 const ctx = (dir: string, hash: string): HookCtx => ({ pluginId: "demo", version: "1.0.0", source: `path:${dir}`, sourceKind: "path", gitCommit: null, npmIntegrity: null, rootDir: dir, contentHash: hash, trigger: "install" });
@@ -91,6 +93,7 @@ describe("check results are stored, linked to the hook's hash and shown", () => 
       listPlugins: async () => [],
       probe: async () => ({ hookRegistered: true, env: {}, serverUid: 1, agentUid: 2, accountState: "unknown", builtins: {}, connectHold: { exists: false, serverCanDelete: null }, bind: { address: null, loopbackOnly: null }, apiAuth: "unknown", thirdParty: [], telemetryConfigured: null }),
       descendants: async () => [],
+      watch: new Watchdog({ store, now: () => 1_800_000_000_000, source: new FakeBb(), actions: new FakeBb().actions, touch: () => undefined }),
     });
     const hash = store.listQueue(5)[0]!.contentHash!;
     expect(ov.checks[hash]!.capabilities[0]!.kind).toBe("network");

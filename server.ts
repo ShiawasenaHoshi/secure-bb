@@ -23,6 +23,9 @@ import { propose } from "./src/propose.js";
 import { encodeQr } from "./src/qr.js";
 import { MIGRATIONS, Store } from "./src/store.js";
 import { hashTree } from "./src/tree.js";
+import { bbWatchActions, bbWatchSource } from "./src/watch/bb-source.js";
+import { formatWatch } from "./src/watch/format.js";
+import { WatchError, Watchdog } from "./src/watch/watchdog.js";
 
 export { rpcContract };
 export type SecureBbRpc = typeof rpcContract;
@@ -30,12 +33,15 @@ export type SecureBbRpc = typeof rpcContract;
 const SWEEP_MS = 15_000;
 const PAGE_PING_TTL_MS = 45_000;
 const AFTER_FACT_MS = 60_000;
+const WATCH_MS = 60_000;
+const WATCH_DEBOUNCE_MS = 1_500;
 
 function refusal(err: unknown): never {
   if (err instanceof GateError) {
     const code = err.code === "invalid_code" || err.code === "blocked" ? "forbidden" : err.code === "not_registered" ? "conflict" : err.code;
     throw new experimental_PluginRpcRefusal({ code, message: err.message });
   }
+  if (err instanceof WatchError) throw new experimental_PluginRpcRefusal({ code: err.code, message: err.message });
   throw err;
 }
 
@@ -120,7 +126,21 @@ export default async function plugin(bb: BbPluginApi) {
       },
     });
 
-  const overview = () => buildOverview({ store, gate, now, hookRegistered, listPlugins, probe, descendants: threads.descendants });
+  // ---- config watchdog (spec §7) -----------------------------------------
+  const watch = new Watchdog({
+    store,
+    now,
+    source: bbWatchSource({
+      sdk: bb.sdk,
+      listPlugins,
+      loopbackBaseUrl: () => bb.server.loopbackBaseUrl,
+      dataDir: () => bb.server.experimental_dataDir,
+    }),
+    actions: bbWatchActions(bb.sdk),
+    touch: (purpose, code) => gate.touch(purpose, code),
+    log: (m) => bb.log.warn(m),
+  });
+  const overview = () => buildOverview({ store, gate, now, hookRegistered, listPlugins, probe, descendants: threads.descendants, watch });
 
   // ---- after-the-fact mode ------------------------------------------------
   const scanner = new AfterFactScanner({
@@ -205,6 +225,41 @@ export default async function plugin(bb: BbPluginApi) {
       changed();
       return { ok: true as const };
     }),
+    "watch.scan": wrap(async () => {
+      await watch.scan();
+      changed();
+      return { ok: true as const };
+    }),
+    "watch.acceptAll": wrap(async ({ code }) => {
+      const { items } = await watch.acceptAll(code);
+      changed();
+      return { ok: true as const, items };
+    }),
+    "watch.accept": wrap(async ({ id, code }) => {
+      await watch.acceptDrift(id, code);
+      changed();
+      return { ok: true as const };
+    }),
+    "watch.rollback": wrap(async ({ id, code }) => {
+      await watch.rollbackDrift(id, code);
+      changed();
+      return { ok: true as const };
+    }),
+    "watch.rollbackMode": wrap(({ enabled, code }) => {
+      watch.setRollback(enabled, code);
+      changed();
+      return { ok: true as const };
+    }),
+    "watch.window.open": wrap(async ({ scopes, code }) => {
+      await watch.openWindow(scopes, code);
+      changed();
+      return { ok: true as const };
+    }),
+    "watch.window.close": wrap(async ({ windowId, code }) => {
+      await watch.closeWindow(windowId, code);
+      changed();
+      return { ok: true as const };
+    }),
     "policy.set": wrap(({ code, ...patch }) => {
       gate.setPolicy(patch, code);
       changed();
@@ -249,6 +304,17 @@ export default async function plugin(bb: BbPluginApi) {
               })
               .join("\n");
             return { exitCode: 0, stdout: text || "(empty)" };
+          },
+        }),
+        config: cliCommand({
+          summary: "Config watchdog: differences from the approved configuration snapshot",
+          options: {
+            scan: { type: "boolean", description: "Check right now before printing" },
+            limit: { type: "integer", min: 1, max: 100, default: 20, description: "How many entries (1-100)" },
+          },
+          async run(input) {
+            if (input.options.scan) await watch.scan().then((r) => (r.found + r.accepted + r.rolledBack > 0 ? changed() : undefined));
+            return { exitCode: 0, stdout: formatWatch(watch.view(), now(), input.options.limit) };
           },
         }),
         check: cliCommand({
@@ -311,33 +377,49 @@ export default async function plugin(bb: BbPluginApi) {
   bb.background.service("watch", {
     async start(signal) {
       let unsubscribe: (() => void) | null = null;
-      if (!hookRegistered) {
+      const debounced = (fn: () => void) => {
         let timer: ReturnType<typeof setTimeout> | null = null;
-        const kick = () => {
+        return () => {
           if (timer) clearTimeout(timer);
-          timer = setTimeout(() => void scanner.scan().then((d) => d.length && changed()).catch((e) => bb.log.error(String(e))), 1500);
+          timer = setTimeout(fn, WATCH_DEBOUNCE_MS);
         };
-        try {
-          unsubscribe = bb.sdk.subscribe({
-            event: "system:changed",
-            callback: (event) => {
-              if (event.changes?.includes("plugins-changed")) kick();
-            },
-          });
-        } catch (err) {
-          bb.log.warn(`cannot subscribe to plugin changes: ${String(err)}`);
-        }
-        kick();
+      };
+      const scanAfterFact = () => void scanner.scan().then((d) => d.length && changed()).catch((e) => bb.log.error(String(e)));
+      const scanConfig = () =>
+        void watch
+          .scan()
+          .then((r) => (r.found + r.accepted + r.rolledBack + r.rollbackFailed > 0 ? changed() : undefined))
+          .catch((e) => bb.log.error(`config watch failed: ${String(e)}`));
+      const kickAfterFact = debounced(scanAfterFact);
+      const kickConfig = debounced(scanConfig);
+      try {
+        unsubscribe = bb.sdk.subscribe({
+          event: "system:changed",
+          callback: (event) => {
+            if (!hookRegistered && event.changes?.includes("plugins-changed")) kickAfterFact();
+            if (event.changes?.includes("plugins-changed") || event.changes?.includes("config-changed")) kickConfig();
+          },
+        });
+      } catch (err) {
+        bb.log.warn(`cannot subscribe to system changes: ${String(err)}`);
       }
+      if (!hookRegistered) kickAfterFact();
+      kickConfig();
       let lastScan = now();
+      let lastWatch = now();
       while (!signal.aborted) {
         await sleep(SWEEP_MS, signal);
         if (signal.aborted) break;
         try {
           if (gate.sweep() > 0) changed();
+          if (watch.sweep() > 0) changed();
           if (!hookRegistered && now() - lastScan >= AFTER_FACT_MS) {
             lastScan = now();
             if ((await scanner.scan()).length > 0) changed();
+          }
+          if (now() - lastWatch >= WATCH_MS) {
+            lastWatch = now();
+            scanConfig();
           }
         } catch (err) {
           bb.log.error(`watch tick failed: ${String(err)}`);

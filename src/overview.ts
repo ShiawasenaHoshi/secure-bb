@@ -4,6 +4,7 @@ import { assess, type Assessment, type Probe } from "./detect.js";
 import type { Gate, TotpState } from "./gate.js";
 import type { InstalledPluginLite } from "./probe.js";
 import { isThirdParty, runningThirdParty } from "./probe.js";
+import type { Watchdog, WatchView } from "./watch/watchdog.js";
 import type { ApprovalRow, LogRow, Policy, QueueRow, Store, WindowRow } from "./store.js";
 
 export interface WindowView {
@@ -49,9 +50,12 @@ export interface Overview {
   checks: Record<string, CheckResult>;
   /** Check results by queue entry id (proposals have them before the core hashes the plugin). */
   queueChecks: Record<number, CheckResult>;
+  /** Stage 2a: config watchdog (approved snapshot, differences, configuration windows). */
+  watch: WatchView;
 }
 
 export interface OverviewDeps {
+  watch: Watchdog;
   store: Store;
   gate: Gate;
   now: () => number;
@@ -136,5 +140,6 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
     windows,
     log: d.store.listLog(40),
     checks,
+    watch: d.watch.view(),
   };
 }
