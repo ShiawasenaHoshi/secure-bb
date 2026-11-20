@@ -1,1 +1,1 @@
-export const copy = { ...process.env, EXTRA: '1' };
+export const s = JSON.stringify({ ...process.env, EXTRA: '1' });

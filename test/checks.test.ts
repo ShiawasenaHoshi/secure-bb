@@ -1,4 +1,4 @@
-import { chmodSync, cpSync, readFileSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, readFileSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -231,10 +231,23 @@ describe("hard signs (spec §5.1)", () => {
     const r = await fixture("env-dump");
     expect(r.findings.find((f) => f.rule === "env-dump")).toMatchObject({ severity: "block", line: 1 });
     expect(rules(await tree({ "i.js": "export const s = JSON.stringify({ ...process.env, a: 1 });\n" }), "block")).toContain("env-dump");
-    expect(rules(await tree({ "i.js": "export const s = Object.entries(process.env);\n" }), "block")).toContain("env-dump");
+    expect(rules(await tree({ "i.js": "export const s = JSON.stringify(Object.entries(process.env));\n" }), "block")).toContain("env-dump");
   });
-  it("spreading env into a child's options is a dump too (review item 2: block, a human may approve)", async () => {
-    expect(rules(await tree({ "i.js": "import { spawn } from 'node:child_process';\nspawn('ls', [], { env: { ...process.env } });\n" }), "block")).toContain("env-dump");
+  it("passing env to a child process is a capability, not a leak (round 2, item 12)", async () => {
+    for (const name of ["env-spawn", "env-exec-alias", "env-fork-copy", "env-entries-spawn"]) {
+      const r = await fixture(name);
+      expect(rules(r, "block"), name).toEqual([]);
+      expect(cap(r, "child_process"), name).toBeDefined();
+      expect(cap(r, "env")!.detail, name).toContain("*");
+    }
+  });
+  it.each(["env-fetch-body", "env-entries-map-fetch", "env-file", "env-template", "env-route-return", "env-rpc-return"])("a copy of the whole env that reaches the network, a file, a template or a handler's response: %s", async (name) => {
+    expect(rules(await fixture(name), "block")).toContain("env-dump");
+  });
+  it("a copy kept in a variable and never sent anywhere is only a capability", async () => {
+    const r = await tree({ "i.js": "export const copy = { ...process.env };\nexport const n = Object.keys(process.env).length;\n" });
+    expect(rules(r, "block")).toEqual([]);
+    expect(cap(r, "env")!.detail).toEqual(["*"]);
   });
   it("reading ~/.ssh with network is a block; without network a review", async () => {
     expect(rules(await fixture("secret-network"), "block")).toContain("secret-read-network");
@@ -318,10 +331,26 @@ describe("review 2.1 — what used to be silent", () => {
     expect(rules(r, "review")).toContain("dynamic-constructor");
     expect(cap(r, "dynamic_code")).toBeDefined();
   });
-  it("this.constructor.name and err.constructor are not flagged", async () => {
-    const r = await tree({ "i.js": "export const n = (o) => o.constructor.name + String(o.constructor === Object);\n" });
-    expect(rules(r)).not.toContain("dynamic-constructor");
+  it("any read of .constructor is dynamic code and a review (round 2, item 11) — except new on a class/array literal", async () => {
+    const r = await tree({ "i.js": "export const n = (o) => o.constructor.name;\n" });
+    expect(rules(r, "review")).toContain("dynamic-constructor");
+    expect(cap(r, "dynamic_code")).toBeDefined();
+    const ok = await fixture("constructor-new-literal");
+    expect(rules(ok)).not.toContain("dynamic-constructor");
+    expect(ok.capabilities).toEqual([]);
   });
+  it.each(["constructor-var", "constructor-async", "constructor-generator", "constructor-async-generator", "constructor-destructured", "constructor-computed"])("%s is dynamic code and a review", async (name) => {
+    const r = await fixture(name);
+    expect(rules(r, "review"), name).toContain("dynamic-constructor");
+    expect(cap(r, "dynamic_code"), name).toBeDefined();
+  });
+  it.each(["proxy-global", "proxy-alias", "proxy-process"])("new Proxy(globalThis|process) is a review: %s", async (name) => {
+    const r = await fixture(name);
+    expect(rules(r, "review")).toContain("global-proxy");
+    expect(cap(r, "dynamic_code")!.detail.join()).toContain("Proxy");
+  });
+  it("g.eval(…) through a proxy is an eval", async () => expect(cap(await fixture("proxy-global"), "dynamic_code")!.detail).toContain("eval"));
+  it("a Proxy over an ordinary object is nothing", async () => expect((await fixture("proxy-plain")).capabilities).toEqual([]));
   it("setTimeout/setInterval with a string execute code", async () => {
     for (const name of ["settimeout-string", "setinterval-string"]) {
       const r = await fixture(name);
@@ -453,5 +482,19 @@ describe("review 2.1 — what used to be silent", () => {
       expect(r.findings.find((f) => f.rule === "env-secret-network")).toMatchObject({ severity: "review", file: "index.js" });
     });
     it("a harmless env variable next to dns is not", async () => expect(rules(await fixture("dns-no-secret"))).not.toContain("env-secret-network"));
+  });
+});
+
+describe("bb's own plugins (round 2, item 13)", () => {
+  const automations = "/opt/bb/app/plugins/automations";
+  it.skipIf(!existsSync(automations))("the built-in automations plugin has no block finding", async () => {
+    const dir = join(scratch, "automations");
+    cpSync(automations, dir, { recursive: true, filter: (p) => !/\/(\.bundled-runtime|node_modules|dist|\.git)(\/|$)/.test(p.slice(automations.length)) });
+    chmodSync(dir, 0o755);
+    normalise(dir);
+    const r = await runChecks(dir);
+    expect(r.findings.filter((f) => f.severity === "block"), formatReport(r)).toEqual([]);
+    expect(cap(r, "child_process")).toBeDefined(); // it spawns script runners with { env: { ...process.env } }
+    expect(cap(r, "env")!.detail).toContain("*");
   });
 });

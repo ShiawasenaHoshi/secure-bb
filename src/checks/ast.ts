@@ -334,9 +334,15 @@ const PATH_FUNCS = new Set(["join", "resolve", "normalize", "relative"]);
 const SINK_NAMES = new Set([...FS_FUNCS, ...CHILD_FUNCS, ...PATH_FUNCS]);
 /** Calls that change files or start processes: where an rc / agent-config path is dangerous. Reading or joining such a path is not. */
 const WRITE_SINKS = new Set([...FS_WRITE, ...CHILD_FUNCS, "mkdir", "mkdirSync", "unlink", "unlinkSync", "rm", "rmSync", "truncate", "writeJson"]);
-const ENV_DUMPERS = new Set(["JSON.stringify", "Object.entries", "Object.keys", "Object.values", "Object.fromEntries", "Object.assign", "structuredClone", "util.inspect", "inspect"]);
+/** Calls whose result still is (a transformation of) the whole environment. */
+const ENV_COPIERS = new Set(["Object.entries", "Object.keys", "Object.values", "Object.fromEntries", "Object.assign", "structuredClone", "Array.from"]);
+/** Methods that keep tainted data tainted when called on it: `Object.entries(env).map(…)`. */
+const TAINT_METHODS = new Set(["map", "filter", "reduce", "join", "slice", "concat", "flatMap", "sort", "toString", "toJSON"]);
+/** Where a copy of the whole environment is a leak: serialisation, files, the network, a handler's response. */
+const ENV_SINK_CALLS = new Set(["JSON.stringify", "String", "util.inspect", "inspect", "fetch", "send", "write", "end", "post", "put", "request", "json", "text", "respond", "reply", "writeFile", "writeFileSync", "appendFile", "appendFileSync", "writeSync", "sendBeacon", "emit"]);
+/** Registering a handler: what a function inside returns goes to HTTP / RPC clients. */
+const HANDLER_REGISTRARS = new Set(["route", "register", "experimental_websocket"]);
 const TIMER_FUNCS = new Set(["setTimeout", "setInterval", "setImmediate"]);
-const SAFE_CONSTRUCTOR_TAILS = new Set(["name", "prototype", "length"]);
 
 
 export function analyze(rel: string, parsed: { ast: N; code: string }): FileFacts {
@@ -434,11 +440,25 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
     if (n.type === "ObjectExpression") return n.properties.some((p: N) => p.type === "SpreadElement" && isEnvExpr(p.argument));
     if (n.type === "CallExpression") {
       const d = dottedName(n.callee);
-      return d !== null && ENV_DUMPERS.has(d) && n.arguments.some(isEnvExpr);
+      return d !== null && ENV_COPIERS.has(d) && n.arguments.some(isEnvExpr);
     }
     return false;
   };
-  for (let pass = 0; pass < 3; pass++) for (const d of decls) if (d.id.type === "Identifier" && d.init && isEnvExpr(d.init)) envAliases.add(d.id.name);
+  for (let pass = 0; pass < 3; pass++) {
+    for (const d of decls) {
+      if (!d.init || !isEnvExpr(d.init)) continue;
+      if (d.id.type === "Identifier") envAliases.add(d.id.name);
+      // `const { HOME, ...rest } = process.env`: `rest` is a copy of the environment
+      else if (d.id.type === "ObjectPattern") for (const p of d.id.properties) if (p.type === "RestElement" && p.argument.type === "Identifier") envAliases.add(p.argument.name);
+    }
+  }
+  // Names bound to the global object / process (for `new Proxy(g, …)` where g = globalThis)
+  const globalAliases = new Set<string>();
+  const isGlobalLike = (n0: N): boolean => {
+    const n = unwrap(n0);
+    return !!n && (isGlobalObj(n) || isProcess(n) || (n.type === "Identifier" && (globalAliases.has(n.name) || n.name === "module")));
+  };
+  for (let pass = 0; pass < 2; pass++) for (const d of decls) if (d.id.type === "Identifier" && d.init && isGlobalLike(d.init)) globalAliases.add(d.id.name);
 
   // decode → eval: names assigned from decoders (two passes so chains resolve)
   const tainted = new Set<string>();
@@ -534,29 +554,75 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
     }
   };
 
-  /** Whole-environment use: copies and serialisations are `env-dump` (block). `source` is `process.env` or an alias of it. */
+  /**
+   * Whole-environment use. Copying it into a child process's `env` option is ordinary and only a
+   * capability; `env-dump` (block) is when the whole thing reaches a serialiser, a file, the
+   * network, a template/concatenation or the response of an HTTP/RPC handler. `source` is
+   * `process.env`, an alias of it or a copy; the walk follows the data upwards.
+   */
   const checkEnvWhole = (source: N, anc: N[]): void => {
     let cur = source;
     for (let i = anc.length - 2; i >= 0; i--) {
       const p = anc[i];
-      if (p.type === "SpreadElement") {
-        finding("env-dump", "block", p);
-        return;
+      switch (p.type) {
+        case "SpreadElement":
+        case "ObjectExpression":
+        case "Property":
+        case "ArrayExpression":
+        case "ConditionalExpression":
+        case "LogicalExpression":
+        case "AwaitExpression":
+        case "TSAsExpression":
+        case "TSNonNullExpression":
+        case "TSSatisfiesExpression":
+        case "ChainExpression":
+          cur = p;
+          continue;
+        case "TemplateLiteral":
+          finding("env-dump", "block", p);
+          return;
+        case "BinaryExpression":
+          if (p.operator === "+") finding("env-dump", "block", p);
+          return;
+        case "MemberExpression": {
+          // `Object.entries(env).map(…)`: a method on tainted data keeps it tainted; a property read does not.
+          const call = anc[i - 1];
+          if (p.object === cur && call?.type === "CallExpression" && call.callee === p && TAINT_METHODS.has(String(propName(p)))) {
+            cur = call;
+            i--;
+            continue;
+          }
+          return;
+        }
+        case "CallExpression": {
+          if (p.callee === cur) return;
+          const d = dottedName(p.callee);
+          const simple = calleeSimpleName(p.callee);
+          if (d !== null && ENV_COPIERS.has(d)) {
+            cur = p; // a copy: keep following it
+            continue;
+          }
+          if ((d !== null && ENV_SINK_CALLS.has(d)) || (simple !== null && ENV_SINK_CALLS.has(simple) && !CHILD_FUNCS.has(simple))) finding("env-dump", "block", p);
+          return; // spawn/exec/fork(env), or an unknown function: not a leak we can show
+        }
+        case "NewExpression":
+          return;
+        case "ReturnStatement":
+        case "ArrowFunctionExpression": {
+          // The value a registered HTTP route / RPC method hands back to its caller.
+          if (p.type === "ArrowFunctionExpression" && p.body !== cur) return;
+          for (let j = i - 1; j >= 0; j--) {
+            const q = anc[j];
+            if (q.type === "CallExpression" && HANDLER_REGISTRARS.has(String(calleeSimpleName(q.callee)))) {
+              finding("env-dump", "block", p, `the whole environment is returned from a handler passed to ${calleeSimpleName(q.callee)}(…)`);
+              return;
+            }
+          }
+          return;
+        }
+        default:
+          return;
       }
-      if (p.type === "CallExpression" && p.arguments.includes(cur)) {
-        const d = dottedName(p.callee);
-        if (d && ENV_DUMPERS.has(d)) finding("env-dump", "block", p);
-        return;
-      }
-      if (["ObjectExpression", "Property", "ArrayExpression"].includes(p.type)) {
-        cur = p;
-        continue;
-      }
-      if (p.type === "TSAsExpression" || p.type === "TSNonNullExpression" || p.type === "TSSatisfiesExpression") {
-        cur = p;
-        continue;
-      }
-      return;
     }
   };
   const handleEnvUse = (envNode: N, anc: N[]): void => {
@@ -574,8 +640,7 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
       const pat = parent.type === "VariableDeclarator" ? parent.id : parent.left;
       for (const p of pat.properties) {
         if (p.type === "RestElement") {
-          names.push("*");
-          finding("env-dump", "block", p);
+          names.push("*"); // the rest copy is followed as an alias
         } else {
           const k = p.computed ? fold(p.key, consts) : p.key.type === "Identifier" ? p.key.name : String(p.key.value);
           names.push(k ?? "*");
@@ -729,11 +794,12 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
           cap(mc.kind, mc.detail, n);
         }
       }
-      // `.constructor` reaching for Function / Module: called, or followed by another member.
+      // Any read of `.constructor` can reach Function / AsyncFunction / GeneratorFunction / Module,
+      // however the value is then used (`const F = fn.constructor; F("…")()`). The one exception:
+      // `new [].constructor()` / `new (class {}).constructor()`.
       if (name === "constructor") {
-        const called = (parent?.type === "CallExpression" && parent.callee === n) || (parent?.type === "NewExpression" && parent.callee === n && /Function|Arrow/.test(unwrap(n.object).type));
-        const chained = parent?.type === "MemberExpression" && parent.object === n && !SAFE_CONSTRUCTOR_TAILS.has(String(propName(parent)));
-        if (called || chained) {
+        const literalOwner = unwrap(n.object).type === "ArrayExpression" || unwrap(n.object).type === "ClassExpression" || unwrap(n.object).type === "ObjectExpression";
+        if (!(parent?.type === "NewExpression" && parent.callee === n && literalOwner)) {
           cap("dynamic_code", ".constructor", n);
           finding("dynamic-constructor", "review", n);
         }
@@ -745,6 +811,14 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
       if (name === "experimental_serverAccess") cap("server_access", "experimental_serverAccess", n);
       if (name !== null && /^(experimental_)?(contentScripts?|composer)$/.test(name)) cap("ui", name, n);
       if (name === "sendBeacon") cap("network", "navigator.sendBeacon", n);
+    },
+    ObjectPattern(n) {
+      for (const p of n.properties) {
+        if (p.type === "Property" && (p.computed ? fold(p.key, consts) : p.key.type === "Identifier" ? p.key.name : p.key.value) === "constructor") {
+          cap("dynamic_code", ".constructor", p);
+          finding("dynamic-constructor", "review", p);
+        }
+      }
     },
     CallExpression(n) {
       const callee = unwrap(n.callee);
@@ -771,10 +845,7 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
       }
       if (callee.type === "MemberExpression") {
         const p = propName(callee);
-        if (p === "constructor") {
-          cap("dynamic_code", ".constructor(…)", n);
-          finding("dynamic-constructor", "review", n);
-        }
+        if (p === "eval") markExec(n, "eval"); // g.eval(…) on a proxy / alias of globalThis
         if (p !== null && VM_SINKS.has(p)) markExec(n, `vm.${p}`);
         if (p === "experimental_contributeEnv") handleContributeEnv(n);
         if (p === "route" || p === "experimental_websocket") {
@@ -793,7 +864,7 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
         }
         if (p !== null && /rpc|plugin/i.test(p)) rpcCall(n);
         // Reflect.get(globalThis, x) and friends reach the same things as globalThis[x]
-        if (callee.object.type === "Identifier" && callee.object.name === "Reflect" && n.arguments[0] && (isGlobalObj(unwrap(n.arguments[0])) || isProcess(unwrap(n.arguments[0])))) finding("dynamic-access", "review", n);
+        if (callee.object.type === "Identifier" && callee.object.name === "Reflect" && n.arguments[0] && isGlobalLike(n.arguments[0])) finding("dynamic-access", "review", n);
       }
       if (simple !== null && FS_WRITE.has(simple)) facts.fsWrite = true;
       if (callee.type === "Identifier" && /rpc/i.test(callee.name)) rpcCall(n);
@@ -801,6 +872,10 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
     },
     NewExpression(n) {
       const name = resolveName(n.callee);
+      if (name === "Proxy" && n.arguments[0] && isGlobalLike(n.arguments[0])) {
+        cap("dynamic_code", "Proxy(globalThis)", n);
+        finding("global-proxy", "review", n);
+      }
       if (name === "Function") markExec(n, "new Function");
       else if (n.callee.type === "MemberExpression" && propName(n.callee) === "Script") markExec(n, "vm.Script");
       else if (name === "Script") markExec(n, "vm.Script");

@@ -1,1 +1,1 @@
-export const copy = structuredClone(process.env);
+export const s = String(structuredClone(process.env));
