@@ -2,6 +2,7 @@
 // can change settings through the API without authentication).
 import type BetterSqlite3 from "better-sqlite3";
 import type { CheckResult } from "./checks/types.js";
+import type { Category, ConfigWindowRow, Drift, DriftKind, DriftStatus, SnapshotRow, WindowScope } from "./watch/model.js";
 
 export type Db = BetterSqlite3.Database;
 
@@ -104,6 +105,44 @@ export const MIGRATIONS: string[] = [
      result TEXT NOT NULL)`,
   // Stage 2.2: the capabilities a trust window was opened with (JSON array of tokens); NULL = none known.
   `ALTER TABLE windows ADD COLUMN caps TEXT`,
+  // Stage 2a: config watchdog. The approved snapshot (names, states, hashes: no secrets), the only
+  // blob kept for rollback (instruction text), the drift feed and configuration trust windows.
+  `CREATE TABLE IF NOT EXISTS watch_snapshot (
+     key TEXT PRIMARY KEY,
+     category TEXT NOT NULL,
+     source TEXT NOT NULL,
+     label TEXT NOT NULL,
+     value TEXT NOT NULL,
+     approved_at INTEGER NOT NULL,
+     via TEXT NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS watch_blobs (key TEXT PRIMARY KEY, text TEXT NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS watch_drifts (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     key TEXT NOT NULL,
+     category TEXT NOT NULL,
+     source TEXT NOT NULL,
+     kind TEXT NOT NULL,
+     label TEXT NOT NULL,
+     before_value TEXT,
+     after_value TEXT,
+     first_seen INTEGER NOT NULL,
+     last_seen INTEGER NOT NULL,
+     status TEXT NOT NULL,
+     resolved_at INTEGER,
+     note TEXT,
+     rollbackable INTEGER NOT NULL DEFAULT 0)`,
+  `CREATE INDEX IF NOT EXISTS watch_drifts_key ON watch_drifts (key, status)`,
+  `CREATE TABLE IF NOT EXISTS cfg_windows (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     scopes TEXT NOT NULL,
+     mode TEXT NOT NULL,
+     size_sec INTEGER NOT NULL,
+     cap_sec INTEGER NOT NULL,
+     opened_at INTEGER NOT NULL,
+     expires_at INTEGER NOT NULL,
+     hard_expires_at INTEGER NOT NULL,
+     closed_at INTEGER,
+     closed_reason TEXT)`,
 ];
 
 export interface Policy {
@@ -113,8 +152,13 @@ export interface Policy {
   capMin: number;
   mode: "sliding" | "fixed";
   scope: "tree" | "thread";
+  /** Configuration trust window (spec §6): size in minutes, default 10. */
+  cfgWindowMin: number;
+  /** Hard ceiling of one configuration window, minutes. */
+  cfgCapMin: number;
+  cfgMode: "sliding" | "fixed";
 }
-export const DEFAULT_POLICY: Policy = { windowMin: 30, capMin: 240, mode: "sliding", scope: "tree" };
+export const DEFAULT_POLICY: Policy = { windowMin: 30, capMin: 240, mode: "sliding", scope: "tree", cfgWindowMin: 10, cfgCapMin: 240, cfgMode: "sliding" };
 
 export interface TotpRow {
   secret: string;
@@ -314,6 +358,9 @@ export class Store {
       capMin: num("cap_min", DEFAULT_POLICY.capMin),
       mode: map.get("mode") === "fixed" ? "fixed" : "sliding",
       scope: map.get("scope") === "thread" ? "thread" : "tree",
+      cfgWindowMin: num("cfg_window_min", DEFAULT_POLICY.cfgWindowMin),
+      cfgCapMin: num("cfg_cap_min", DEFAULT_POLICY.cfgCapMin),
+      cfgMode: map.get("cfg_mode") === "fixed" ? "fixed" : "sliding",
     };
   }
   setPolicy(patch: Partial<Policy>): void {
@@ -322,6 +369,9 @@ export class Store {
     if (patch.capMin !== undefined) put.run("cap_min", String(patch.capMin));
     if (patch.mode !== undefined) put.run("mode", patch.mode);
     if (patch.scope !== undefined) put.run("scope", patch.scope);
+    if (patch.cfgWindowMin !== undefined) put.run("cfg_window_min", String(patch.cfgWindowMin));
+    if (patch.cfgCapMin !== undefined) put.run("cfg_cap_min", String(patch.cfgCapMin));
+    if (patch.cfgMode !== undefined) put.run("cfg_mode", patch.cfgMode);
   }
   getMeta(key: string): string | null {
     const r = this.db.prepare(`SELECT value FROM policy WHERE key = ?`).get(`meta.${key}`) as { value: string } | undefined;
@@ -551,6 +601,128 @@ export class Store {
   }
   setProposalWindow(id: number, windowId: number | null): void {
     this.db.prepare(`UPDATE proposals SET window_id = ? WHERE id = ?`).run(windowId, id);
+  }
+
+  // ---- config watchdog (stage 2a) ----------------------------------------
+  listSnapshot(): SnapshotRow[] {
+    return (this.db.prepare(`SELECT * FROM watch_snapshot ORDER BY key`).all() as Raw[]).map((r) => ({
+      key: r.key as string,
+      category: r.category as Category,
+      source: r.source as string,
+      label: r.label as string,
+      value: r.value as string,
+      approvedAt: r.approved_at as number,
+      via: r.via as string,
+    }));
+  }
+  putSnapshot(row: Omit<SnapshotRow, "approvedAt">): void {
+    this.db
+      .prepare(
+        `INSERT INTO watch_snapshot (key, category, source, label, value, approved_at, via) VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET category = excluded.category, source = excluded.source, label = excluded.label,
+           value = excluded.value, approved_at = excluded.approved_at, via = excluded.via`,
+      )
+      .run(row.key, row.category, row.source, row.label, row.value, this.now(), row.via);
+  }
+  deleteSnapshot(key: string): void {
+    this.db.prepare(`DELETE FROM watch_snapshot WHERE key = ?`).run(key);
+  }
+  getBlob(key: string): string | null {
+    const r = this.db.prepare(`SELECT text FROM watch_blobs WHERE key = ?`).get(key) as { text: string } | undefined;
+    return r?.text ?? null;
+  }
+  putBlob(key: string, text: string): void {
+    this.db.prepare(`INSERT INTO watch_blobs (key, text) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET text = excluded.text`).run(key, text);
+  }
+
+  private drift = (r: Raw): Drift => ({
+    id: r.id as number,
+    key: r.key as string,
+    category: r.category as Category,
+    source: r.source as string,
+    kind: r.kind as DriftKind,
+    label: r.label as string,
+    before: (r.before_value as string | null) ?? null,
+    after: (r.after_value as string | null) ?? null,
+    firstSeen: r.first_seen as number,
+    lastSeen: r.last_seen as number,
+    status: r.status as DriftStatus,
+    resolvedAt: (r.resolved_at as number | null) ?? null,
+    note: (r.note as string | null) ?? null,
+    rollbackable: r.rollbackable === 1,
+  });
+  /** The open drift of a key, if any. */
+  openDrift(key: string): Drift | null {
+    const r = this.db.prepare(`SELECT * FROM watch_drifts WHERE key = ? AND status IN ('open', 'rollback-failed') ORDER BY id DESC LIMIT 1`).get(key) as Raw | undefined;
+    return r ? this.drift(r) : null;
+  }
+  getDrift(id: number): Drift | null {
+    const r = this.db.prepare(`SELECT * FROM watch_drifts WHERE id = ?`).get(id) as Raw | undefined;
+    return r ? this.drift(r) : null;
+  }
+  listDrifts(limit = 100): Drift[] {
+    return (this.db.prepare(`SELECT * FROM watch_drifts ORDER BY (status IN ('open', 'rollback-failed')) DESC, id DESC LIMIT ?`).all(limit) as Raw[]).map(this.drift);
+  }
+  unresolvedDrifts(): Drift[] {
+    return (this.db.prepare(`SELECT * FROM watch_drifts WHERE status IN ('open', 'rollback-failed') ORDER BY id`).all() as Raw[]).map(this.drift);
+  }
+  insertDrift(d: Pick<Drift, "key" | "category" | "source" | "kind" | "label" | "before" | "after" | "rollbackable">): Drift {
+    const now = this.now();
+    const info = this.db
+      .prepare(
+        `INSERT INTO watch_drifts (key, category, source, kind, label, before_value, after_value, first_seen, last_seen, status, rollbackable)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)`,
+      )
+      .run(d.key, d.category, d.source, d.kind, d.label, d.before, d.after, now, now, d.rollbackable ? 1 : 0);
+    return this.getDrift(Number(info.lastInsertRowid))!;
+  }
+  /** The same key drifted again (a different value): the open entry follows it. */
+  updateDrift(id: number, d: Pick<Drift, "kind" | "label" | "after" | "rollbackable">): void {
+    this.db
+      .prepare(`UPDATE watch_drifts SET kind = ?, label = ?, after_value = ?, rollbackable = ?, last_seen = ?, status = 'open' WHERE id = ?`)
+      .run(d.kind, d.label, d.after, d.rollbackable ? 1 : 0, this.now(), id);
+  }
+  touchDrift(id: number): void {
+    this.db.prepare(`UPDATE watch_drifts SET last_seen = ? WHERE id = ?`).run(this.now(), id);
+  }
+  resolveDrift(id: number, status: DriftStatus, note: string | null = null): void {
+    this.db.prepare(`UPDATE watch_drifts SET status = ?, resolved_at = ?, note = COALESCE(?, note) WHERE id = ?`).run(status, this.now(), note, id);
+  }
+  /** Marks a drift as failed-to-roll-back but still open (it keeps being shown, and is retried next scan). */
+  failRollback(id: number, note: string): void {
+    this.db.prepare(`UPDATE watch_drifts SET status = 'rollback-failed', note = ? WHERE id = ?`).run(note, id);
+  }
+
+  private cfgWindow = (r: Raw): ConfigWindowRow => ({
+    id: r.id as number,
+    scopes: JSON.parse(r.scopes as string) as WindowScope[],
+    mode: r.mode as "sliding" | "fixed",
+    sizeSec: r.size_sec as number,
+    capSec: r.cap_sec as number,
+    openedAt: r.opened_at as number,
+    expiresAt: r.expires_at as number,
+    hardExpiresAt: r.hard_expires_at as number,
+    closedAt: (r.closed_at as number | null) ?? null,
+    closedReason: (r.closed_reason as string | null) ?? null,
+  });
+  insertCfgWindow(w: Omit<ConfigWindowRow, "id" | "closedAt" | "closedReason">): ConfigWindowRow {
+    const info = this.db
+      .prepare(`INSERT INTO cfg_windows (scopes, mode, size_sec, cap_sec, opened_at, expires_at, hard_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(JSON.stringify(w.scopes), w.mode, w.sizeSec, w.capSec, w.openedAt, w.expiresAt, w.hardExpiresAt);
+    return this.getCfgWindow(Number(info.lastInsertRowid))!;
+  }
+  getCfgWindow(id: number): ConfigWindowRow | null {
+    const r = this.db.prepare(`SELECT * FROM cfg_windows WHERE id = ?`).get(id) as Raw | undefined;
+    return r ? this.cfgWindow(r) : null;
+  }
+  unclosedCfgWindows(): ConfigWindowRow[] {
+    return (this.db.prepare(`SELECT * FROM cfg_windows WHERE closed_at IS NULL ORDER BY id`).all() as Raw[]).map(this.cfgWindow);
+  }
+  closeCfgWindow(id: number, reason: string, at = this.now()): void {
+    this.db.prepare(`UPDATE cfg_windows SET closed_at = ?, closed_reason = ? WHERE id = ? AND closed_at IS NULL`).run(at, reason, id);
+  }
+  setCfgWindowExpiry(id: number, expiresAt: number): void {
+    this.db.prepare(`UPDATE cfg_windows SET expires_at = ? WHERE id = ? AND closed_at IS NULL`).run(expiresAt, id);
   }
 
   // ---- log --------------------------------------------------------------

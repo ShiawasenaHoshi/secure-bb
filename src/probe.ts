@@ -67,6 +67,19 @@ async function bindInfo(port: number): Promise<Probe["bind"]> {
   return { address: addrs.join(", "), loopbackOnly: addrs.every(loopback) };
 }
 
+/** The bb account state through the bb-account plugin's RPC (a call to our own server). "unknown" when that plugin is off or silent. */
+export async function fetchAccountState(base: string): Promise<Probe["accountState"]> {
+  const res = await fetch(`${base}/api/v1/plugins/bb-account/rpc/bb-account.v1.status`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "null",
+    signal: AbortSignal.timeout(4000),
+  });
+  const body = (await res.json()) as { ok?: boolean; result?: { state?: string } };
+  if (!body.ok) return "unknown";
+  return body.result?.state === "signed-out" ? "signed-out" : body.result?.state === undefined ? "unknown" : "signed-in";
+}
+
 export async function collectProbe(src: ProbeSource): Promise<Probe> {
   const base = safeSync(() => src.loopbackBaseUrl(), "");
   const port = base ? Number(new URL(base).port) : NaN;
@@ -76,17 +89,7 @@ export async function collectProbe(src: ProbeSource): Promise<Probe> {
 
   const [agent, account, bind, apiAuth, telemetry] = await Promise.all([
     safe(agentUid, null),
-    safe<Probe["accountState"]>(async () => {
-      const res = await fetch(`${base}/api/v1/plugins/bb-account/rpc/bb-account.v1.status`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: "null",
-        signal: AbortSignal.timeout(4000),
-      });
-      const body = (await res.json()) as { ok?: boolean; result?: { state?: string } };
-      if (!body.ok) return "unknown";
-      return body.result?.state === "signed-out" ? "signed-out" : body.result?.state === undefined ? "unknown" : "signed-in";
-    }, "unknown"),
+    safe<Probe["accountState"]>(() => fetchAccountState(base), "unknown"),
     safe<Probe["bind"]>(() => bindInfo(port), { address: null, loopbackOnly: null }),
     safe<Probe["apiAuth"]>(async () => {
       const res = await fetch(`${base}/api/v1/hosts`, { signal: AbortSignal.timeout(4000) });

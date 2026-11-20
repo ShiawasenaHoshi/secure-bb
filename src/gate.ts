@@ -604,11 +604,16 @@ export class Gate {
     const next: Policy = { ...cur, ...patch };
     if (next.windowMin < 1 || next.capMin < 1 || next.capMin > 1440 || next.windowMin > next.capMin)
       throw new GateError("invalid", "window size must be at least 1 minute and not exceed the ceiling (at most 24 hours)");
+    if (next.cfgWindowMin < 1 || next.cfgCapMin < 1 || next.cfgCapMin > 1440 || next.cfgWindowMin > next.cfgCapMin)
+      throw new GateError("invalid", "configuration window size must be at least 1 minute and not exceed its ceiling (at most 24 hours)");
     const widens =
       next.windowMin > cur.windowMin ||
       next.capMin > cur.capMin ||
       (next.mode === "sliding" && cur.mode === "fixed") ||
-      (next.scope === "tree" && cur.scope === "thread");
+      (next.scope === "tree" && cur.scope === "thread") ||
+      next.cfgWindowMin > cur.cfgWindowMin ||
+      next.cfgCapMin > cur.cfgCapMin ||
+      (next.cfgMode === "sliding" && cur.cfgMode === "fixed");
     if (widens) {
       if (code === undefined) throw new GateError("invalid_code", "widening the policy needs a code");
       this.touch("policy", code);

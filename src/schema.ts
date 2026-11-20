@@ -54,6 +54,19 @@ export const oneOf = <const T extends string>(values: readonly T[]): Schema<T> =
       : fail(`expected one of ${values.join(", ")}`),
   );
 
+export const array = <T>(item: Schema<T>, opts: { max?: number } = {}): Schema<T[]> =>
+  make((v) => {
+    if (!Array.isArray(v)) return fail("expected an array");
+    if (v.length > (opts.max ?? 64)) return fail("array too long");
+    const out: T[] = [];
+    for (let i = 0; i < v.length; i++) {
+      const res = item["~standard"].validate(v[i]);
+      if ("issues" in res) return { issues: res.issues.map((x) => ({ message: x.message, path: [i, ...(x.path ?? [])] })) };
+      out.push(res.value);
+    }
+    return { value: out };
+  });
+
 /** Marks an object field optional. */
 export const optional = <T>(schema: Schema<T>): Schema<T | undefined> =>
   make((v) => (v === undefined ? { value: undefined } : schema["~standard"].validate(v) as Result<T | undefined>));
