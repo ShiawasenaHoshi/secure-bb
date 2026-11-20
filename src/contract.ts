@@ -66,6 +66,7 @@ export const rpcContract = defineRpcContract({
   "publish.run": { input: s.object({ pluginId: s.string({ min: 1, max: 128 }) }), output: s.json<{ ok: true; status: string; note: string }>() },
   "sentinel.settings": {
     input: s.object({
+      provider: s.optional(s.oneOf(["typesafe", "openrouter"] as const)),
       enabled: s.optional(s.boolean()),
       allThreads: s.optional(s.boolean()),
       timeoutMs: s.optional(s.integer({ min: 1000, max: 60000 })),

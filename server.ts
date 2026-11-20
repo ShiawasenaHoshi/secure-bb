@@ -213,6 +213,7 @@ export default async function plugin(bb: BbPluginApi) {
   const jev = new JevSolver({
     // Only the path comes from the environment; the key is read from the file at each call and goes into one header.
     keyFile: process.env[JEV_KEY_FILE_ENV]?.trim() || null,
+    provider: () => sentinelStore.settings().provider,
     fetch: ((url, init) => globalThis.fetch(url, init)) as JevFetch,
   });
   const sentinel = new Sentinel({

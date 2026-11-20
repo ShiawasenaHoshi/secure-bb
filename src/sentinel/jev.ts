@@ -1,19 +1,22 @@
-// Jev (TypeSafe AI) through OpenRouter: the first Solver.
-//
-// Format: from the OpenRouter documentation of the "Decisions" endpoint, see secure-bb-stage7-jev-api.md
-// (https://openrouter.ai/docs/api/api-reference/alphadecisions/submit-a-decisions-request). The API is ALPHA:
-// "the shape may change". It was not called against the live service when this was written, so every
-// shape-dependent line lives in `buildBody` and `parseAnswers` below; edit those two when the API moves.
+// Jev (TypeSafe AI): the first Solver, through TypeSafe's own API (default, answer shape checked with a live request
+// on 2026-11-21) or through OpenRouter (documented, ALPHA: "the shape may change", not called live). See
+// secure-bb-stage7-jev-api.md. Every shape-dependent line lives in `buildBody` and `parseAnswers` below.
 //
 // The key is read from the file named by BB_SECURE_BB_JEV_KEY_FILE at the moment of a call, goes into the
 // Authorization header and nowhere else: it is not stored, not logged and not part of any error text.
 import { readFileSync } from "node:fs";
-import type { Answer, NotScoredReason, QuestionSpec, SolveRequest, SolveResult, Solver } from "./types.js";
+import type { JevProvider, Answer, NotScoredReason, QuestionSpec, SolveRequest, SolveResult, Solver } from "./types.js";
 
 export const JEV_KEY_FILE_ENV = "BB_SECURE_BB_JEV_KEY_FILE";
-export const JEV_ENDPOINT = "https://openrouter.ai/api/alpha/decisions";
-/** Alternative from the TypeSafe guide, same shape: `POST https://openrouter.ai/api/v1/systemone` with model `jev-1.13`. */
-export const JEV_MODEL = "typesafe/jev-1.13";
+/** The two providers; the request body has the same shape, the address, the model name and the key differ. */
+export const JEV_TARGETS: Record<JevProvider, { endpoint: string; model: string }> = {
+  // Direct API, checked with a live request (2026-11-21): the default.
+  typesafe: { endpoint: "https://api.typesafe.ai/v1/systemone", model: "jev-latest" },
+  // OpenRouter "Decisions" (alpha); not called live.
+  openrouter: { endpoint: "https://openrouter.ai/api/alpha/decisions", model: "typesafe/jev-1.13" },
+};
+export const JEV_ENDPOINT = JEV_TARGETS.openrouter.endpoint;
+export const JEV_MODEL = JEV_TARGETS.openrouter.model;
 
 export type JevFetch = (
   url: string,
@@ -25,8 +28,8 @@ export interface JevDeps {
   keyFile: string | null;
   fetch: JevFetch;
   readFile?: (path: string) => string;
-  endpoint?: string;
-  model?: string;
+  /** Read at every call (the setting can change). Default: typesafe. */
+  provider?: () => JevProvider;
 }
 
 /** The request body. Questions are a map keyed by id (not a list). */
@@ -98,10 +101,11 @@ export class JevSolver implements Solver {
     const clean = (s: string) => s.split(key).join("[ключ]").slice(0, 200);
     let res: Awaited<ReturnType<JevFetch>>;
     try {
-      res = await this.d.fetch(this.d.endpoint ?? JEV_ENDPOINT, {
+      const target = JEV_TARGETS[this.d.provider?.() ?? "typesafe"];
+      res = await this.d.fetch(target.endpoint, {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
-        body: JSON.stringify(buildBody(this.d.model ?? JEV_MODEL, req.state, req.questions)),
+        body: JSON.stringify(buildBody(target.model, req.state, req.questions)),
         signal: req.signal,
       });
     } catch (err) {

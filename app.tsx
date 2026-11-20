@@ -365,6 +365,12 @@ function SentinelSection({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; refetch
           Любое изменение — только с кодом.
         </p>
         <div className="mt-2 space-y-1">
+          <label className="flex items-center gap-2">Провайдер Jev (ключ должен быть от него)
+            <select className="rounded-md border border-border bg-background px-2 py-1" value={v.settings.provider} disabled={act.busy || code.length !== 6} onChange={(e) => set({ provider: e.target.value })}>
+              <option value="typesafe">typesafe (api.typesafe.ai)</option>
+              <option value="openrouter">openrouter</option>
+            </select>
+          </label>
           <label className="flex items-center gap-2"><input type="checkbox" checked={v.settings.enabled} disabled={act.busy || code.length !== 6} onChange={(e) => set({ enabled: e.target.checked })} /> Дозор включён</label>
           <label className="flex items-center gap-2"><input type="checkbox" checked={v.settings.allThreads} disabled={act.busy || code.length !== 6} onChange={(e) => set({ allThreads: e.target.checked })} /> Следить во всех тредах, а не только с открытым окном доверия</label>
         </div>

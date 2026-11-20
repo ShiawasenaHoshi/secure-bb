@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { JEV_ENDPOINT, JEV_KEY_FILE_ENV, JEV_MODEL, JevSolver, buildBody, parseAnswers, type JevFetch } from "../src/sentinel/jev.js";
+import { JEV_KEY_FILE_ENV, JEV_TARGETS, JevSolver, buildBody, parseAnswers, type JevFetch } from "../src/sentinel/jev.js";
 import { maskAndCut, maskSecrets } from "../src/sentinel/mask.js";
 import { CATEGORY_IDS, DEFAULT_SETTINGS, RISK_ID, effectiveQuestions } from "../src/sentinel/questions.js";
 import { Sentinel, SentinelError, type SentinelSource } from "../src/sentinel/sentinel.js";
@@ -177,22 +177,38 @@ describe("the Jev adapter", () => {
   it("sends the documented request: model, state, questions as a map; key only in the Authorization header", async () => {
     const seen: Array<{ url: string; init: Parameters<JevFetch>[1] }> = [];
     const answers = Object.fromEntries(CATEGORY_IDS.map((id) => [id, { type: "noul", noul: 0.2, confidence: 0.9 }]));
-    const solver = new JevSolver({ keyFile: keyFile(), fetch: (url, init) => (seen.push({ url, init }), reply(200, { id: "gen-dec-1", model: "typesafe/jev-1.13-x", answers: { ...answers, risk: { type: "score", score: 1.99, confidence: 0.99, probabilities: { "0": 0, "1": 0.01, "2": 0.99 } } }, usage: { cost: 0.00002 } })) });
+    const solver = new JevSolver({ keyFile: keyFile(), provider: () => "openrouter", fetch: (url, init) => (seen.push({ url, init }), reply(200, { id: "gen-dec-1", model: "typesafe/jev-1.13-x", answers: { ...answers, risk: { type: "score", score: 1.99, confidence: 0.99, probabilities: { "0": 0, "1": 0.01, "2": 0.99 } } }, usage: { cost: 0.00002 } })) });
     const res = await solver.solve(req());
     expect(seen).toHaveLength(1);
-    expect(seen[0]!.url).toBe(JEV_ENDPOINT);
-    expect(JEV_ENDPOINT).toBe("https://openrouter.ai/api/alpha/decisions");
+    expect(seen[0]!.url).toBe("https://openrouter.ai/api/alpha/decisions");
     expect(seen[0]!.init.method).toBe("POST");
     expect(seen[0]!.init.headers.authorization).toBe(`Bearer ${KEY}`);
     expect(seen[0]!.init.body).not.toContain(KEY);
     const body = JSON.parse(seen[0]!.init.body) as { model: string; state: unknown; questions: Record<string, { type: string; instructions: string; criteria: unknown }> };
-    expect(body.model).toBe(JEV_MODEL);
+    expect(body.model).toBe("typesafe/jev-1.13");
     expect(Object.keys(body.questions)).toEqual([...CATEGORY_IDS, RISK_ID]);
     expect(body.questions.secrets).toMatchObject({ type: "noul", criteria: { true: expect.any(String), false: expect.any(String) } });
     expect(body.questions.risk).toMatchObject({ type: "score", criteria: [expect.any(String), expect.any(String), expect.any(String)] });
     expect(res.ok && res.answers.secrets).toMatchObject({ p: 0.2, confidence: 0.9 });
     expect(res.ok && res.answers.risk).toMatchObject({ score: 1.99, probabilities: { "2": 0.99 } });
     expect(buildBody("m", "s", questions).model).toBe("m");
+  });
+
+  it("by default goes to TypeSafe's own API (jev-latest) and reads the live answer shape (legend, no id/cost); the provider is read at every call", async () => {
+    const seen: Array<{ url: string; body: string }> = [];
+    let provider: "typesafe" | "openrouter" = "typesafe";
+    const live = { model: "jev-1.14.0", answers: { secrets: { type: "noul", noul: 0.99 }, risk: { type: "score", score: 1.99, confidence: 1.0, legend: { "0": "safe", "1": "questionable", "2": "dangerous" }, probabilities: { "0": 0.0, "1": 0.0, "2": 1.0 } } }, usage: { input_tokens: 379, output_tokens: 51 } };
+    const solver = new JevSolver({ keyFile: keyFile(), provider: () => provider, fetch: (url, init) => (seen.push({ url, body: init.body }), reply(200, live)) });
+    const res = await solver.solve(req());
+    expect(seen[0]!.url).toBe("https://api.typesafe.ai/v1/systemone");
+    expect(JSON.parse(seen[0]!.body).model).toBe("jev-latest");
+    expect(res.ok && res.answers.secrets?.p).toBe(0.99);
+    expect(res.ok && res.answers.risk).toMatchObject({ score: 1.99, probabilities: { "2": 1 } });
+    expect(res.ok && res.answers.network?.refused).toBe(true); // not in the answer = not scored
+    provider = "openrouter";
+    await solver.solve(req());
+    expect(seen[1]!.url).toBe(JEV_TARGETS.openrouter.endpoint);
+    expect(new JevSolver({ keyFile: keyFile(), fetch: (u, i) => (seen.push({ url: u, body: i.body }), reply(200, live)) }).keyConfigured()).toBe(true);
   });
 
   it("a refusal answers 'not scored' for that question; all refused fails; a missing answer counts as refused", () => {
@@ -381,6 +397,16 @@ describe("the sentinel", () => {
     // The sentinel's whole access to bb is `task` and `card` (read-only); there is no resolve/respond to call.
     const s = setup();
     expect(Object.keys(s.source).filter((k) => /resolve|respond|approve|deny/i.test(k))).toEqual([]);
+  });
+
+  it("the provider is typesafe by default; changing it needs a code and a known value", () => {
+    const s = setup();
+    expect(s.sentinel.settings().provider).toBe("typesafe");
+    expect(() => s.sentinel.setSettings({ provider: "openrouter" }, undefined)).toThrow(SentinelError);
+    expect(() => s.sentinel.setSettings({ provider: "openrouter" }, "000000")).toThrow(/wrong code/);
+    expect(s.sentinel.settings().provider).toBe("typesafe");
+    s.sentinel.setSettings({ provider: "openrouter" }, "123456");
+    expect(s.sentinel.settings().provider).toBe("openrouter");
   });
 
   it("every settings change needs a valid code; a wrong code changes nothing", () => {

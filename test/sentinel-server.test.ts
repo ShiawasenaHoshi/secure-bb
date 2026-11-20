@@ -10,7 +10,7 @@ import { CATEGORY_IDS } from "../src/sentinel/questions.js";
 import { base32Decode, hotp, stepAt } from "../src/totp.js";
 
 const KEY = "sk-or-v1-TESTKEY-0123456789abcdef0123";
-const toJev = (fetch: ReturnType<typeof vi.fn>) => fetch.mock.calls.filter((c) => String(c[0]).includes("openrouter.ai"));
+const toJev = (fetch: ReturnType<typeof vi.fn>) => fetch.mock.calls.filter((c) => /typesafe\.ai|openrouter\.ai/.test(String(c[0])));
 const saved = process.env.BB_SECURE_BB_JEV_KEY_FILE;
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -118,7 +118,7 @@ describe("the sentinel through the server entry", () => {
   it("with a code: scores a card via the (fake) Jev endpoint, shows it in the feed and CLI, and never answers the card", async () => {
     const seen: Array<{ url: string; headers: Record<string, string>; body: string }> = [];
     vi.stubGlobal("fetch", async (url: string, init: { headers: Record<string, string>; body: string }) => {
-      if (!url.includes("openrouter.ai")) return { status: 404, ok: false, body: null, text: async () => "" };
+      if (!/typesafe\.ai|openrouter\.ai/.test(url)) return { status: 404, ok: false, body: null, text: async () => "" };
       seen.push({ url, headers: init.headers, body: init.body });
       return { status: 200, ok: true, text: async () => JSON.stringify(jevAnswer({ secrets: 0.95, network: 0.7 })) };
     });
@@ -131,7 +131,8 @@ describe("the sentinel through the server entry", () => {
     } as never);
     const ov = await settle(b);
     expect(seen).toHaveLength(1);
-    expect(seen[0]!.url).toBe("https://openrouter.ai/api/alpha/decisions");
+    expect(seen[0]!.url).toBe("https://api.typesafe.ai/v1/systemone");
+    expect(JSON.parse(seen[0]!.body).model).toBe("jev-latest");
     expect(seen[0]!.headers.authorization).toBe(`Bearer ${KEY}`);
     expect(seen[0]!.body).not.toContain(KEY);
     expect(seen[0]!.body).not.toContain("abcdef123456");

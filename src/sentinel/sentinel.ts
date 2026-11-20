@@ -8,7 +8,7 @@ import { effectiveQuestions, CATEGORY_IDS, RISK_ID, shippedInstructions } from "
 import { buildState, describeAction, humanTaskFromEvents } from "./state.js";
 import { maskAndCut } from "./mask.js";
 import { normalizeSettings, type SentinelStore } from "./store.js";
-import type { CategoryScore, FeedRow, NotScoredReason, Outcome, SentinelSettings, SolveResult, Solver } from "./types.js";
+import type { JevProvider, CategoryScore, FeedRow, NotScoredReason, Outcome, SentinelSettings, SolveResult, Solver } from "./types.js";
 
 export class SentinelError extends Error {
   constructor(
@@ -46,6 +46,7 @@ const MINUTE = 60_000;
 const TASK_CACHE_MAX = 200;
 
 export interface SettingsPatch {
+  provider?: JevProvider;
   enabled?: boolean;
   allThreads?: boolean;
   timeoutMs?: number;
@@ -190,6 +191,7 @@ export class Sentinel {
     if (code === undefined) throw new SentinelError("invalid_code", "изменение настроек дозора требует кода");
     const cur = this.settings();
     const next: SentinelSettings = { ...cur, thresholds: { ...cur.thresholds }, instructions: { ...cur.instructions } };
+    if (patch.provider !== undefined) next.provider = patch.provider;
     if (patch.enabled !== undefined) next.enabled = patch.enabled;
     if (patch.allThreads !== undefined) next.allThreads = patch.allThreads;
     if (patch.timeoutMs !== undefined) next.timeoutMs = patch.timeoutMs;

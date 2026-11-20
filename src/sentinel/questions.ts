@@ -97,6 +97,7 @@ export const CATEGORY_IDS: readonly string[] = CATEGORY_DEFS.map((d) => d.id);
 export const LABEL: Record<string, string> = { ...Object.fromEntries(CATEGORY_DEFS.map((d) => [d.id, d.label])), [RISK_ID]: RISK_LABEL };
 
 export const DEFAULT_SETTINGS: SentinelSettings = {
+  provider: "typesafe",
   enabled: false,
   allThreads: false,
   timeoutMs: 10_000,

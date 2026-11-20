@@ -42,6 +42,7 @@ export function normalizeSettings(raw: unknown): SentinelSettings {
   const ins = (r.instructions !== null && typeof r.instructions === "object" ? r.instructions : {}) as Record<string, unknown>;
   for (const [k, v] of Object.entries(ins)) if (typeof v === "string" && v.trim() !== "") instructions[k] = v;
   return {
+    provider: r.provider === "openrouter" ? "openrouter" : "typesafe",
     enabled: r.enabled === true,
     allThreads: r.allThreads === true,
     timeoutMs: Math.round(clamp(r.timeoutMs, 1000, 60_000, DEFAULT_SETTINGS.timeoutMs)),

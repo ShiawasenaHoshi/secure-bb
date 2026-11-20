@@ -40,7 +40,13 @@ export interface Solver {
   solve(req: SolveRequest): Promise<SolveResult>;
 }
 
+/** Where the Jev call goes: TypeSafe's own API (default) or OpenRouter. The key must belong to that provider. */
+export type JevProvider = "typesafe" | "openrouter";
+export const JEV_PROVIDERS: readonly JevProvider[] = ["typesafe", "openrouter"];
+
 export interface SentinelSettings {
+  /** Provider of the Jev solver; changed only with a code. */
+  provider: JevProvider;
   /** Off by default. */
   enabled: boolean;
   /** Also watch threads that have no open trust window. */
