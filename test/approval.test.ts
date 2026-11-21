@@ -42,6 +42,7 @@ const EXPECTED: Record<string, RpcGroup> = {
   "publish.settings": "dangerous",
   "sentinel.settings": "dangerous",
   "approvals.export": "dangerous",
+  "agents.accept": "dangerous", // a touch for exactly these differences, at the guard: a session does not do
   // free
   overview: "free",
   "journal.verify": "free",
@@ -56,6 +57,7 @@ const EXPECTED: Record<string, RpcGroup> = {
   "skills.scan": "free",
   "skills.remove": "free",
   "skills.removed": "free",
+  "agents.scan": "free",
   "ai.scan": "free",
   "publish.run": "free",
 };

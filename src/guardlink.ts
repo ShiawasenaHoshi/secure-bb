@@ -78,7 +78,8 @@ export type GuardAction =
   | { op: "approve"; requestId: number }
   | { op: "open-window"; pluginId: string; minutes?: number; scope?: "tree" | "thread" }
   | { op: "policy"; patch: Partial<GuardPolicy> }
-  | { op: "touch"; purpose: string };
+  | { op: "touch"; purpose: string }
+  | { op: "agents-accept"; ids: number[] };
 export interface GuardChallenge {
   challenge: string;
   allowCredentials: Array<{ type: "public-key"; id: string }>;
@@ -87,6 +88,51 @@ export interface GuardChallenge {
   rpId: string;
   origin: string;
   expiresAt: number;
+}
+
+/** Agent watch (the guard's `agents-state`): differences between the files of the agents and the baseline a human accepted. The diff is masked at the guard. */
+export interface AgentDrift {
+  id: number;
+  path: string;
+  root: string;
+  rootKind: "global" | "workspace" | "extra";
+  /** The name of the working directory (for a thread's own directory, the thread's id). */
+  rootName: string;
+  rel: string;
+  kind: string;
+  change: "added" | "changed" | "removed";
+  class: "critical" | "instructions" | "other";
+  reasons: string[];
+  findings: Array<{ rule: string; severity: "block" | "review" | "info"; file: string; line: number; excerpt: string }>;
+  oldSha: string | null;
+  newSha: string | null;
+  size: number | null;
+  mtime: number | null;
+  diff: string;
+  /** Found by the first scan: part of the first baseline, no consequences. */
+  initial: boolean;
+  status: "open" | "accepted" | "reverted" | "superseded";
+  firstSeen: number;
+  lastSeen: number;
+  resolvedAt: number | null;
+}
+export interface AgentsState {
+  enabled: boolean;
+  home?: string;
+  extraRoots?: string[];
+  lastScanAt?: number | null;
+  scannedFiles?: number;
+  roots?: number;
+  baselineFiles?: number;
+  initial?: { pending: number; baselineAt: number | null };
+  openTotal?: number;
+  drifts?: AgentDrift[];
+  recent?: AgentDrift[];
+  alarms?: Array<{ path: string; kind: "unreadable" | "outside" | "swapped"; error: string }>;
+  notes?: Array<{ kind: string; text: string }>;
+  /** Set on the answer to `agents-scan`: the scan was served at most once in 10 s. */
+  scanned?: boolean;
+  throttled?: boolean;
 }
 
 export interface GuardState {
@@ -145,6 +191,11 @@ export interface GuardPort {
   /** Registering a key: `{token}` → creation options; `{token, clientDataJSON, attestationObject}` → the key waits for the console. */
   passkeyRegister(body: { token: string; clientDataJSON?: string; attestationObject?: string }): Promise<Record<string, any>>;
   verifyJournal(): Promise<GuardJournalReport>;
+  /** Agent watch: no secret; `scan` asks for a fresh scan (the guard serves one at most every 10 s). */
+  agentsState(): Promise<AgentsState>;
+  agentsScan(): Promise<AgentsState>;
+  /** A touch for exactly these differences. */
+  agentsAccept(ids: number[], proof: GuardProof): Promise<{ accepted: number }>;
 }
 
 const TIMEOUT_MS = 5000;
@@ -236,6 +287,17 @@ export class GuardLink implements GuardPort {
   async passkeyRegister(body: { token: string; clientDataJSON?: string; attestationObject?: string }): Promise<Record<string, any>> {
     const { ok: _ok, id: _id, ...rest } = await this.call({ op: "passkey-register", ...body });
     return { ok: true, ...rest };
+  }
+  async agentsState(): Promise<AgentsState> {
+    const { ok: _ok, id: _id, ...rest } = await this.call({ op: "agents-state" });
+    return rest as unknown as AgentsState;
+  }
+  async agentsScan(): Promise<AgentsState> {
+    const { ok: _ok, id: _id, ...rest } = await this.call({ op: "agents-scan" });
+    return rest as unknown as AgentsState;
+  }
+  async agentsAccept(ids: number[], proof: GuardProof): Promise<{ accepted: number }> {
+    return { accepted: Number((await this.call({ op: "agents-accept", ids, ...proofFields(proof) })).accepted) };
   }
   async verifyJournal(): Promise<GuardJournalReport> {
     return (await this.call({ op: "journal-verify" })) as unknown as GuardJournalReport;

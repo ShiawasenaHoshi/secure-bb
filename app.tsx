@@ -21,7 +21,7 @@ import type { FeedRow } from "./src/sentinel/types";
 import { T } from "./src/text";
 import { buildPolicyChange, buildPolicySetInput, buildPolicyTouchQuery, defined } from "./src/rpc-input";
 import { createCredential, getAssertion, originProblem, type CreationOptions } from "./src/webauthn";
-import type { PasskeyAssertion } from "./src/guardlink";
+import type { AgentDrift, PasskeyAssertion } from "./src/guardlink";
 
 // ---------------------------------------------------------------- helpers --
 
@@ -1622,6 +1622,208 @@ function SkillsSection({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typ
 // ------------------------------------------------------------------- guard --
 
 /** Guard mode: is the guard there, is its journal sound, what it has recorded lately. */
+// --------------------------------------------------------- agents: configurations and memory --
+// Guard mode. The guard reads the agents' files (settings, rules, memory, MCP) and compares them with the baseline a human accepted;
+// this page is its feed. A critical difference has already closed the windows of trust and marked the thread of its working
+// directory polluted (v1: a signal, not a block). Accepting is a touch at the guard: a code or a passkey signature over exactly these ids.
+const CLASS_LABEL: Record<string, string> = { critical: "критично", instructions: "инструкции", other: "прочее" };
+const CLASS_STYLE: Record<string, string> = {
+  critical: "border-red-600 bg-red-50 text-red-950 dark:border-red-500 dark:bg-red-950/40 dark:text-red-100",
+  instructions: "border-yellow-500/70",
+  other: "border-border",
+};
+/** What an alarm of the watch says: no access, or a link / a swap that led out of what is watched (nothing was read then). */
+const alarmText = (x: { kind: string; error: string }): string => (x.kind === "unreadable" ? `нет доступа (${x.error})` : x.kind === "outside" ? `ссылка ведёт за пределы наблюдаемого — ${x.error}` : `подмена во время чтения — ${x.error}`);
+const CHANGE_LABEL: Record<string, string> = { added: "новый файл", changed: "изменён", removed: "удалён" };
+const SEVERITY_STYLE: Record<string, string> = { block: "font-semibold text-red-700 dark:text-red-400", review: "text-yellow-700 dark:text-yellow-400", info: muted };
+
+/** The alarms of the watch: always on top of the page, not only in its section. */
+function AgentsAlarm({ ov }: { ov: Overview }) {
+  const a = ov.agents?.state;
+  if (!ov.agents) return null;
+  const alarms = a?.alarms ?? [];
+  const critical = (a?.drifts ?? []).filter((d) => d.class === "critical" && !d.initial);
+  if (ov.agents.error && !a)
+    return (
+      <div className="rounded-md border-2 border-destructive bg-destructive/10 p-2 text-destructive" role="alert" data-secure-bb-alarm>
+        <p className="font-semibold">Наблюдатель за конфигурациями агентов не отвечает</p>
+        <p className="mt-1 text-xs">{ov.agents.error}</p>
+      </div>
+    );
+  if (alarms.length === 0 && critical.length === 0) return null;
+  return (
+    <div className="rounded-md border-2 border-destructive bg-destructive/10 p-2 text-destructive" role="alert" data-secure-bb-alarm>
+      {alarms.length > 0 ? (
+        <>
+          <p className="font-semibold">ТРЕВОГА: сторож не читает файлы агентов ({alarms.length})</p>
+          <ul className="mt-1 list-disc pl-5 text-xs">{alarms.slice(0, 5).map((x) => <li key={x.path} className="break-all">{x.path} — {alarmText(x)}</li>)}</ul>
+          <p className="mt-1 text-xs">Так выглядит снятый ACL на каталоге агентов (его может снять владелец файлов — агент) или сломанные права. Пока доступа нет, наблюдатель слепой: изменения в этих путях никто не видит.</p>
+        </>
+      ) : null}
+      {critical.length > 0 ? (
+        <>
+          <p className="font-semibold">Критичные изменения в конфигурациях агентов: {critical.length}</p>
+          <p className="mt-1 text-xs">Окна доверия закрыты. Смотрите раздел «Агенты: конфигурации и память» и примите или оставьте.</p>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+function DriftCard({ d, picked, onPick, threads, marked }: { d: AgentDrift; picked: boolean; onPick: (on: boolean) => void; threads: string[]; marked: boolean }) {
+  return (
+    <div className={`rounded-lg border-2 p-3 text-sm ${CLASS_STYLE[d.class] ?? "border-border"}`} data-agent-drift={d.id}>
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <label className="flex min-w-0 items-baseline gap-2">
+          <input type="checkbox" checked={picked} onChange={(e) => onPick(e.target.checked)} aria-label={`выбрать ${d.rel}`} />
+          <span className="break-all font-semibold">{d.rel}</span>
+        </label>
+        <span className={d.class === "critical" ? "font-semibold" : muted}>
+          {CLASS_LABEL[d.class] ?? d.class} · {CHANGE_LABEL[d.change] ?? d.change}
+          {d.initial ? " · первый эталон" : ""} · {when(d.firstSeen)}
+        </span>
+      </div>
+      <p className={`break-all text-xs ${muted}`}>
+        {d.rootKind === "global" ? "домашний каталог агентов" : `рабочий каталог ${d.rootName}`} · {d.path}
+        {threads.length > 0 ? ` · тред${threads.length > 1 ? "ы" : ""}: ${threads.join(", ")}` : ""}
+      </p>
+      {marked ? <p className="mt-1 text-xs font-semibold">Тред помечен загрязнённым, окна доверия его дерева закрыты.</p> : null}
+      {d.reasons.length > 0 ? <ul className="mt-1 list-disc pl-5">{d.reasons.map((r, i) => <li key={i}>{r}</li>)}</ul> : null}
+      {d.findings.length > 0 ? (
+        <ul className="mt-1 space-y-0.5 text-xs">
+          {d.findings.slice(0, 12).map((f, i) => (
+            <li key={i} className={SEVERITY_STYLE[f.severity] ?? ""}>
+              {f.severity === "block" ? "⛔ " : ""}{f.rule}{f.line > 0 ? `, строка ${f.line}` : ""}: <span className="break-all font-mono">{f.excerpt}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      <details className="mt-1">
+        <summary className={`cursor-pointer ${muted}`}>diff{d.size !== null ? ` · ${d.size} байт` : ""}</summary>
+        <pre className="mt-1 max-h-96 overflow-auto whitespace-pre-wrap break-all rounded-md border border-border bg-background p-2 font-mono text-xs">{d.diff}</pre>
+      </details>
+    </div>
+  );
+}
+
+function AgentsSection({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; refetch: () => void }) {
+  const ag = ov.agents;
+  const [picked, setPicked] = useState<Set<number>>(new Set());
+  const [code, setCode] = useState("");
+  const [touching, setTouching] = useState<string | null>(null);
+  const act = useCodeAction(refetch);
+  const pk = usePasskey(ov);
+  if (!ag) return <div className={`${card} ${muted}`}>Наблюдатель работает внутри сторожа решений; здесь его нет (режим сторожа выключен).</div>;
+  const st = ag.state;
+  if (!st) return <div className={card}><Msg error={ag.error ?? "сторож не ответил"} /></div>;
+  if (!st.enabled) return <div className={`${card} ${muted}`}>Сторож запущен без наблюдателя (нет каталога агентов в его настройках).</div>;
+  const drifts = st.drifts ?? [];
+  const pending = st.initial?.pending ?? 0;
+  const firstBaseline = pending > 0 && pending === drifts.length && (st.baselineFiles ?? 0) === 0;
+  const chosen = drifts.filter((d) => picked.has(d.id)).map((d) => d.id);
+  const toggle = (id: number, on: boolean) => setPicked((p) => { const n = new Set(p); if (on) n.add(id); else n.delete(id); return n; });
+  const accept = (ids: number[], by: "passkey" | "code") =>
+    void act.run(async () => {
+      setTouching(null);
+      if (by === "passkey") {
+        const t = await touchFor(rpc, { kind: "agents.accept", ids }, (desc) => setTouching(`Подтвердите касанием. Сторож: «${desc}»`));
+        if (!t) throw new Error("касание не требуется");
+        const r = await rpc.call("agents.accept", { ids, passkey: t.passkey });
+        setTouching(null);
+        setPicked(new Set());
+        return { note: `${r.note}. Сторож описал действие так: «${t.description}» (точное действие записано в его журнале).` };
+      }
+      const r = await rpc.call("agents.accept", { ids, code });
+      setCode("");
+      setPicked(new Set());
+      return r;
+    });
+  const canCode = !pk.keyOnly;
+  const buttons = (ids: number[], label: string) =>
+    ids.length === 0 ? null : (
+      <div className="flex flex-wrap items-center gap-2">
+        {pk.has ? (
+          <button className={btnPrimary} disabled={act.busy || pk.problem !== null} onClick={() => accept(ids, "passkey")}>
+            {label} касанием
+          </button>
+        ) : null}
+        {canCode ? (
+          <>
+            {pk.has ? <span className={muted}>запасной путь — код:</span> : null}
+            <CodeField value={code} onChange={setCode} />
+            <button className={pk.has ? btn : btnPrimary} disabled={act.busy || code.length !== 6} onClick={() => accept(ids, "code")}>
+              {label}{pk.has ? " кодом" : ""}
+            </button>
+          </>
+        ) : null}
+      </div>
+    );
+  return (
+    <div className="space-y-3">
+      <div className={`${card} space-y-1`}>
+        <p>
+          Сторож читает настройки, правила и память агентов и сверяет их с эталоном, который принял человек. Просмотрено файлов: {st.scannedFiles ?? 0}, каталогов-корней: {st.roots ?? 0}
+          {st.lastScanAt ? `, последний просмотр ${when(st.lastScanAt)}` : ""}. В эталоне: {st.baselineFiles ?? 0}.
+        </p>
+        <p className={`text-xs ${muted}`}>
+          Рабочие каталоги тредов сторож находит сам; каталоги проектов в доме владельца в v1 не наблюдаются. Это сигнал, не блок: запуск агента остановить нельзя — критичное изменение закрывает окна доверия и помечает тред загрязнённым.
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <button className={btn} disabled={act.busy} onClick={() => void act.run(async () => { await rpc.call("agents.scan", null); })}>Просмотреть сейчас</button>
+          <span className={`text-xs ${muted}`}>не чаще раза в 10 с</span>
+        </div>
+      </div>
+      {ag.error ? <Msg error={`сторож не ответил на последний запрос: ${ag.error}`} /> : null}
+      {(st.alarms ?? []).length > 0 ? (
+        <div className={cardBlocked} role="alert">
+          <p className="font-semibold">Файлы агентов не читаются ({st.alarms!.length})</p>
+          <ul className="mt-1 list-disc pl-5 text-xs">{st.alarms!.map((x) => <li key={x.path} className="break-all">{x.path} — {alarmText(x)}</li>)}</ul>
+          <p className="mt-1 text-xs">Либо ACL чтения для пользователя сторожа снят или права сломаны, либо агент подсунул ссылку или подменил файл (сторож по ссылкам за пределы наблюдаемого не ходит и ничего оттуда не читает) (установщик выдаёт его, `--undo` снимает). Без него наблюдатель слепой.</p>
+        </div>
+      ) : null}
+      {(st.notes ?? []).length > 0 ? (
+        <ul className={`list-disc pl-5 text-xs ${muted}`}>{st.notes!.map((n, i) => <li key={i} className="break-all">{n.text}</li>)}</ul>
+      ) : null}
+      {firstBaseline ? (
+        <div className={`${card} space-y-2 border-yellow-500/70`}>
+          <h3 className="font-semibold">Первый эталон</h3>
+          <p>Первый просмотр нашёл {pending} файлов. Если всё это — как должно быть, примите их как есть одним касанием; дальше каждое расхождение будет ждать решения. Просмотрите список ниже: критичное в нём тоже станет эталоном.</p>
+          {buttons(drifts.map((d) => d.id), "Принять всё как есть")}
+        </div>
+      ) : null}
+      {drifts.length === 0 ? <div className={`${card} ${muted}`}>Расхождений с эталоном нет.</div> : null}
+      {drifts.map((d) => (
+        <DriftCard key={d.id} d={d} picked={picked.has(d.id)} onPick={(on) => toggle(d.id, on)} threads={ag.threads[d.root] ?? []} marked={(ag.threads[d.root] ?? []).some((t) => ag.marked[t]?.includes(d.id))} />
+      ))}
+      {drifts.length > 0 && !firstBaseline ? (
+        <div className={`${card} space-y-2`}>
+          <div className="flex flex-wrap items-center gap-2">
+            <button className={btn} onClick={() => setPicked(new Set(drifts.map((d) => d.id)))}>Выбрать все ({drifts.length})</button>
+            <button className={btn} onClick={() => setPicked(new Set())}>Снять выбор</button>
+            <span className={muted}>выбрано: {chosen.length}{(st.openTotal ?? 0) > drifts.length ? ` (показаны первые ${drifts.length} из ${st.openTotal})` : ""}</span>
+          </div>
+          {buttons(chosen, "Принять выбранные")}
+          <p className={`text-xs ${muted}`}>«Оставить» — ничего не нажимать: расхождение видно, пока его не примут или пока файл не вернут как был.</p>
+        </div>
+      ) : null}
+      <TouchNote text={touching} />
+      <Msg error={act.error} ok={act.ok} />
+      {(st.recent ?? []).length > 0 ? (
+        <details>
+          <summary className={`cursor-pointer ${muted}`}>Недавно закрытые ({st.recent!.length})</summary>
+          <ul className="mt-1 space-y-1 text-xs">
+            {st.recent!.map((d) => (
+              <li key={d.id} className="break-all">
+                <span className="font-mono">{d.rel}</span> · {CLASS_LABEL[d.class] ?? d.class} · {d.status === "accepted" ? "принято" : d.status === "reverted" ? "файл вернули как был" : "заменено более новым изменением"} · {d.resolvedAt ? when(d.resolvedAt) : ""}
+              </li>
+            ))}
+          </ul>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
 function GuardAlarm({ ov }: { ov: Overview }) {
   const g = ov.guard;
   if (!g) return null;
@@ -1781,6 +1983,7 @@ function GatePage() {
         <JournalAlarm ov={ov} rpc={rpc} refetch={refetch} />
         <AliveAlarm ov={ov} />
         <GuardAlarm ov={ov} />
+        <AgentsAlarm ov={ov} />
         <WindowRows windows={ov.windows} cfgWindows={ov.watch.windows} rpc={rpc} refetch={refetch} />
         <Section title="Защита этого bb"><StageCard ov={ov} /></Section>
         <Section title="Второй фактор"><Registration ov={ov} rpc={rpc} refetch={refetch} /></Section>
@@ -1808,6 +2011,7 @@ function GatePage() {
         <Section title="Гейт плагинов — ИИ-скан"><AiCard ov={ov} rpc={rpc} refetch={refetch} /></Section>
         <Section title="Гейт плагинов — публикация"><PublishCard ov={ov} rpc={rpc} refetch={refetch} /></Section>
         <Section title={`Сторож конфигурации${ov.watch.drifts.some((d) => d.status === "open" || d.status === "rollback-failed") ? " (!)" : ""}`}><WatchSection ov={ov} rpc={rpc} refetch={refetch} /></Section>
+        {ov.agents ? <Section title={`Агенты: конфигурации и память${(ov.agents.state?.alarms ?? []).length > 0 || (ov.agents.state?.drifts ?? []).some((d) => d.class === "critical" && !d.initial) ? " (!)" : (ov.agents.state?.openTotal ?? 0) > 0 ? ` (${ov.agents.state?.openTotal})` : ""}`}><AgentsSection ov={ov} rpc={rpc} refetch={refetch} /></Section> : null}
         <Section title={`Дозор${ov.sentinel.settings.enabled ? "" : " (выключен)"}`}><SentinelSection ov={ov} rpc={rpc} refetch={refetch} /></Section>
         <Section title={`Скиллы${ov.skills.open.length > 0 ? ` — очередь (${ov.skills.open.length})` : ""}`}><SkillsSection ov={ov} rpc={rpc} refetch={refetch} /></Section>
         <Section title={`Загрязнение тредов${ov.tainted.length > 0 ? ` (${ov.tainted.length})` : ""}`}><TaintCard ov={ov} /></Section>

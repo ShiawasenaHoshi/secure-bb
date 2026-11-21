@@ -1,5 +1,6 @@
 // RPC contract shared by server.ts and app.tsx (the app imports only its type).
 import { defineRpcContract } from "@get-bb/plugin-sdk";
+import type { AgentsView } from "./agents.js";
 import type { BatchPrepared, BatchResult } from "./batch.js";
 import type { GuardJournalReport, GuardChallenge } from "./guardlink.js";
 import type { JournalReport } from "./journal.js";
@@ -39,7 +40,8 @@ export const rpcContract = defineRpcContract({
   // Guard mode: a challenge bound to one action (the guard describes it in its own words), and registering a key (token from the console).
   "passkey.challenge": {
     input: s.object({
-      kind: s.oneOf(["approve", "window.open", "policy", "touch"] as const),
+      kind: s.oneOf(["approve", "window.open", "policy", "touch", "agents.accept"] as const),
+      ids: s.optional(s.array(id, { max: 2000 })),
       queueId: s.optional(queueId),
       scope: s.optional(s.oneOf(["tree", "thread"] as const)),
       purpose: s.optional(s.string({ min: 1, max: 80 })),
@@ -66,6 +68,9 @@ export const rpcContract = defineRpcContract({
   },
   "window.close": { input: s.object({ windowId: id }), output: s.json<{ ok: true }>() },
   "approval.revoke": { input: s.object({ approvalId: id }), output: s.json<{ ok: true }>() },
+  // Agent watch (guard mode): a scan on request (the guard serves one at most every 10 s), and accepting differences into the baseline: a touch for exactly these ids.
+  "agents.scan": { input: s.nullValue(), output: s.json<AgentsView>() },
+  "agents.accept": { input: s.object({ ids: s.array(id, { max: 2000 }), ...factor }), output: s.json<{ ok: true; accepted: number; note: string }>() },
   "watch.scan": { input: s.nullValue(), output: s.json<{ ok: true }>() },
   "watch.acceptAll": { input: s.object({ ...proof }), output: s.json<{ ok: true; items: number }>() },
   "watch.accept": { input: s.object({ id, ...proof }), output: s.json<{ ok: true }>() },

@@ -5,6 +5,9 @@ import { lstat, readdir, readFile, readlink } from "node:fs/promises";
 import { dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 import { parseVersion } from "../deps/semver.js";
 import type { Finding } from "./types.js";
+import { escapeInvisible, excerptOf, isInvisible } from "../../guard/src/text-rules.ts";
+
+export { escapeInvisible, excerptOf };
 
 export const MAX_FILES = 20_000;
 export const MAX_FILE_BYTES = 5 * 1024 * 1024;
@@ -54,20 +57,6 @@ const INSTALL_SCRIPTS = ["preinstall", "install", "postinstall", "prepare"];
 const DEP_FIELDS = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"];
 const AGENT_DIRS = new Set([".claude", ".cursor", ".vscode", ".windsurf"]);
 const AGENT_FILES = new Set([".cursorrules", ".mcp.json"]);
-
-export function excerptOf(text: string, max = 160): string {
-  const flat = text.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, (c) => `\\u{${c.codePointAt(0)!.toString(16)}}`);
-  const t = flat.trim();
-  return t.length > max ? t.slice(0, max) + "…" : t;
-}
-
-/** Control, format and invisible characters (spec §5.1). TAB, LF, CR and a leading BOM are allowed. */
-const INVISIBLE_ONE = /^[\p{Cc}\p{Cf}\u2028\u2029\uFE00-\uFE0F\u{E0100}-\u{E01EF}]$/u;
-const isInvisible = (ch: string): boolean => ch !== "\t" && ch !== "\n" && ch !== "\r" && INVISIBLE_ONE.test(ch);
-
-export function escapeInvisible(s: string): string {
-  return [...s].map((c) => (isInvisible(c) ? `\\u{${c.codePointAt(0)!.toString(16).toUpperCase()}}` : c)).join("");
-}
 
 function invisibleFindings(rel: string, text: string): Finding[] {
   const out: Finding[] = [];

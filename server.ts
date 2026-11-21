@@ -14,6 +14,7 @@ import {
   type BbPluginApi,
 } from "@get-bb/plugin-sdk";
 import { Alive } from "./src/alive.js";
+import { AgentWatchLink, type AgentThreadSource } from "./src/agents.js";
 import { GuardLink, GuardLinkError, guardSocketFromEnv, type GuardAction, type GuardPolicy, type GuardProof, type GuardQueueEntry, type PasskeyAssertion } from "./src/guardlink.js";
 import { buildExport, writeExport } from "./src/export.js";
 import { localCheckKey } from "./src/decision.js";
@@ -314,6 +315,41 @@ export default async function plugin(bb: BbPluginApi) {
     skills: skillGuard,
     log: (m) => bb.log.warn(m),
   });
+  let sweepTaintNow: () => void = () => undefined;
+  // ---- agent watch (guard mode): the guard reads the agents' files; here the thread of a working directory is found through bb ----
+  const agentSource: AgentThreadSource = {
+    async environments() {
+      const out: Array<{ id: string; path: string | null }> = [];
+      for (let offset = 0; offset < 5000; offset += 500) {
+        const page = await bb.sdk.environments.list({ limit: 500, offset });
+        out.push(...page.map((e) => ({ id: e.id, path: e.path })));
+        if (page.length < 500) break;
+      }
+      return out;
+    },
+    async threadsOf(environmentId) {
+      const ids = new Set<string>();
+      for (const archived of [false, true]) for (const t of await bb.sdk.threads.list({ environmentId, archived, includeHidden: true, limit: 200 })) ids.add(t.id);
+      return [...ids];
+    },
+  };
+  const agents = guardLink
+    ? new AgentWatchLink({
+        guard: guardLink,
+        store,
+        source: agentSource,
+        now,
+        log: (m) => bb.log.warn(m),
+        // The guard closed its own windows; this plugin's configuration windows that were open before the change are closed too.
+        closeWindowsOpenedBefore: (at, reason) => {
+          let n = 0;
+          for (const w of watch.openWindows()) if (w.openedAt < at) (store.closeCfgWindow(w.id, reason), store.log("watch.window.agents", null, null, { windowId: w.id, scopes: w.scopes, reason }), n++);
+          return n;
+        },
+        onChange: () => changed(),
+      })
+    : null;
+
   // ---- journal integrity (stage 5): verified at start, on every tick, and on demand --------------------
   let journalReport: JournalReport = store.verifyJournal();
   let alarmed = "";
@@ -337,7 +373,7 @@ export default async function plugin(bb: BbPluginApi) {
   const alive = new Alive({ store, now, safeMode: () => watchSource.safeMode().catch(() => null), log: (m) => bb.log.error(m) });
   if ((await alive.start()) !== null) changed();
   const overview = () =>
-    buildOverview({ guard: guardLink ?? undefined, alive, sentinel, scanner: aiScanner, publisher, store, gate, now, hookRegistered, listPlugins, probe, descendants: threads.descendants, watch, skills: skillGuard, journal: () => journal(), taintedThreads: () => store.taintedThreads(20) });
+    buildOverview({ guard: guardLink ?? undefined, ...(agents ? { agents: () => agents.refresh(false) } : {}), alive, sentinel, scanner: aiScanner, publisher, store, gate, now, hookRegistered, listPlugins, probe, descendants: threads.descendants, watch, skills: skillGuard, journal: () => journal(), taintedThreads: () => store.taintedThreads(20) });
 
   // ---- after-the-fact mode ------------------------------------------------
   const scanner = new AfterFactScanner({
@@ -539,7 +575,7 @@ export default async function plugin(bb: BbPluginApi) {
    * In guard mode a code that arrives with any RPC is checked by the guard first (it consumes the code there: the secret is not here),
    * and the handler then runs with the mark that says so. RPCs that need more than that (they act at the guard) do it themselves.
    */
-  const OWN_GUARD_PATH = new Set(["queue.approve", "window.open", "policy.set", "session.open", "totp.begin", "totp.confirm"]);
+  const OWN_GUARD_PATH = new Set(["queue.approve", "window.open", "policy.set", "session.open", "totp.begin", "totp.confirm", "agents.accept"]);
   const withGuardTouch = <T extends object>(handlers: T): T => {
     const out: Record<string, unknown> = {};
     if (!guardLink) {
@@ -639,6 +675,23 @@ export default async function plugin(bb: BbPluginApi) {
       gate.confirmRegistration(code);
       changed();
       return { ok: true as const };
+    }),
+    "agents.scan": wrap(async () => {
+      if (!agents) throw new GateError("invalid", "наблюдение за конфигурациями агентов работает в режиме сторожа: наблюдатель живёт в нём");
+      const view = await agents.refresh(true);
+      sweepTaintNow();
+      return view;
+    }),
+    // A touch for exactly these differences: the guard checks the code or the signature (bound to the ids) and moves its baseline. Nothing is accepted here.
+    "agents.accept": wrap(async ({ ids, code, passkey }) => {
+      if (!agents || !guardLink) throw new GateError("invalid", "принять расхождения можно только через сторожа");
+      if (ids.length === 0) throw new GateError("invalid", "нет расхождений для принятия");
+      const proof = proofOf(code, passkey);
+      if (proof === undefined) throw new GateError("invalid_code", "a code or a touch is needed: the guard checks it");
+      const r = await guardLink.agentsAccept(ids, proof);
+      await agents.refresh(false);
+      changed();
+      return { ok: true as const, accepted: r.accepted, note: `принято в эталон: ${r.accepted}` };
     }),
     "queue.approve": wrap(async ({ id, code, passkey, session, acknowledgeBlock }) => {
       if (guardLink) return id < 0 ? approvePendingProposal(-id, proofOf(code, passkey), acknowledgeBlock) : approveAtGuard(id, proofOf(code, passkey), acknowledgeBlock);
@@ -883,6 +936,10 @@ export default async function plugin(bb: BbPluginApi) {
           if (plan.localWidens) return out({ op: "touch", purpose: "policy.set" });
           return { needed: false as const };
         }
+        case "agents.accept": {
+          if (q.ids === undefined || q.ids.length === 0) throw new GateError("invalid", "ids are needed");
+          return out({ op: "agents-accept", ids: q.ids });
+        }
         default:
           if (q.purpose === undefined) throw new GateError("invalid", "purpose is needed");
           return out({ op: "touch", purpose: q.purpose });
@@ -1117,6 +1174,7 @@ export default async function plugin(bb: BbPluginApi) {
           .then(([a, b]) => (a + b > 0 ? changed() : undefined))
           .catch((e) => bb.log.error(`taint sweep failed: ${String(e)}`));
       const kickTaint = debounced(sweepTaint);
+      sweepTaintNow = sweepTaint;
       const kickAfterFact = debounced(scanAfterFact);
       const kickConfig = debounced(scanConfig);
       try {
@@ -1166,6 +1224,7 @@ export default async function plugin(bb: BbPluginApi) {
         }
       };
       let lastSlow = now();
+      let lastAgentsScan = 0;
       while (!signal.aborted) {
         // Short tick: a plugin the hook did not vet is already running and should be stopped within seconds.
         await sleep(SCAN_TICK_MS, signal);
@@ -1194,6 +1253,15 @@ export default async function plugin(bb: BbPluginApi) {
         });
         await task("taint sweep", () => {
           if (gate.openWindows().length > 0 || watch.openWindows().length > 0) sweepTaint();
+        });
+        // Agent watch: what the guard saw in the agents' files. A scan is asked for once a minute (the guard has its own timer and a 10 s limit).
+        await task("agent watch", async () => {
+          if (!agents) return;
+          const scanNow = now() - lastAgentsScan >= WATCH_MS;
+          if (scanNow) lastAgentsScan = now();
+          const before = store.taintedThreads(1000).length;
+          await agents.refresh(scanNow);
+          if (store.taintedThreads(1000).length !== before) sweepTaint();
         });
         await task("sentinel outcomes", () => sentinel.refreshOutcomes());
         await task("journal", () => journal(now() - journalReport.checkedAt > 60_000));

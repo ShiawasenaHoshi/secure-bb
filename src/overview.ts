@@ -3,6 +3,7 @@ import type { Alive, AliveView } from "./alive.js";
 import type { CheckResult } from "./checks/types.js";
 import { assess, type Assessment, type Probe } from "./detect.js";
 import type { Gate, TotpState } from "./gate.js";
+import type { AgentsView } from "./agents.js";
 import type { GuardApproval, GuardJournalReport, GuardPort, GuardState } from "./guardlink.js";
 import { realpath } from "node:fs/promises";
 import type { JournalReport } from "./journal.js";
@@ -110,6 +111,8 @@ export interface Overview {
   sentinel: SentinelView;
   /** Threat model X3: gaps in the gate's own running and bb's safe-mode. */
   alive: AliveView;
+  /** Agent watch (guard mode only): what the guard found in the agents' configurations and memory. */
+  agents?: AgentsView;
 }
 const EMPTY_SKILLS: SkillsView = { baselineAt: null, lastScanAt: null, pinned: { total: 0, builtin: 0, baseline: 0, approved: 0 }, open: [], recent: [], trusted: [], blind: [], unchecked: [] };
 
@@ -146,6 +149,8 @@ export interface OverviewDeps {
   /** Guard mode: the link to the guard (the gate must have been built with the same one). */
   guard?: GuardPort;
   taintedThreads?: () => Array<{ threadId: string; kinds: string[]; first: number; last: number }>;
+  /** Guard mode: the agent watch's view (asked fresh at each overview: one cheap request to the guard). */
+  agents?: () => Promise<AgentsView>;
 }
 
 export async function windowView(d: Pick<OverviewDeps, "descendants" | "now">, w: WindowRow): Promise<WindowView> {
@@ -350,6 +355,7 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
     now: d.now(),
     assessment: assess(probe),
     ...(guarded ? { guard: guarded.view } : {}),
+    ...(d.agents ? { agents: await d.agents() } : {}),
     totp: guarded?.state
       ? { state: guarded.state.totp.registered || (guarded.state.passkeys?.keys.length ?? 0) > 0 ? ("external" as const) : ("none" as const), blockedUntil: guarded.state.totp.blockedUntil, pendingUnattended: false }
       : { state: d.gate.totpState(), blockedUntil: d.gate.blockedUntil(), pendingUnattended: d.gate.pendingUnattended() },

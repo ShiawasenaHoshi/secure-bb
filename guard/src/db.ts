@@ -102,6 +102,41 @@ export const MIGRATIONS: string[] = [
      created_at INTEGER NOT NULL,
      expires_at INTEGER NOT NULL,
      used INTEGER NOT NULL DEFAULT 0)`,
+  // Agent watch: the accepted baseline (what a human took as it should be) and the differences from it. A difference is tied to the exact
+  // content it was found with (new_sha): when the file changes again, that difference is superseded by a new one, so a touch is always
+  // for what the person saw. The content is kept for the diff and for accepting; only the guard reads it (answers carry a masked diff).
+  `CREATE TABLE agent_baseline (
+     path TEXT PRIMARY KEY,
+     root TEXT NOT NULL,
+     rel TEXT NOT NULL,
+     kind TEXT NOT NULL,
+     sha256 TEXT NOT NULL,
+     size INTEGER NOT NULL,
+     content TEXT,
+     accepted_at INTEGER NOT NULL)`,
+  `CREATE TABLE agent_drifts (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     path TEXT NOT NULL,
+     root TEXT NOT NULL,
+     root_kind TEXT NOT NULL,
+     rel TEXT NOT NULL,
+     kind TEXT NOT NULL,
+     change TEXT NOT NULL,
+     class TEXT NOT NULL,
+     reasons TEXT NOT NULL,
+     findings TEXT NOT NULL,
+     old_sha TEXT,
+     new_sha TEXT,
+     new_size INTEGER,
+     new_mtime INTEGER,
+     diff TEXT NOT NULL,
+     new_content TEXT,
+     initial INTEGER NOT NULL DEFAULT 0,
+     status TEXT NOT NULL,
+     first_seen INTEGER NOT NULL,
+     last_seen INTEGER NOT NULL,
+     resolved_at INTEGER)`,
+  `CREATE INDEX agent_drifts_status ON agent_drifts (status, path)`,
 ];
 
 export function openDb(path: string): DatabaseSync {

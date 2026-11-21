@@ -64,6 +64,16 @@ export function dispatch(guard: Guard, req: unknown, version: string): Record<st
       return guard.passkeyRegister(r);
     case "touch":
       return guard.touch(r);
+    // Agent watch. `agents-state` and `agents-scan` carry no secret (a scan is rate-limited at the guard); `agents-accept` is a touch.
+    case "agents-state":
+      return guard.agentsState();
+    case "agents-scan": {
+      if (!guard.agentsEnabled()) return { enabled: false };
+      const res = guard.agentsScan();
+      return { ...res, ...guard.agentsState() };
+    }
+    case "agents-accept":
+      return guard.agentsAccept(r);
     case "journal-verify": {
       const v = guard.verifyJournal();
       return { valid: v.ok, entries: v.entries, head: v.head, problems: v.problems };
