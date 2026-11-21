@@ -1,7 +1,7 @@
 // The sentinel's window onto bb: real SDK calls only (`threads.events.list`, `threads.interactions.get`).
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import type { ThreadTree } from "../gate.js";
-import { humanTaskFromEvents } from "./state.js";
+import { humanTaskFromEvents, pendingActionFromEvents } from "./state.js";
 import type { SentinelSource } from "./sentinel.js";
 
 type Sdk = BbPluginApi["sdk"];
@@ -26,6 +26,10 @@ export function bbSentinelSource(sdk: Sdk, tree: ThreadTree): SentinelSource {
         if (found !== null) return found;
       }
       return null;
+    },
+    async pending(threadId) {
+      const rows = await sdk.threads.events.list({ threadId, types: ["item/started"] as unknown as [never, ...never[]], order: "desc", limit: "10" });
+      return pendingActionFromEvents(rows.map((r) => ({ type: String(r.type), data: r.data })));
     },
     async card(threadId, interactionId) {
       try {

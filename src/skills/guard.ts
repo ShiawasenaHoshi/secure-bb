@@ -11,7 +11,7 @@
 // bb's own skills (built-in, and those of built-in plugins) are only pinned: never blocked, never queued.
 import type { Store } from "../store.js";
 import { isTrustedRepo, normalizePattern } from "../taint/repos.js";
-import { decide, inspectSkill, summarize } from "./inspect.js";
+import { decide, inspectSkill, SKILL_RULES_VERSION, summarize } from "./inspect.js";
 import type { SkillReader } from "./reader.js";
 import { OPEN_STATES, type SkillStore } from "./store.js";
 import { REMOVABLE_SCOPES, type SkillCheck, type SkillFileSource, type SkillQueueRow, type SkillRef, type SkillSnapshot, type Verdict } from "./types.js";
@@ -229,7 +229,8 @@ export class SkillGuard {
       if (open) this.skills.resolve(open.id, "approved", "pin", "содержимое снова совпадает с одобренным");
       return pin.kind === "baseline" ? "ok" : "approved";
     }
-    if (open && open.hash === snap.hash) {
+    // The same content under the same rules: nothing to decide again. Under newer rules the entry is checked afresh below.
+    if (open && open.hash === snap.hash && open.rulesVersion === SKILL_RULES_VERSION) {
       this.skills.touchRow(open.id);
       return open.state === "alarm" ? "alarm" : "held";
     }

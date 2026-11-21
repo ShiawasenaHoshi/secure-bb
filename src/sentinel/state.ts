@@ -15,6 +15,8 @@ export interface ActionInfo {
   args: string;
   cwd: string | null;
   reason: string | null;
+  /** permission_grant only: the command or tool call the thread was running when it asked (masked, cut). */
+  pending: string | null;
 }
 
 const rec = (v: unknown): Record<string, unknown> | null => (v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null);
@@ -61,7 +63,8 @@ export function describeAction(interaction: unknown): ActionInfo | null {
       break;
     case "permission_grant":
       tool = str(subject.toolName) || "permission_grant";
-      args = perms(subject.permissions);
+      // The reason holds the domain ("Allow network connection to example.org?"): the solver cannot judge "network on" without it.
+      args = [perms(subject.permissions), str(payload.reason)].filter(Boolean).join("; ");
       break;
     case "plan":
       tool = "plan";
@@ -84,14 +87,60 @@ export function describeAction(interaction: unknown): ActionInfo | null {
     args: maskAndCut(args, ARGS_MAX),
     cwd: cwd === null ? null : maskAndCut(cwd, 200),
     reason: str(payload.reason) ? maskAndCut(str(payload.reason), 300) : null,
+    pending: null,
   };
+}
+
+export const PENDING_MAX = 300;
+
+/** What the feed shows and the solver reads as the action: the card itself plus, for a permission, what asked for it. */
+export function actionText(a: ActionInfo): string {
+  return a.pending === null ? a.args : `${a.args} | выполнялось: ${a.pending}`;
+}
+
+const ARG_KEYS = ["command", "cmd", "file_path", "path", "url", "pattern", "query"];
+
+function describePending(item: Record<string, unknown>): string {
+  switch (item.type) {
+    case "commandExecution":
+      return str(item.command);
+    case "fileChange": {
+      const ch = Array.isArray(item.changes) ? item.changes : [];
+      return `file change: ${ch.map((c) => str(rec(c)?.path)).filter(Boolean).join(", ")}`;
+    }
+    case "toolCall": {
+      const tool = str(item.tool) || "tool";
+      const a = rec(item.arguments);
+      const key = a ? ARG_KEYS.find((k) => typeof a[k] === "string" && a[k]) : undefined;
+      const detail = key ? str(a![key]) : str(rec(item.presentation)?.detail);
+      return detail ? `${tool}: ${detail}` : tool;
+    }
+    default:
+      return "";
+  }
+}
+
+/**
+ * The newest command / tool call / file change that is still pending, from `item/started` event rows given
+ * newest first. Masked and cut. null when there is none. NOT VERIFIED against a live bb: the item may sit in
+ * `data.item` or be `data` itself; both are accepted.
+ */
+export function pendingActionFromEvents(rows: ReadonlyArray<{ type: string; data: unknown }>): string | null {
+  for (const row of rows) {
+    const d = rec(row.data);
+    const item = rec(d?.item) ?? d;
+    if (!item || (item.status !== undefined && item.status !== "pending")) continue;
+    const text = describePending(item);
+    if (text) return maskAndCut(text, PENDING_MAX);
+  }
+  return null;
 }
 
 /** The `state` sent to the solver. Plain data; nothing from outside this object goes out. */
 export function buildState(task: string | null, action: ActionInfo): Record<string, unknown> {
   return {
     task: task === null ? null : maskAndCut(task, TASK_MAX),
-    action: { provider: action.provider, kind: action.kind, tool: action.tool, arguments: action.args, cwd: action.cwd, reason: action.reason },
+    action: { provider: action.provider, kind: action.kind, tool: action.tool, arguments: action.args, cwd: action.cwd, reason: action.reason, pending: action.pending },
   };
 }
 

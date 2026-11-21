@@ -8,7 +8,7 @@ import { JEV_KEY_FILE_ENV, JEV_TARGETS, JevSolver, buildBody, parseAnswers, type
 import { maskAndCut, maskSecrets } from "../src/sentinel/mask.js";
 import { CATEGORY_IDS, DEFAULT_SETTINGS, RISK_ID, effectiveQuestions } from "../src/sentinel/questions.js";
 import { Sentinel, SentinelError, type SentinelSource } from "../src/sentinel/sentinel.js";
-import { buildState, describeAction, humanTaskFromEvents } from "../src/sentinel/state.js";
+import { buildState, describeAction, humanTaskFromEvents, pendingActionFromEvents } from "../src/sentinel/state.js";
 import { SentinelStore } from "../src/sentinel/store.js";
 import type { Answer, SolveRequest, SolveResult, Solver } from "../src/sentinel/types.js";
 import { OUTCOME_LABEL, feedText, firedText } from "../src/sentinel/view.js";
@@ -57,6 +57,10 @@ class FakeSource implements SentinelSource {
   async task(): Promise<string | null> {
     this.taskCalls++;
     return this.task_;
+  }
+  pending_: string | null = null;
+  async pending(): Promise<string | null> {
+    return this.pending_;
   }
   async card(_t: string, id: string) {
     return this.cards.has(id) ? this.cards.get(id)! : { status: "pending", decision: null };
@@ -441,5 +445,68 @@ describe("the sentinel", () => {
     s.store.insert({ threadId: "t", interactionId: "x", providerId: "p", windowPlugin: null, tool: "Bash", args: "ls", task: null, solver: "fake" });
     expect(s.store.failEvaluating()).toBe(1);
     expect(s.store.byInteraction("x")).toMatchObject({ status: "not_scored", reasonKind: "error" });
+  });
+});
+
+// ---- permission cards: domain and the command that asked ---------------------------------------------------
+const netCard = (id: string, reason: string | null) => ({
+  id,
+  threadId: "thr_a",
+  providerId: "claude-code",
+  status: "pending",
+  payload: { kind: "approval", availableDecisions: ["allow_once", "deny"], reason, subject: { kind: "permission_grant", itemId: "i", toolName: "SandboxNetworkAccess", permissions: { network: { enabled: true } } } },
+});
+
+describe("permission_grant cards carry the domain and the pending command", () => {
+  it("the reason (with the domain) goes into the action", () => {
+    const a = describeAction(netCard("n1", "Allow network connection to example.org?"))!;
+    expect(a.args).toBe("network on; Allow network connection to example.org?");
+  });
+  it("pendingActionFromEvents takes the newest pending command or tool call, masked and cut", () => {
+    const rows = [
+      { type: "item/started", data: { item: { type: "commandExecution", status: "completed", command: "ls" } } },
+      { type: "item/started", data: { item: { type: "commandExecution", status: "pending", command: "curl -sI https://example.org -H 'Authorization: Bearer abcdef123456'" } } },
+      { type: "item/started", data: { item: { type: "commandExecution", status: "pending", command: "older" } } },
+    ];
+    const p = pendingActionFromEvents(rows)!;
+    expect(p).toContain("curl -sI https://example.org");
+    expect(p).not.toContain("abcdef123456");
+    expect(pendingActionFromEvents([{ type: "item/started", data: { item: { type: "toolCall", status: "pending", tool: "Edit", arguments: { file_path: "/p/a.ts" } } } }])).toBe("Edit: /p/a.ts");
+    expect(pendingActionFromEvents([{ type: "item/started", data: { item: { type: "fileChange", status: "pending", changes: [{ path: "/p/x" }, { path: "/p/y" }] } } }])).toBe("file change: /p/x, /p/y");
+    expect(pendingActionFromEvents([{ type: "item/started", data: { item: { type: "commandExecution", status: "pending", command: "x ".repeat(500) } } }])!.length).toBeLessThanOrEqual(300);
+    expect(pendingActionFromEvents([])).toBeNull();
+  });
+  it("the solver and the feed both get the domain and the command", async () => {
+    const s = setup();
+    s.source.pending_ = "curl -sI https://example.org";
+    enable(s);
+    await s.sentinel.handle(pending(netCard("n2", "Allow network connection to example.org?")));
+    await s.sentinel.settled();
+    const state = s.solver.calls[0]!.state as { action: { arguments: string; pending: string } };
+    expect(state.action.arguments).toContain("example.org");
+    expect(state.action.pending).toBe("curl -sI https://example.org");
+    const row = s.sentinel.recent(5)[0]!;
+    expect(row.args).toContain("Allow network connection to example.org?");
+    expect(row.args).toContain("curl -sI https://example.org");
+  });
+  it("a failing lookup of the pending command does not lose the card", async () => {
+    const s = setup();
+    s.source.pending = async () => {
+      throw new Error("boom");
+    };
+    enable(s);
+    await s.sentinel.handle(pending(netCard("n3", "Allow network connection to example.org?")));
+    await s.sentinel.settled();
+    expect(s.sentinel.recent(5)).toHaveLength(1);
+    expect(s.logs.some((l) => l.includes("pending action"))).toBe(true);
+  });
+  it("other kinds of card do not look up the pending command", async () => {
+    const s = setup();
+    let looked = 0;
+    s.source.pending = async () => (looked++, null);
+    enable(s);
+    await s.sentinel.handle(pending(bashCard("b9", "ls")));
+    await s.sentinel.settled();
+    expect(looked).toBe(0);
   });
 });
