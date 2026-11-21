@@ -209,6 +209,8 @@ export const MIGRATIONS: string[] = [
   `CREATE INDEX IF NOT EXISTS publications_plugin ON publications (plugin_id, local_hash)`,
   // Stage 7: the sentinel's settings and feed (observation only).
   ...SENTINEL_MIGRATIONS,
+  // Skills queue: the version of the skill rules a row was decided by (a row from older rules is checked again).
+  `ALTER TABLE skill_queue ADD COLUMN rules_version INTEGER NOT NULL DEFAULT 0`,
 ];
 
 export interface Policy {

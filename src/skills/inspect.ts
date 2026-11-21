@@ -127,6 +127,13 @@ export function decide(check: SkillCheck): SkillDecision {
   return "clean";
 }
 
+/**
+ * Version of the skill rules (text-rules.ts and the checks they use). Raise it whenever a rule changes what it finds:
+ * every open queue entry decided by an older version is checked again at the next scan.
+ * 2: secret mentions in prohibitions and warnings are no finding.
+ */
+export const SKILL_RULES_VERSION = 2;
+
 /** One line for the page and the journal. */
 export function summarize(check: SkillCheck): string {
   const top = check.findings.filter((f) => f.severity !== "info").slice(0, 3);

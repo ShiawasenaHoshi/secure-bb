@@ -1,5 +1,6 @@
 // The skills module's tables (stage 6) in secure-bb's own database.
 import type { Db } from "../store.js";
+import { SKILL_RULES_VERSION } from "./inspect.js";
 import type { SkillCheck, SkillPinRow, SkillQueueRow, SkillState } from "./types.js";
 
 /** Appended to the plugin's MIGRATIONS (append-only). */
@@ -77,6 +78,7 @@ const queueRow = (r: Raw): SkillQueueRow => ({
   via: r.via === null ? null : String(r.via),
   removedFiles: r.removed_json ? (JSON.parse(String(r.removed_json)) as SkillQueueRow["removedFiles"]) : null,
   note: r.note === null ? null : String(r.note),
+  rulesVersion: Number(r.rules_version ?? 0),
 });
 
 export interface NewQueueRow {
@@ -126,14 +128,14 @@ export class SkillStore {
   }
 
   // ---- queue ----
-  insertRow(r: NewQueueRow): SkillQueueRow {
+  insertRow(r: NewQueueRow, rulesVersion = SKILL_RULES_VERSION): SkillQueueRow {
     const t = this.now();
     const res = this.db
       .prepare(
-        `INSERT INTO skill_queue (key, skill_id, name, scope, project_id, hash, decision, state, reason, check_json, source, preexisting, first_seen, last_seen)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO skill_queue (key, skill_id, name, scope, project_id, hash, decision, state, reason, check_json, source, preexisting, first_seen, last_seen, rules_version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(r.key, r.skillId, r.name, r.scope, r.projectId, r.hash, r.decision, r.state, r.reason, r.check ? JSON.stringify(r.check) : null, r.source, r.preexisting ? 1 : 0, t, t);
+      .run(r.key, r.skillId, r.name, r.scope, r.projectId, r.hash, r.decision, r.state, r.reason, r.check ? JSON.stringify(r.check) : null, r.source, r.preexisting ? 1 : 0, t, t, rulesVersion);
     return this.getRow(Number(res.lastInsertRowid))!;
   }
   getRow(id: number): SkillQueueRow | null {
@@ -159,8 +161,8 @@ export class SkillStore {
   /** The same skill changed again while it waited: the row follows the new content. */
   retarget(id: number, r: Pick<NewQueueRow, "skillId" | "hash" | "decision" | "state" | "reason" | "check" | "source">): void {
     this.db
-      .prepare(`UPDATE skill_queue SET skill_id = ?, hash = ?, decision = ?, state = ?, reason = ?, check_json = ?, source = ?, last_seen = ? WHERE id = ?`)
-      .run(r.skillId, r.hash, r.decision, r.state, r.reason, r.check ? JSON.stringify(r.check) : null, r.source, this.now(), id);
+      .prepare(`UPDATE skill_queue SET skill_id = ?, hash = ?, decision = ?, state = ?, reason = ?, check_json = ?, source = ?, last_seen = ?, rules_version = ? WHERE id = ?`)
+      .run(r.skillId, r.hash, r.decision, r.state, r.reason, r.check ? JSON.stringify(r.check) : null, r.source, this.now(), SKILL_RULES_VERSION, id);
   }
   touchRow(id: number): void {
     this.db.prepare(`UPDATE skill_queue SET last_seen = ? WHERE id = ?`).run(this.now(), id);

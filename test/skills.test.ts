@@ -1,5 +1,6 @@
 // Stage 6: the skills guard — pin, checks, decision (remove / queue / accept), windows, approval.
 import { describe, expect, it } from "vitest";
+import { SKILL_RULES_VERSION } from "../src/skills/inspect.js";
 import { registrySlug } from "../src/skills/guard.js";
 import { CLEAN_SKILL, SkillsHarness } from "./support/skills.js";
 
@@ -149,6 +150,30 @@ describe("block: the skill is removed at once", () => {
     h.bb.put("skill_p", "local", BAD, { scope: "bb-project" });
     await h.watch.scan();
     expect(h.bb.removeCalls).toEqual(["skill_p"]);
+  });
+});
+
+describe("an open entry decided by older rules is checked again", () => {
+  const setOld = (h: SkillsHarness, version: number) => (h.skillStore as unknown as { db: { prepare(q: string): { run(...a: unknown[]): void } } }).db.prepare("UPDATE skill_queue SET rules_version = ?, reason = 'stale'").run(version);
+  it("same content, older rules version: decided again (the reason is rewritten, the version is current)", async () => {
+    const h = await started();
+    h.bb.put("skill_c", "fresh", { "SKILL.md": "# fresh\n" });
+    await h.watch.scan();
+    expect(h.guard.view().open[0]!.rulesVersion).toBe(SKILL_RULES_VERSION);
+    setOld(h, SKILL_RULES_VERSION - 1);
+    await h.watch.scan();
+    const [row] = h.guard.view().open;
+    expect(row!.reason).not.toBe("stale");
+    expect(row!.rulesVersion).toBe(SKILL_RULES_VERSION);
+    expect(h.guard.view().open).toHaveLength(1);
+  });
+  it("same content, same rules version: left as it is", async () => {
+    const h = await started();
+    h.bb.put("skill_c", "fresh", { "SKILL.md": "# fresh\n" });
+    await h.watch.scan();
+    setOld(h, SKILL_RULES_VERSION);
+    await h.watch.scan();
+    expect(h.guard.view().open[0]!.reason).toBe("stale");
   });
 });
 

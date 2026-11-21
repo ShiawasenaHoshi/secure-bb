@@ -5,7 +5,7 @@
 // itself, so a decision here would be decoration. Any failure — timeout, error, limit, no key — is a feed record
 // "не оценено", never an exception to the caller.
 import { effectiveQuestions, CATEGORY_IDS, RISK_ID, shippedInstructions } from "./questions.js";
-import { buildState, describeAction, humanTaskFromEvents } from "./state.js";
+import { actionText, buildState, describeAction } from "./state.js";
 import { maskAndCut } from "./mask.js";
 import { normalizeSettings, type SentinelStore } from "./store.js";
 import type { JevProvider, CategoryScore, FeedRow, NotScoredReason, Outcome, SentinelSettings, SolveResult, Solver } from "./types.js";
@@ -23,6 +23,8 @@ export class SentinelError extends Error {
 export interface SentinelSource {
   /** The first message a human sent in this thread or above it, or null. */
   task(threadId: string): Promise<string | null>;
+  /** The command or tool call the thread is running right now (masked, cut), or null. */
+  pending(threadId: string): Promise<string | null>;
   /** Current state of a card: what the human did with it. null = the card is gone. */
   card(threadId: string, interactionId: string): Promise<{ status: string; decision: string | null } | null>;
 }
@@ -83,7 +85,14 @@ export class Sentinel {
         windowPlugin = await this.d.windowCovering(threadId);
         if (windowPlugin === null) return;
       }
-      const row = this.d.store.insert({ threadId, interactionId: i.id, providerId: action.provider, windowPlugin, tool: action.tool, args: action.args, task: null, solver: this.d.solver.name });
+      if (action.kind === "permission_grant") {
+        try {
+          action.pending = await this.d.source.pending(threadId);
+        } catch (err) {
+          this.d.log(`sentinel: pending action of thread ${threadId} not read: ${String(err)}`);
+        }
+      }
+      const row = this.d.store.insert({ threadId, interactionId: i.id, providerId: action.provider, windowPlugin, tool: action.tool, args: actionText(action), task: null, solver: this.d.solver.name });
       if (!row) return;
       this.d.onChange?.();
       const job = this.evaluate(row, action, s).catch((err) => this.d.log(`sentinel: evaluation of ${row.id} failed: ${String(err)}`));

@@ -87,6 +87,8 @@ export interface SkillQueueRow {
   /** What was removed (state `removed`): files and text as they were. */
   removedFiles: Array<{ path: string; content: string | null }> | null;
   note: string | null;
+  /** Version of the skill rules that decided this entry (see SKILL_RULES_VERSION). */
+  rulesVersion: number;
 }
 
 export interface SkillPinRow {

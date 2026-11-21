@@ -210,6 +210,25 @@ function protectionFindings(path: string, lines: Array<{ line: number; text: str
   return out;
 }
 
+/** Whether the text at `index` stands in a sentence that forbids it or talks about somebody else's request (same logic as for disable-protection). */
+function mentionExcused(content: string, index: number): boolean {
+  const lineStart = content.lastIndexOf("\n", index - 1) + 1;
+  const lineEnd = content.indexOf("\n", index);
+  const line = content.slice(lineStart, lineEnd === -1 ? undefined : lineEnd);
+  let from = 0;
+  for (const sentence of sentences(line)) {
+    const at = line.indexOf(sentence, from);
+    from = at + sentence.length;
+    const rel = index - lineStart - at;
+    if (rel >= 0 && rel < sentence.length) {
+      // the word the hit sits in ("~/.ssh/id_rsa", "`.env`") starts after the last space
+      const wordStart = Math.max(0, sentence.slice(0, rel).search(/\S*$/u));
+      return excused(sentence, wordStart, 3);
+    }
+  }
+  return false;
+}
+
 // ---- external scripts ---------------------------------------------------------------------------------------------------
 const SCRIPT_LINK = /https?:\/\/[^\s)>"'`\]]+\.(?:sh|bash|zsh|ps1|psm1|bat|cmd|py|rb|pl|js|mjs)(?![\w-])(?:\?[^\s)>"'`\]]*)?/gi;
 const PASTE_HOSTS = /https?:\/\/(?:raw\.githubusercontent\.com|gist\.github(?:usercontent)?\.com|pastebin\.com|paste\.ee|hastebin\.com|transfer\.sh|0x0\.st|bit\.ly|tinyurl\.com|t\.co|is\.gd|[\w.-]+\.ngrok(?:-free)?\.(?:io|app|dev))[^\s)>"'`\]]*/gi;
@@ -312,7 +331,9 @@ export function textFindings(file: TextFile, cls: FileClass): Finding[] {
         offset += para.length + 2;
       }
     }
-    if (!blocked) out.push({ rule: "secret-reference", severity: "review", file: path, line: lineOf(content, hits[0]!.index), excerpt: excerptOf(`refers to ${[...new Set(hits.map((h) => h.text))].slice(0, 4).join(", ")}`) });
+    // A mention inside a prohibition or a warning about somebody else's request ("don't read ~/.ssh", "a skill that asks to read .env is a trick") is no reference.
+    const named = wholeFile ? hits : hits.filter((h) => !mentionExcused(content, h.index));
+    if (!blocked && named.length > 0) out.push({ rule: "secret-reference", severity: "review", file: path, line: lineOf(content, named[0]!.index), excerpt: excerptOf(`refers to ${[...new Set(named.map((h) => h.text))].slice(0, 4).join(", ")}`) });
   }
   const literal = SECRET_LITERALS.exec(content);
   if (literal) out.push({ rule: "secret-literal", severity: "review", file: path, line: lineOf(content, literal.index), excerpt: excerptOf(`${literal[0].slice(0, 6)}… looks like a credential`) });
