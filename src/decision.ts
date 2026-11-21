@@ -1,5 +1,6 @@
 // Pure helpers for the §5.3 decision table: what the checks say, and what is new.
 import type { CheckResult, Finding } from "./checks/types.js";
+import { flowTokens } from "./checks/flow.js";
 
 /** Check-result key of a snapshot checked at propose time, before the core has hashed it. */
 export const localCheckKey = (localHash: string): string => `local:${localHash}`;
@@ -17,6 +18,8 @@ export function capabilityTokens(r: CheckResult): string[] {
     out.add(c.kind);
     for (const d of c.detail) out.add(`${c.kind}:${d}`);
   }
+  // Where what the plugin reads goes: a new way out is a new right (the guard counts it itself, with the same module).
+  for (const t of flowTokens(r.flows)) out.add(t);
   return [...out].sort();
 }
 

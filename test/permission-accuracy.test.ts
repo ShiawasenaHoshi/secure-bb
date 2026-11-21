@@ -74,7 +74,8 @@ describe("other programs' credentials come first", () => {
   it("readFileSync(os.homedir() + '/.gemini/google_accounts.json')", async () => {
     const r = await fixture("gemini-credentials");
     expect(r.credentials).toEqual(["Google (Gemini)"]);
-    expect(headline(r)).toEqual({ level: "caution", text: "Читает ваши учётные данные других программ: Google (Gemini)" });
+    // the credentials are handed to bb as a value the plugin exports: where they go from there, the code does not show
+    expect(headline(r)).toEqual({ level: "caution", text: "Читает ваши учётные данные других программ: Google (Gemini); куда уходит — из кода не видно" });
   });
   it("is red when the plugin can also reach the network, and beats «переменные окружения»", () => {
     const caps = capsWithPaths({ capabilities: [{ kind: "env", detail: ["*"] }, { kind: "network", detail: ["fetch"] }], credentials: ["Google (Gemini)", "Amazon AWS"] });

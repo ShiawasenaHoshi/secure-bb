@@ -970,6 +970,8 @@ export class Guard {
       try {
         if (tree.hash !== req.contentHash) return { ok: false, reason: "хеш каталога, посчитанный сторожем, не совпал с хешем из запроса" };
         const res = await this.trustCfg.checks(tree.dir, { pluginId: req.pluginId });
+        // The clock stopped the flow analysis: its result is not finished and counts for no right. The version is held; the next evaluation tries again.
+        if (res.flowsTimedOut) return { ok: false, reason: "проверка не успела: анализ потока данных остановлен по времени, повторите позже" };
         return { ok: true, hash: tree.hash, rights: rightsOf(res), blocks: hardFlags(res).map((f) => `${f.rule} ${f.file}${f.line ? `:${f.line}` : ""}`) };
       } finally {
         await tree.cleanup().catch(() => undefined);

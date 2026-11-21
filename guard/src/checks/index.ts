@@ -4,6 +4,7 @@
 import { posix, sep } from "node:path";
 import { analyze, parseSource, type FileFacts, type Site } from "./ast.ts";
 import { excerptOf, isCodeFile, isUrlSpec, packageDirOf, scanTree, type SourceFile } from "./files.ts";
+import { analyzeFlows, type FlowFile, type SourceKind } from "./flow.ts";
 import { entryPoints, fileCandidates, pluginDirOf, resolveSpecifier, type GraphContext } from "./reach.ts";
 import { inventoryPackages, verifyInstalledPackages, type Integrity, type IntegrityEnv } from "../deps/integrity.ts";
 import { collectDependencies, nameFindings } from "../deps/collect.ts";
@@ -90,6 +91,8 @@ export async function runChecks(dir: string, opts: CheckOptions = {}): Promise<C
   const findings: Finding[] = [...tree.findings];
   const caps = new Map<CapabilityKind, { detail: Set<string>; sites: Array<{ file: string; line: number }> }>();
   const perFile: Array<{ rel: string; facts: FileFacts }> = [];
+  /** The parsed own code the flow analysis reads (the dependencies' code is not: a call into it is «not shown»). */
+  const flowFiles: FlowFile[] = [];
 
   // package.json: the declared surfaces
   const sub = pluginDirOf(tree.packageJsons, opts.pluginId);
@@ -145,6 +148,7 @@ export async function runChecks(dir: string, opts: CheckOptions = {}): Promise<C
       continue;
     }
     parsed++;
+    flowFiles.push({ rel: src.rel, ast: res.ast, code: res.code });
     if (res.note) findings.push({ rule: "parse-note", severity: "info", file: src.rel, line: 0, excerpt: res.note });
     let facts: FileFacts;
     try {
@@ -307,6 +311,27 @@ export async function runChecks(dir: string, opts: CheckOptions = {}): Promise<C
     findings.push({ rule: "dep-content-unverified", severity: "info", file: "", line: 0, excerpt: `${tree.installed.length} packages in node_modules were not compared with the npm registry (offline check): scanned in full` });
   }
 
+  // ---- where what it reads goes (data flow over the plugin's own code) ----
+  const flowResult = (() => {
+    const has = (k: CapabilityKind): boolean => caps.has(k);
+    const expect = new Set<SourceKind>();
+    if (has("sdk_read")) expect.add("threads");
+    if (has("sdk_questions")) expect.add("questions");
+    const envNames = [...(caps.get("env")?.detail ?? [])];
+    if (envNames.some((d) => d === "*" || !/^(env:)?(HOME|USER|LOGNAME|PATH|SHELL|LANG|LC_\w+|TZ|PWD|TMPDIR|TERM|NODE_ENV|NO_COLOR|FORCE_COLOR|CI|DEBUG|PLATFORM)$/.test(d))) expect.add("env");
+    if (credentials.length > 0) expect.add("credentials");
+    const watch = expect.size > 0 || has("sdk_meta") || has("ui_click") || has("fs");
+    if (!watch) return null;
+    const own = flowFiles.filter((f) => isOwn(f.rel) && inSub(f.rel) && !distDerived(f.rel));
+    const dynamicRules = new Set(["dynamic-access", "require-alias", "module-load", "dynamic-constructor", "global-proxy", "native-load", "webassembly", "dynamic-import", "dynamic-require", "url-import"]);
+    // Code built on the fly, a worker, a vm, a computed module: what runs there is not what the analysis read (a plain `Function("return this")` is only text).
+    const dynamicCaps = [...(caps.get("dynamic_code")?.detail ?? [])].some((d) => !/\(literal\)$/.test(d));
+    const dynamic = dynamicCaps || perFile.some((f) => f.facts.execSink || f.facts.specs.includes(null)) || findings.some((f) => dynamicRules.has(f.rule));
+    const incomplete = findings.some((f) => (f.rule === "parse-failed" || f.rule === "limit-exceeded") && isOwn(f.file) && !distDerived(f.file));
+    const navClick = [...(caps.get("ui_click")?.detail ?? [])].includes(UI_CLICK_NAV);
+    return analyzeFlows({ files: own, graph: ctx, expect, dynamic, incomplete, navClick, entries: new Set(ep.entries) });
+  })();
+
   const capabilities: Capability[] = CAPABILITY_KINDS.filter((k) => caps.has(k)).map((kind) => {
     const c = caps.get(kind)!;
     return { kind, detail: [...c.detail].sort(), sites: c.sites };
@@ -318,7 +343,7 @@ export async function runChecks(dir: string, opts: CheckOptions = {}): Promise<C
   const sorted = [...uniq.values()].sort(
     (a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity] || (a.file < b.file ? -1 : a.file > b.file ? 1 : 0) || a.line - b.line || (a.rule < b.rule ? -1 : 1),
   );
-  return { v: CHECKS_VERSION, findings: sorted, capabilities, stats: { files: tree.files, parsed, bytes: tree.bytes, ms: Date.now() - t0 }, dependencies, ...(caps.has("fs") && fsPaths.length > 0 ? { fsPaths } : {}), ...(caps.has("child_process") && (programs.length > 0 || programsUnknown) ? { programs, ...(programsUnknown ? { programsUnknown } : {}) } : {}), ...(credentials.length > 0 ? { credentials } : {}) };
+  return { v: CHECKS_VERSION, findings: sorted, capabilities, stats: { files: tree.files, parsed, bytes: tree.bytes, ms: Date.now() - t0 }, dependencies, ...(caps.has("fs") && fsPaths.length > 0 ? { fsPaths } : {}), ...(caps.has("child_process") && (programs.length > 0 || programsUnknown) ? { programs, ...(programsUnknown ? { programsUnknown } : {}) } : {}), ...(credentials.length > 0 ? { credentials } : {}), ...(flowResult?.timedOut ? { flowsTimedOut: true as const } : {}), ...(flowResult && !flowResult.timedOut ? { flows: flowResult.summaries, ...(flowResult.purposes.length > 0 ? { purposes: flowResult.purposes } : {}) } : {}) };
 }
 
 /**
@@ -346,6 +371,11 @@ export function formatReport(r: CheckResult): string {
   for (const f of r.findings) out.push(`  [${f.severity}] ${f.rule}  ${f.file}${f.line ? `:${f.line}` : ""}  ${f.excerpt}`);
   out.push(r.capabilities.length === 0 ? "capabilities: none (safe class)" : "capabilities:");
   for (const c of r.capabilities) out.push(`  ${c.kind}${c.detail.length ? `: ${c.detail.join(", ")}` : ""}`);
+  if (r.flows && r.flows.length > 0) {
+    out.push("where what it reads goes:");
+    for (const f of r.flows) out.push(`  ${f.source}${f.detail.length ? ` (${f.detail.join(", ")})` : ""}: ${f.verdict}${f.sinks.length ? ` → ${f.sinks.map((s) => `${s.kind}${s.target ? `:${s.target}` : ""} ${s.file}:${s.line}`).join(", ")}` : ""}${f.why ? ` — ${f.why}` : ""}`);
+  }
+  for (const p of r.purposes ?? []) out.push(`  purpose (${p.on.join("/")}): ${p.text} [${p.pair}]`);
   const st = r.dependencyStats;
   if (st && st.total > 0) {
     out.push(`dependencies: ${st.total} (${st.declared} declared), ${st.registry ? `${st.verified} verified against the npm registry, ${st.unchecked} not verified, ${st.young} younger than 3 days` : "registry not consulted"}`);

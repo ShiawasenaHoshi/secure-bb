@@ -71,6 +71,22 @@ export interface CapLike {
   /** For `child_process`: the programs the code starts by name, and whether it also starts one it does not name. */
   programs?: string[];
   programsUnknown?: boolean;
+  /** Where what this right reads goes (the checks' data flow); absent where the checks did not follow it. */
+  flow?: FlowLike;
+  /** «Зачем» by the pair access → sink: short sentences. */
+  purpose?: string[];
+}
+/** The guard's own reading of where one source goes (`guard/src/checks/flow.ts`, `FlowSummary`). Declared here: the page does not import the checks. */
+export interface FlowLike {
+  source: string;
+  detail: string[];
+  verdict: "nowhere" | "shown" | "kept" | "leaves" | "unknown";
+  sinks: Array<{ kind: string; target?: string; choice?: boolean }>;
+  why?: string;
+}
+export interface PurposeLike {
+  on: string[];
+  text: string;
 }
 /** The detail of a network right whose address the code does not show (the guard's `UNRESOLVED_HOST`). */
 const UNRESOLVED_HOST = "unresolved-host";
@@ -78,12 +94,128 @@ const UNRESOLVED_HOST = "unresolved-host";
  * The capabilities of a check result, with the file paths of the result put on the `fs` one and the programs on the `child_process` one (so that a card can
  * name them), and, when the code reaches other programs' credential files, a first right `credentials` naming whose.
  */
-export const capsWithPaths = (r: { capabilities: CapLike[]; fsPaths?: string[]; programs?: string[]; programsUnknown?: boolean; credentials?: string[] } | undefined): CapLike[] => {
+export const capsWithPaths = (r: { capabilities: CapLike[]; fsPaths?: string[]; programs?: string[]; programsUnknown?: boolean; credentials?: string[]; flows?: FlowLike[]; purposes?: PurposeLike[] } | undefined): CapLike[] => {
   const caps = meaningfulCaps(r?.capabilities ?? []).map((c) =>
     c.kind === "fs" && r?.fsPaths && r.fsPaths.length > 0 ? { ...c, paths: r.fsPaths } : c.kind === "child_process" && r ? { ...c, programs: r.programs ?? [], programsUnknown: r.programsUnknown ?? false } : c,
   );
-  return r?.credentials && r.credentials.length > 0 ? [{ kind: "credentials", detail: r.credentials }, ...caps] : caps;
+  const all = r?.credentials && r.credentials.length > 0 ? [{ kind: "credentials", detail: r.credentials }, ...caps] : caps;
+  return all.map((c) => attachFlow(r ?? {}, c));
 };
+/** The right with where its data goes and why, from a check result's `flows` and `purposes`. */
+export function attachFlow(r: { flows?: FlowLike[]; purposes?: PurposeLike[] }, c: CapLike): CapLike {
+  const flow = r.flows?.find((f) => f.source === FLOW_SOURCE_OF[c.kind]);
+  const purpose = [...new Set((r.purposes ?? []).filter((p) => p.on.includes(c.kind)).map((p) => p.text))];
+  return flow || purpose.length > 0 ? { ...c, ...(flow ? { flow } : {}), ...(purpose.length > 0 ? { purpose } : {}) } : c;
+}
+
+// ---- where what it reads goes («Зачем») ---------------------------------------------------------------------------------------------
+/** The right whose line a source's verdict belongs to. */
+const FLOW_SOURCE_OF: Record<string, string> = { sdk_read: "threads", sdk_questions: "questions", env: "env", credentials: "credentials", fs: "files" };
+/** What the right is called when a sentence is built around it: «Читает ваши переписки в bb и …». */
+const READS_PLAIN: Record<string, string> = {
+  sdk_read: "читает ваши переписки в bb",
+  sdk_questions: "видит вопросы ваших агентов",
+  env: "читает ваши пароли и токены (переменные окружения)",
+  credentials: "читает ваши учётные данные других программ",
+  fs: "читает ваши файлы",
+};
+/** «a и b», «a, b и c»; when a part has an «и» of its own, the parts are only set off by commas. */
+const joinAnd = (parts: string[]): string => {
+  if (parts.length <= 1) return parts[0] ?? "";
+  if (parts.some((p) => p.includes(" и "))) return parts.join(", ");
+  return `${parts.slice(0, -1).join(", ")} и ${parts[parts.length - 1]}`;
+};
+const unnamed = (t: string | undefined): boolean => t === undefined || /^(a |an )/.test(t);
+/** One dangerous or shown sink, in a verb: `[third person, infinitive]`. The names the code gives (hosts, programs, files) are named; what it does not give is said so. */
+function sinkVerb(kind: string, target: string | undefined): [string, string] {
+  switch (kind) {
+    case "network":
+      return unnamed(target) ? ["отправляет по сети (куда — из кода не видно)", "отправлять по сети (куда — из кода не видно)"] : [`отправляет на ${target}`, `отправлять на ${target}`];
+    case "process":
+      return unnamed(target) ? ["передаёт программе, название которой из кода не видно", "передавать программе, название которой из кода не видно"] : [`передаёт программе ${target}`, `передавать программе ${target}`];
+    case "file":
+      return unnamed(target) ? ["записывает в файл вне своей папки (какой — из кода не видно)", "записывать в файл вне своей папки (какой — из кода не видно)"] : [`записывает в файл ${target}`, `записывать в файл ${target}`];
+    case "send":
+      return target === "threads.spawn" ? ["передаёт запускаемому агенту", "передавать запускаемому агенту"] : ["отправляет в ваши переписки от вашего имени", "отправлять в ваши переписки от вашего имени"];
+    case "settings":
+      return ["передаёт в настройки bb", "передавать в настройки bb"];
+    case "route":
+      return ["отдаёт по адресу плагина на сервере bb", "отдавать по адресу плагина на сервере bb"];
+    case "notify":
+      return ["показывает вам в уведомлении", "показывать вам в уведомлении"];
+    case "sound":
+      return ["передаёт проигрывателю звука", "передавать проигрывателю звука"];
+    case "ui":
+      return ["показывает вам в окне плагина", "показывать вам в окне плагина"];
+    case "log":
+      return ["пишет в журнал плагина", "писать в журнал плагина"];
+    default:
+      return ["", ""];
+  }
+}
+const DANGEROUS_KINDS = new Set(["network", "process", "file", "send", "settings"]);
+/** The ways out, one verb per kind: the hosts named together, the programs named together; what the code does not name is said once. */
+function leaveVerbs(bad: Array<{ kind: string; target?: string }>, i: number): string[] {
+  const out: string[] = [];
+  const of = (kind: string) => bad.filter((k) => k.kind === kind);
+  const named = (kind: string): string[] => [...new Set(of(kind).filter((k) => !unnamed(k.target)).map((k) => k.target!))];
+  const hidden = (kind: string): boolean => of(kind).some((k) => unnamed(k.target));
+  const list = (xs: string[]): string => `${xs.slice(0, 3).join(", ")}${xs.length > 3 ? ", …" : ""}`;
+  if (of("network").length > 0) {
+    const hosts = named("network");
+    out.push(hosts.length === 0 ? sinkVerb("network", undefined)[i] : `${i === 0 ? "отправляет" : "отправлять"} на ${list(hosts)}${hidden("network") ? " и на адреса, которых в коде не видно" : ""}`);
+  }
+  if (of("process").length > 0) {
+    const progs = named("process");
+    out.push(progs.length === 0 ? sinkVerb("process", undefined)[i] : `${i === 0 ? "передаёт" : "передавать"} ${progs.length === 1 && !hidden("process") ? "программе" : "программам"} ${list(progs)}${hidden("process") ? " и другим, названия которых из кода не видно" : ""}`);
+  }
+  if (of("file").length > 0) {
+    const files = named("file");
+    out.push(files.length === 0 ? sinkVerb("file", undefined)[i] : `${i === 0 ? "записывает" : "записывать"} в ${files.length === 1 ? "файл" : "файлы"} ${list(files)}${hidden("file") ? " и в другие, которые из кода не видно" : ""}`);
+  }
+  for (const kind of ["send", "settings", "route"]) {
+    const ks = [...new Set(of(kind).map((k) => sinkVerb(kind, k.target)[i]))];
+    out.push(...ks);
+  }
+  return out;
+}
+/** The part of a sentence that says where it goes: «и никуда не отправляет», «и показывает вам в уведомлении», «и отправляет на stats.example». `inf`: after «сможет:». */
+export function flowClause(flow: FlowLike, inf = false, maxVerbs = 3): { text: string; level: "ok" | "unknown" | "danger" } {
+  const i = inf ? 1 : 0;
+  const secret = flow.source === "env" || flow.source === "credentials";
+  const sinks = flow.sinks.filter((k) => k.kind !== "unknown");
+  const bad = sinks.filter((k) => DANGEROUS_KINDS.has(k.kind) || (secret && k.kind === "route"));
+  if (flow.verdict === "leaves" && bad.length > 0) {
+    const data = bad.filter((k) => !k.choice);
+    const verbs = leaveVerbs(data, i);
+    // Only the choice goes: what is sent, where, or whether at all is decided by what was read
+    if (data.length < bad.length) verbs.push(i === 0 ? "по содержимому выбирает, что и куда отправить" : "по содержимому выбирать, что и куда отправлять");
+    return { text: `и ${joinAnd(verbs.slice(0, maxVerbs))}${verbs.length > maxVerbs ? ` и ещё ${verbs.length - maxVerbs}` : ""}`, level: "danger" };
+  }
+  if (flow.verdict === "nowhere") return { text: inf ? "и никуда не отправлять" : "и никуда не отправляет", level: "ok" };
+  if (flow.verdict === "shown") {
+    // for what was said in a conversation, the plugin's own route is its own page
+    const verbs = [...new Set(sinks.map((k) => sinkVerb(k.kind === "route" ? "ui" : k.kind, k.target)[i]).filter(Boolean))];
+    return { text: `и ${joinAnd(verbs)}`, level: "ok" };
+  }
+  if (flow.verdict === "kept") return { text: inf ? "и только хранить у себя в bb (дальше не отправлять)" : "и только хранит у себя в bb (дальше не отправляет)", level: "ok" };
+  return { text: "куда уходит — из кода не видно", level: "unknown" };
+}
+/** What follows the phrase of a right on a card: where it goes, then why. Empty when the checks followed nothing for it. */
+export function flowSuffix(c: CapLike, inf: boolean): string {
+  const clause = c.flow ? flowClause(c.flow, inf) : null;
+  const why = c.purpose && c.purpose.length > 0 ? ` — ${c.purpose.join("; ")}` : "";
+  if (!clause) return why;
+  return `${clause.level === "unknown" ? "; " : " "}${clause.text}${why}`;
+}
+/** The red first line of a card: what it reads and where it sends it. null when no source reaches a dangerous sink. */
+export function leakHeadline(caps: CapLike[]): string | null {
+  const leaks = caps.filter((c) => c.flow?.verdict === "leaves" && flowClause(c.flow, false).level === "danger" && READS_PLAIN[c.kind]);
+  if (leaks.length === 0) return null;
+  const parts = leaks.slice(0, 2).map((c) => `${READS_PLAIN[c.kind]} ${flowClause(c.flow!, false, 2).text}`);
+  const text = parts.join("; ") + (leaks.length > 2 ? `; и ещё ${leaks.length - 2}` : "");
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
 
 /** Known system programs in a person's words (by file name). `risky`: it is not just a helper: it drives other programs or the system. */
 const PROGRAM_NAMES: Record<string, { name: string; risky?: boolean }> = {
@@ -182,7 +314,7 @@ function networkText(detail: string[]): string {
 export function capabilitySegments(c: CapLike): Segment[] {
   switch (c.kind) {
     case "env":
-      return envSegments(c.detail);
+      return [...envSegments(c.detail), ...(flowSuffix(c, true) ? [{ text: flowSuffix(c, true) }] : [])];
     case "network":
       return [{ text: networkText(c.detail) }];
     default:
@@ -191,6 +323,9 @@ export function capabilitySegments(c: CapLike): Segment[] {
 }
 /** What a right means for a person. Hosts of the network right are named; the environment is named variable by variable, or «все»; the rest is one phrase. */
 export function capabilityPhrase(c: CapLike): string {
+  return `${capabilityBase(c)}${FLOW_SOURCE_OF[c.kind] || c.purpose ? flowSuffix(c, true) : ""}`;
+}
+function capabilityBase(c: CapLike): string {
   switch (c.kind) {
     case "network":
       return networkText(c.detail);
@@ -242,6 +377,18 @@ export function capabilityPhrase(c: CapLike): string {
       return "использовать возможность «" + c.kind + "»";
   }
 }
+/** `threads>network:stats.example` in a person's words: «переписки → сеть stats.example». */
+function flowTokenText(t: string): string {
+  const [src, rawSink = ""] = t.split(">");
+  const choice = rawSink.startsWith("choice-");
+  const sink = choice ? rawSink.slice(7) : rawSink;
+  const source = ({ threads: "переписки", questions: "вопросы агентов", env: "переменные окружения", credentials: "учётные данные", files: "файлы" } as Record<string, string>)[src!] ?? src!;
+  const i = sink.indexOf(":");
+  const kind = i < 0 ? sink : sink.slice(0, i);
+  const target = i < 0 ? "" : sink.slice(i + 1);
+  const where = ({ network: "сеть", process: "программа", file: "файл", send: "сообщение в тред", settings: "настройки bb", route: "адрес плагина на сервере bb", unknown: "не видно из кода" } as Record<string, string>)[kind] ?? kind;
+  return `${source} → ${choice ? "выбор, что и куда отправить: " : ""}${where}${target ? ` ${target}` : ""}`;
+}
 /** Tokens of the guard's rights (`network:stats.example`, `env:HOME`, `fs`) in the words of a person; hosts and names stay as they are. */
 function tokensText(tokens: string[]): string {
   const kinds = new Map<string, string[]>();
@@ -256,6 +403,7 @@ function tokensText(tokens: string[]): string {
   for (const [kind, detail] of kinds) {
     if (kind === "network") out.push(detail.length > 0 ? `сеть ${detail.map((d) => (d === UNRESOLVED_HOST ? "адреса, не видные в коде" : d)).join(", ")}` : "выход в сеть");
     else if (kind === "env") out.push(detail.length > 0 ? `переменные окружения ${detail.join(", ")}` : "переменные окружения");
+    else if (kind === "flow") out.push(detail.length > 0 ? `куда уходит прочитанное: ${detail.map(flowTokenText).join(", ")}` : "куда уходит прочитанное");
     else out.push(capabilityPhrase({ kind, detail }));
   }
   return out.join("; ");
@@ -1295,32 +1443,57 @@ export function uiClickLine(c: CapLike): { danger: boolean; text: string; phrase
   return { danger: false, text: "может нажимать элементы интерфейса bb", phrase: "нажимать элементы интерфейса bb за вас (какие именно — из кода видно не всегда)" };
 }
 /** The first line for a plugin that uses bb's own API or presses bb's buttons; null when it does neither. «Безопасно: только оформление» is never said of it. */
-export function sdkHeadline(caps: CapLike[]): Risk | null {
+export function sdkHeadline(caps: CapLike[], downgrade = false): Risk | null {
   const mine = SDK_LINES.filter((l) => caps.some((c) => c.kind === l.kind));
   if (mine.length === 0) return null;
   const click = caps.find((c) => c.kind === "ui_click");
   const lines = mine.map((l) => (l.kind === "ui_click" && click ? { ...l, danger: uiClickLine(click).danger, text: uiClickLine(click).text } : l));
   const sendsOut = caps.some((c) => c.kind === "network");
-  const danger = lines.some((l) => l.danger) || (lines.some((l) => l.kind === "sdk_read") && sendsOut);
-  const shown = lines.slice(0, 3).map((l) => l.text);
+  // Where the conversations go, when the checks followed them: the line says it, and a plugin that has the network but does not send them there is not red for that.
+  const flowOf = (kind: string): FlowLike | undefined => caps.find((c) => c.kind === kind)?.flow;
+  const readsFlow = flowOf("sdk_read");
+  const readsKnown = downgrade && readsFlow !== undefined && readsFlow.verdict !== "unknown";
+  const danger = lines.some((l) => l.danger) || (lines.some((l) => l.kind === "sdk_read") && sendsOut && !readsKnown);
+  const shown = lines.slice(0, 3).map((l) => {
+    const f = l.kind === "sdk_read" || l.kind === "sdk_questions" ? flowOf(l.kind) : undefined;
+    const why = l.kind === "sdk_read" ? (caps.find((c) => c.kind === "sdk_read")?.purpose ?? []) : [];
+    if (!f) return l.text;
+    // The network is in the plugin and the level is not lowered: say what the code shows, and that the network is there
+    const netNote = sendsOut && f.verdict !== "unknown" && f.verdict !== "leaves" && !downgrade;
+    if (netNote && f.verdict === "nowhere") return `${READS_PLAIN[l.kind] ?? l.text} — по коду никуда не отправляет; сеть в плагине есть (для чего — см. подробности)${why.length > 0 ? ` — ${why.join("; ")}` : ""}`;
+    return `${READS_PLAIN[l.kind] ?? l.text}${flowSuffix({ kind: l.kind, detail: [], flow: f, purpose: why }, false)}${netNote ? "; сеть в плагине есть (для чего — см. подробности)" : ""}`;
+  });
   const text = shown.join("; ") + (lines.length > 3 ? `; и ещё ${lines.length - 3}` : "");
   return { level: danger ? "danger" : "caution", text: text.charAt(0).toUpperCase() + text.slice(1) };
 }
-export function riskHeadline(caps: CapLike[], reviewRules: string[] = []): Risk {
+export function riskHeadline(caps: CapLike[], reviewRules: string[] = [], opts: { downgrade?: boolean } = {}): Risk {
+  const downgrade = opts.downgrade === true;
   const has = (k: string): CapLike | undefined => caps.find((c) => c.kind === k);
+  // What was read and where it goes, red, first: the checks followed the data to the network, another program, a file outside, a message in the person's name.
+  const leak = leakHeadline(caps);
+  if (leak) {
+    // The rest of what it can do follows the red line: starting agents, knowing the state of threads…
+    const leaking = new Set(caps.filter((c) => c.flow?.verdict === "leaves" && READS_PLAIN[c.kind]).map((c) => c.kind));
+    const rest = sdkHeadline(caps.filter((c) => !leaking.has(c.kind)), downgrade)?.text;
+    return { level: "danger", text: rest ? `${leak}; ${rest.charAt(0).toLowerCase()}${rest.slice(1)}` : leak };
+  }
   // Other programs' logins come first and are said outright: that is more than any variable of the environment. Red when the plugin can also send it out.
   const creds = has("credentials");
-  if (creds) return { level: has("network") ? "danger" : "caution", text: `Читает ваши учётные данные других программ: ${creds.detail.slice(0, 3).join(", ")}${creds.detail.length > 3 ? ", …" : ""}` };
+  if (creds) {
+    // «Никуда не отправляет» lowers the level only where the policy `flow.downgrade` says so (off: the analysis is not yet proven complete)
+    const known = downgrade && creds.flow && creds.flow.verdict !== "unknown";
+    return { level: has("network") && !known ? "danger" : "caution", text: `Читает ваши учётные данные других программ: ${creds.detail.slice(0, 3).join(", ")}${creds.detail.length > 3 ? ", …" : ""}${creds.flow ? flowSuffix({ ...creds, purpose: [] }, false) : ""}` };
+  }
   const env = has("env");
   if (env) {
     const names = [...new Set(env.detail.map((d) => d.replace(/^env:/, "")))].filter((n) => n !== "");
-    if (names.length === 0 || names.includes("*") || names.some((n) => SECRETISH.test(n))) return { level: "danger", text: "Может читать ваши пароли и токены" };
+    if (names.length === 0 || names.includes("*") || names.some((n) => SECRETISH.test(n))) return { level: "danger", text: `Может читать ваши пароли и токены${env.flow ? flowSuffix({ ...env, purpose: [] }, true) : ""}` };
   }
   const fs = has("fs");
   // «Ваши документы» only where the code reaches the person's own folders; files the code does not name are said as what they are: not known.
   if (fs && !(fs.paths && fs.paths.length > 0) && fs.detail.includes(FS_HOME)) return { level: "danger", text: "Может читать и менять ваши документы" };
   if (has("server_access") || has("builtin_rpc")) return { level: "danger", text: "Может управлять самим bb: аккаунтом, подключениями, инструкциями" };
-  const sdk = sdkHeadline(caps);
+  const sdk = sdkHeadline(caps, downgrade);
   if (sdk) return sdk;
   if (fs && fs.paths && fs.paths.length > 0) return { level: "caution", text: `Может читать и менять файлы: ${fs.paths.slice(0, 2).join(", ")}${fs.paths.length > 2 ? ", …" : ""}` };
   if (fs) return { level: "caution", text: "Работает с файлами (какими — из кода не видно)" };

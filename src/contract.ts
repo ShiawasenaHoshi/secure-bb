@@ -66,6 +66,7 @@ export const rpcContract = defineRpcContract({
       cfgCapMin: s.optional(s.integer({ min: 1, max: 1440 })),
       cfgMode: s.optional(s.oneOf(["sliding", "fixed"] as const)),
       autoSafe: s.optional(s.boolean()),
+      flowDowngrade: s.optional(s.boolean()),
       hour: s.optional(s.boolean()),
       // «Оставить» one part of a settings file: which part of which difference, against which file, and whether the page shows it as dangerous.
       partId: s.optional(s.string({ min: 16, max: 16 })),
@@ -164,6 +165,7 @@ export const rpcContract = defineRpcContract({
       cfgCapMin: s.optional(s.integer({ min: 1, max: 1440 })),
       cfgMode: s.optional(s.oneOf(["sliding", "fixed"] as const)),
       autoSafe: s.optional(s.boolean()),
+      flowDowngrade: s.optional(s.boolean()),
       ...factor,
     }),
     output: s.json<{ ok: true }>(),

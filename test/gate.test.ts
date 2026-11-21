@@ -342,6 +342,16 @@ describe("trust windows", () => {
     expect(() => h.gate.setPolicy({ windowMin: 500 }, undefined)).toThrow(GateError);
   });
 
+  it("`flow.downgrade` (a card is less red when the checks found no way out) is off by default; turning it on loosens, so it needs a code, turning it off does not", () => {
+    expect(h.store.policy().flowDowngrade).toBe(false);
+    expect(() => h.gate.setPolicy({ flowDowngrade: true }, undefined)).toThrow(/needs a code/);
+    expect(h.store.policy().flowDowngrade).toBe(false);
+    h.gate.setPolicy({ flowDowngrade: true }, code());
+    expect(h.store.policy().flowDowngrade).toBe(true);
+    h.gate.setPolicy({ flowDowngrade: false }, undefined);
+    expect(h.store.policy().flowDowngrade).toBe(false);
+  });
+
   it("reopening replaces the previous window of the same plugin", () => {
     const a = openFor("T1");
     h.next();

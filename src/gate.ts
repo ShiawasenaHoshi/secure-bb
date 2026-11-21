@@ -395,6 +395,11 @@ export class Gate {
         } catch {
           result = await run(dir, { pluginId }); // one retry
         }
+        // The clock stopped the flow analysis: the result is not finished. It is not kept, and the version is held («проверка не успела») until a later check finishes.
+        if (result.flowsTimedOut) {
+          this.store.log("check.error", pluginId, logHash, { message: "проверка не успела: анализ потока данных остановлен по времени", key });
+          return null;
+        }
         if (this.d.verifyDeps) result = await this.d.verifyDeps(result);
         // What the gate ran now is of the current analysis (a result of a stand-in without the stamp too).
         result = { ...result, v: result.v ?? CHECKS_VERSION };
@@ -1139,7 +1144,8 @@ export class Gate {
       next.cfgWindowMin > cur.cfgWindowMin ||
       next.cfgCapMin > cur.cfgCapMin ||
       (next.cfgMode === "sliding" && cur.cfgMode === "fixed") ||
-      (next.autoSafe && !cur.autoSafe);
+      (next.autoSafe && !cur.autoSafe) ||
+      (next.flowDowngrade && !cur.flowDowngrade);
     if (widens) {
       if (code === undefined) throw new GateError("invalid_code", "widening the policy needs a code");
       this.touch("policy", code);

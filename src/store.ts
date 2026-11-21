@@ -275,8 +275,13 @@ export interface Policy {
    * "clean checks, no capabilities" is not a reason to skip the touch. Off by default; turned on only with a code.
    */
   autoSafe: boolean;
+  /**
+   * `flow.downgrade`: a card may be less red because the checks followed what a plugin reads and found no way out. Off by default: the analysis is not yet
+   * proven complete, so «никуда не отправляет» is told but does not lower the level. Turning it on loosens the protection: only with a code or a touch.
+   */
+  flowDowngrade: boolean;
 }
-export const DEFAULT_POLICY: Policy = { windowMin: 30, capMin: 240, mode: "sliding", scope: "tree", cfgWindowMin: 10, cfgCapMin: 240, cfgMode: "sliding", autoSafe: false };
+export const DEFAULT_POLICY: Policy = { windowMin: 30, capMin: 240, mode: "sliding", scope: "tree", cfgWindowMin: 10, cfgCapMin: 240, cfgMode: "sliding", autoSafe: false, flowDowngrade: false };
 
 export interface TotpRow {
   secret: string;
@@ -540,6 +545,7 @@ export class Store implements RegistryCache {
       cfgCapMin: num("cfg_cap_min", DEFAULT_POLICY.cfgCapMin),
       cfgMode: map.get("cfg_mode") === "fixed" ? "fixed" : "sliding",
       autoSafe: map.get("auto_safe") === "1",
+      flowDowngrade: map.get("flow_downgrade") === "1",
     };
   }
   setPolicy(patch: Partial<Policy>): void {
@@ -552,6 +558,7 @@ export class Store implements RegistryCache {
     if (patch.cfgCapMin !== undefined) put.run("cfg_cap_min", String(patch.cfgCapMin));
     if (patch.cfgMode !== undefined) put.run("cfg_mode", patch.cfgMode);
     if (patch.autoSafe !== undefined) put.run("auto_safe", patch.autoSafe ? "1" : "0");
+    if (patch.flowDowngrade !== undefined) put.run("flow_downgrade", patch.flowDowngrade ? "1" : "0");
   }
   getMeta(key: string): string | null {
     const r = this.db.prepare(`SELECT value FROM policy WHERE key = ?`).get(`meta.${key}`) as { value: string } | undefined;

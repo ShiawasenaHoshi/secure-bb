@@ -35,7 +35,7 @@ import {
 } from "./src/ux";
 import { isMismatch, riskHeadline, approveVerb, enabledWhat, agentConfigNote, scopeText, makeStub, stableOrder, layoutItems, friendlySource, WIZARD_SOURCES_TEXT, secondFactorText, AWAY_HIDE_LABEL, type Stub } from "./src/ux";
 import { checksSummary, countsLine, DEFER_STUB_RESTORE, DELETE_CONFIRM_BUTTONS, dropUnstamped, hasNoGuardRecord, makeDeferStub, NO_RECORD_FIX, NO_RECORD_HEADLINE, NO_RECORD_LINE, pageCounts, restoreNote, significantFindings, stampMark, withoutMark } from "./src/ux";
-import { capabilityPhrase } from "./src/ux";
+import { attachFlow, capabilityPhrase } from "./src/ux";
 import { createDrafts } from "./src/drafts";
 import { emptySnapshot, pressTracker, restoreView, snapshotView, toastPosition, type Box, type ViewSnapshot } from "./src/stable-view";
 import { isFoldOpen, openFold, toggleFold } from "./src/fold";
@@ -1082,7 +1082,7 @@ function ChecksView({ id, result }: { id: string; result: CheckResult | undefine
       ) : (
         <ul className="list-disc pl-5">
           {result.capabilities.map((c) => (
-            <li key={c.kind}>{capabilityPhrase({ kind: c.kind, detail: c.detail })}</li>
+            <li key={c.kind}>{capabilityPhrase(attachFlow(result, { kind: c.kind, detail: c.detail }))}</li>
           ))}
         </ul>
       )}
@@ -1096,6 +1096,12 @@ function ChecksView({ id, result }: { id: string; result: CheckResult | undefine
           ))}
           {result.capabilities.map((c) => (
             <li key={`cap-${c.kind}`} className="break-all"><span className="font-mono">{c.kind}</span>{c.detail.length ? `: ${c.detail.join(", ")}` : ""}</li>
+          ))}
+          {(result.flows ?? []).map((f) => (
+            <li key={`flow-${f.source}`} className="break-all"><span className="font-mono">flow {f.source}</span>{f.detail.length ? ` (${f.detail.join(", ")})` : ""}: {f.verdict}{f.sinks.length ? ` → ${f.sinks.map((k) => `${k.kind}${k.target ? `:${k.target}` : ""} ${k.file}:${k.line}`).join(", ")}` : ""}{f.why ? ` — ${f.why}` : ""}</li>
+          ))}
+          {(result.purposes ?? []).map((p, i) => (
+            <li key={`purpose-${i}`} className="break-all"><span className="font-mono">purpose</span> {p.on.join("/")}: {p.text} ({p.pair})</li>
           ))}
         </ul>
       </Fold>
@@ -1353,12 +1359,14 @@ function PolicyCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof
   const [cfgCapMin, setCfgCapMin] = useState(String(p.cfgCapMin));
   const [cfgMode, setCfgMode] = useState<"sliding" | "fixed">(p.cfgMode);
   const [autoSafe, setAutoSafe] = useState(p.autoSafe);
+  const [flowDowngrade, setFlowDowngrade] = useState(p.flowDowngrade);
   const [code, setCode] = useState("");
   const act = useCodeAction(refetch);
   const pk = usePasskey(ov);
   const [touching, setTouching] = useState<string | null>(null);
   useEffect(() => {
     setAutoSafe(p.autoSafe);
+    setFlowDowngrade(p.flowDowngrade);
     setWindowMin(String(p.windowMin));
     setCapMin(String(p.capMin));
     setMode(p.mode);
@@ -1366,7 +1374,7 @@ function PolicyCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof
     setCfgWindowMin(String(p.cfgWindowMin));
     setCfgCapMin(String(p.cfgCapMin));
     setCfgMode(p.cfgMode);
-  }, [p.windowMin, p.capMin, p.mode, p.scope, p.cfgWindowMin, p.cfgCapMin, p.cfgMode, p.autoSafe]);
+  }, [p.windowMin, p.capMin, p.mode, p.scope, p.cfgWindowMin, p.cfgCapMin, p.cfgMode, p.autoSafe, p.flowDowngrade]);
   return (
     <div className={card}>
       <h3 className="font-semibold">Окна доверия: настройки</h3>
@@ -1403,6 +1411,11 @@ function PolicyCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof
           </select>
         </label>
       </div>
+      <label className="mt-3 flex items-start gap-2">
+        <input type="checkbox" className="mt-1" checked={flowDowngrade} onChange={(e) => setFlowDowngrade(e.target.checked)} />
+        <span>Снижать уровень карточки, если проверки не нашли, куда уходит прочитанное (<span className="font-mono">flow.downgrade</span>)</span>
+      </label>
+      <p className={`mt-1 ${muted}`}>Выключено: «по коду никуда не отправляет» говорится, но карточка плагина с сетью остаётся красной, как раньше. Включение ослабляет защиту — с кодом или касанием.</p>
       {ov.guard ? (
         <p className={`mt-3 ${muted}`}>Размер, потолок и режим окна хранит сторож (расширять — с кодом, он проверит его сам). Окно доверия нужно для плагинов не из «моих источников». Версия плагина из «моих источников» проходит и без окна, пока не просит новых прав; новое право и всё остальное ждёт вашего касания.</p>
       ) : (
@@ -1423,7 +1436,7 @@ function PolicyCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof
           onClick={() =>
             void act.run(async () => {
               // Guard mode has no "safe class passes": autoSafe is not sent there (bb rejects undefined fields in an RPC input).
-              const change = buildPolicyChange({ autoSafe: ov.guard ? undefined : autoSafe, windowMin, capMin, mode, scope, cfgWindowMin, cfgCapMin, cfgMode });
+              const change = buildPolicyChange({ autoSafe: ov.guard ? undefined : autoSafe, windowMin, capMin, mode, scope, cfgWindowMin, cfgCapMin, cfgMode, flowDowngrade });
               // With a key and no code typed: the touch (if the change widens anything; a narrowing needs none).
               const t = pk.has && code.length !== 6 ? await touchFor(rpc, buildPolicyTouchQuery(change), (d) => setTouching(`Подтвердите касанием. Сторож: «${d}»`)) : null;
               await rpc.call("policy.set", buildPolicySetInput(change, t ? { passkey: t.passkey } : code.length === 6 ? { code } : {}) as never);
@@ -2712,7 +2725,7 @@ function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onKeep, onTrustPen
     proof.run({ kind: "approve", queueId: q.id, acknowledgeBlock }, (p) => rpc.call("queue.approve", { id: q.id, ...p, acknowledgeBlock } as never), { routine: true, dangerous: acknowledgeBlock });
   // A version the guard has no record of (it loaded without the guard's check): nothing here can approve it, and a green «можно включить» would be a lie.
   const noRecord = hasNoGuardRecord(q);
-  const risk = noRecord ? { level: "caution" as const, text: NO_RECORD_HEADLINE } : riskHeadline(caps, (found?.findings ?? []).filter((f) => f.severity === "review").map((f) => f.rule));
+  const risk = noRecord ? { level: "caution" as const, text: NO_RECORD_HEADLINE } : riskHeadline(caps, (found?.findings ?? []).filter((f) => f.severity === "review").map((f) => f.rule), { downgrade: ov.policy.flowDowngrade });
   const allowedWhat = enabledWhat(q.pluginId, q.version);
   const verb = approveVerb(risk);
   const configNote = agentConfigNote(found?.findings ?? []);

