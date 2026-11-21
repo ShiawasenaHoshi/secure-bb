@@ -96,4 +96,6 @@ export interface CheckResult {
   /** Stage 2.3. Absent in results stored by earlier versions. */
   dependencies?: Dependency[];
   dependencyStats?: DependencyStats;
+  /** Literal paths the plugin hands to file-system calls (a few). Only for the person to read; no decision uses them. */
+  fsPaths?: string[];
 }

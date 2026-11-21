@@ -216,7 +216,7 @@ describe("4. the code and the session", () => {
   });
   it("«Простой»: one line, details folded; no «токен» and no «хеш» anywhere", () => {
     const s = sessionText("simple", true);
-    expect(s.line).toBe("Открыть на 15 минут, чтобы не вводить код каждый раз");
+    expect(s.line).toBe("Открыть на 15 минут или на час, чтобы не вводить код каждый раз");
     expect(s.line).toBe(SESSION_LINE);
     expect(s.foldDetails).toBe(true);
     for (const mode of ["simple", "detailed", "strict", null] as const)

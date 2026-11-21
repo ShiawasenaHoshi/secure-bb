@@ -976,17 +976,17 @@ export default async function plugin(bb: BbPluginApi) {
       changed();
       return { ok: true as const, sources };
     }),
-    "session.open": wrap(async ({ code, passkey }) => {
+    "session.open": wrap(async ({ code, passkey, hour }) => {
       if (guardLink) {
         // The guard issues it for a fresh touch (a code, or a signature bound to "open a session") and keeps only the hash of the token.
         const proof = proofOf(code, passkey);
         if (proof === undefined) throw new GateError("invalid_code", "a code or a touch is needed: the guard checks it");
-        const opened = await gate.openGuardSession(proof);
+        const opened = await gate.openGuardSession(proof, hour === true);
         changed();
         return opened;
       }
       if (code === undefined) throw new GateError("invalid_code", "a code is needed");
-      const opened = await gate.openSession(code);
+      const opened = await gate.openSession(code, hour === true);
       changed();
       return opened;
     }),
@@ -1100,7 +1100,7 @@ export default async function plugin(bb: BbPluginApi) {
           return out({ op: "approve-trust", requestId: (await guardEntry(q.queueId)).id });
         }
         case "session.open":
-          return out({ op: "session-open" });
+          return out(q.hour === true ? { op: "session-open", hour: true } : { op: "session-open" });
         case "batch.approve": {
           if (q.batchId === undefined || q.setHash === undefined) throw new GateError("invalid", "batchId and setHash are needed");
           return out({ op: "batch-approve", batchId: q.batchId, setHash: q.setHash });

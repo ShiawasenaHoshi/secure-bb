@@ -26,7 +26,7 @@ import type { AgentDrift, PasskeyAssertion } from "./src/guardlink";
 import type { QueueUx } from "./src/uxview";
 import type { TrustMode } from "./src/guardlink";
 import {
-  AWAY_KEY, DEFERRED_KEY, glossSegments, skillsSummary, doneMessage, cardFoldId, cardKey, sessionBlockText, KEPT_KEY, MODE_DESCRIPTIONS, MODE_NAMES, SAVED_NARROWING, TOUCH_SLOW_MS, WIZARD_KEY,
+  AWAY_KEY, DEFERRED_KEY, glossSegments, skillsSummary, doneMessage, approvedNote, uniqueSentences, humanError, approvedByText, canRestore, rejectedAtOf, rejectedByText, clockText, firstButtonAfter, sessionClosedText, sessionEndReason, slideIdle, type SessionCloseReason, capsWithPaths, redWhere, cardFoldId, cardKey, sessionBlockText, KEPT_KEY, MODE_DESCRIPTIONS, MODE_NAMES, SAVED_NARROWING, TOUCH_SLOW_MS, WIZARD_KEY,
   aaguidName, approvalWhy, awayAlarms, awayInfoEvents, awaySince, capabilitySegments, cardColor, deferKey, detailLevel, groupAway, isBlockedEntry, isPasswordManager, pageStatus,
   MISMATCH_HINT, bypassAllowed, mismatchText, parseDeferred, quarantineCount, redText, touchWithHint, wizardNeeded, yellowText, GUARD_DOWN_TEXT,
   actionLabel, emphasize, agentAcceptProblem, agentsSectionTab, awaySeenMark, criticalAcceptTitle, manualRollback, criticalMeanings, decisionOf, deleteConfirmText, deletedNote,
@@ -34,6 +34,7 @@ import {
   toggleId, trustButton, windowAvailability,
 } from "./src/ux";
 import { isMismatch } from "./src/ux";
+import { isFoldOpen, openFold, toggleFold } from "./src/fold";
 import type { AwayEvent, CapLike, HeldNow, ProblemRef, TabId } from "./src/ux";
 
 // ---------------------------------------------------------------- helpers --
@@ -80,7 +81,6 @@ function useOverview() {
 
 // Open or closed folds and ticked boxes live OUTSIDE the components, keyed by the element's id: a refresh, or even a list that is built again,
 // leaves them as the person left them.
-const foldState: { open: Record<string, boolean> } = { open: {} };
 const stickyValues = new Map<string, unknown>();
 function useSticky<T>(key: string, initial: T): [T, (v: T | ((cur: T) => T)) => void] {
   const [v, setV] = useState<T>(() => (stickyValues.has(key) ? (stickyValues.get(key) as T) : initial));
@@ -101,14 +101,14 @@ function Fold({ id, summary, children, defaultOpen = false, className, summaryCl
   // toggle plus a `toggle` event that came later could lose a click against a redraw (an overview arriving between the click and the event), which looked like
   // «нажимаю, ничего не открывается».
   const [, redraw] = useReducer((n: number) => n + 1, 0);
-  const open = foldState.open[id] ?? defaultOpen;
+  const open = isFoldOpen(id, defaultOpen);
   return (
     <details className={className} open={open}>
       <summary
         className={summaryClassName ?? "cursor-pointer"}
         onClick={(e) => {
           e.preventDefault();
-          foldState.open = setFold(foldState.open, id, !open);
+          toggleFold(id, defaultOpen);
           redraw();
         }}
       >
@@ -147,6 +147,7 @@ function Section({ title, children, id }: { title: string; children: ReactNode; 
 
 // «Готово: …»: after a card is gone (deleted, allowed, accepted) a short message stays where the cards are for a few seconds, so that a press is seen to have worked.
 const DONE_MS = 3000;
+const LOCK_MS = 8000;
 const DoneContext = createContext<{ notes: Array<{ id: number; text: string }>; announce: (what: string) => void }>({ notes: [], announce: () => undefined });
 function DoneNotes() {
   const { notes } = useContext(DoneContext);
@@ -165,7 +166,11 @@ function useCodeAction(refetch: () => void) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ok, setOk] = useState<string | null>(null);
+  // A decision that made the card go (`done` given): its buttons stay dead until the card is gone — or, if it is not gone, for a few seconds.
+  const [locked, setLocked] = useState(false);
   const { announce } = useContext(DoneContext);
+  const alive = useRef(true);
+  useEffect(() => () => void (alive.current = false), []);
   const run = async (fn: () => Promise<unknown>, done?: string) => {
     setBusy(true);
     setError(null);
@@ -173,17 +178,28 @@ function useCodeAction(refetch: () => void) {
     try {
       const res = (await fn()) as { note?: string } | undefined;
       if (res?.note) setOk(res.note);
-      if (done) announce(done);
+      if (done) {
+        announce(done);
+        setLocked(true);
+        window.setTimeout(() => { if (alive.current) setLocked(false); }, LOCK_MS);
+      }
       refetch();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      // The server's words are English and have inner names in them: the person reads a Russian sentence; the original goes to the console for whoever looks.
+      const raw = e instanceof Error ? e.message : String(e);
+      console.error("[secure-bb]", raw);
+      setError(humanError(raw));
     } finally {
       setBusy(false);
     }
   };
-  return { busy, error, ok, run };
+  return { busy: busy || locked, error, ok, run };
 }
 
+/** Enter in a code field presses the action that stands next to it: the first button after the field that is not disabled (the code is checked by the server anyway). */
+function nextButton(field: HTMLElement): HTMLButtonElement | null {
+  return firstButtonAfter(field);
+}
 function CodeField({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   return (
     <input
@@ -195,6 +211,11 @@ function CodeField({ value, onChange }: { value: string; onChange: (v: string) =
       aria-label="Код из приложения-аутентификатора"
       value={value}
       onChange={(e) => onChange(e.target.value.replace(/\D/g, "").slice(0, 6))}
+      onKeyDown={(e) => {
+        if (e.key !== "Enter") return;
+        e.preventDefault();
+        nextButton(e.currentTarget)?.click();
+      }}
     />
   );
 }
@@ -284,14 +305,20 @@ function RoutineCode({ value, onChange, dangerous }: { value: string; onChange: 
   return <CodeField value={value} onChange={onChange} />;
 }
 
-function useApprovalSession(rpc: Rpc, refetch: () => void): { approval: Approval; open: (proof: { code?: string; passkey?: PasskeyAssertion }) => Promise<void>; lock: () => Promise<void> } {
+function useApprovalSession(rpc: Rpc, refetch: () => void): { approval: Approval; open: (proof: { code?: string; passkey?: PasskeyAssertion }, hour?: boolean) => Promise<void>; lock: () => Promise<void>; closed: SessionCloseReason | null } {
   const [session, setSession] = useState<SessionLocal | null>(null);
+  const [closed, setClosed] = useState<SessionCloseReason | null>(null);
   const ref = useRef<SessionLocal | null>(null);
   ref.current = session;
   const now = useNow();
+  /** The session ends: the page forgets the token AND says so (a session that goes quietly looks like «my click did nothing»). */
+  const end = (reason: SessionCloseReason) => {
+    setSession(null);
+    setClosed(reason);
+  };
   // Time is up for this page: forget the token (the server stops accepting it at about the same moment).
   useEffect(() => {
-    if (session && now >= Math.min(session.idleUntil, session.hardUntil)) setSession(null);
+    if (session && now >= Math.min(session.idleUntil, session.hardUntil)) end(sessionEndReason(session, now));
   }, [now, session]);
   // Leaving the page locks the session on the server too (best effort; the token is gone with the page anyway).
   useEffect(() => {
@@ -313,31 +340,32 @@ function useApprovalSession(rpc: Rpc, refetch: () => void): { approval: Approval
       const proof: Proof = useSession ? { session: ref.current!.token } : { code };
       try {
         const result = await fn(proof);
-        if (useSession) setSession((cur) => (cur ? { ...cur, idleUntil: started + 15 * 60_000 - MARGIN_MS } : cur));
+        if (useSession) setSession((cur) => (cur ? { ...cur, idleUntil: slideIdle(cur, started, 15 * 60_000, MARGIN_MS) } : cur));
         return result;
       } catch (e) {
         // The server no longer knows this token: forget it here too, and say why.
-        if (useSession && e instanceof Error && /expired session|blocked|too many/.test(e.message)) setSession(null);
+        if (useSession && e instanceof Error && /expired session|blocked|too many/.test(e.message)) end("server");
         throw e;
       }
     },
   };
-  const open = async (proof: { code?: string; passkey?: PasskeyAssertion }) => {
+  const open = async (proof: { code?: string; passkey?: PasskeyAssertion }, hour = false) => {
     const started = Date.now();
-    const r = await rpc.call("session.open", proof as never);
+    const r = await rpc.call("session.open", { ...proof, ...(hour ? { hour: true } : {}) } as never);
+    setClosed(null);
     setSession({ token: r.token, idleUntil: started + r.idleMs - MARGIN_MS, hardUntil: started + r.capMs - MARGIN_MS });
     refetch();
   };
   const lock = async () => {
-    setSession(null);
+    end("locked");
     await rpc.call("session.close");
     refetch();
   };
-  return { approval, open, lock };
+  return { approval, open, lock, closed };
 }
 
 /** The strip at the top: open a session with one touch (a code, or a key at the guard), or see how long it lasts and lock it. */
-function SessionBar({ ov, rpc, session, open, lock }: { ov: Overview; rpc: Rpc; session: SessionLocal | null; open: (proof: { code?: string; passkey?: PasskeyAssertion }) => Promise<void>; lock: () => Promise<void> }) {
+function SessionBar({ ov, rpc, session, open, lock, closed }: { ov: Overview; rpc: Rpc; session: SessionLocal | null; open: (proof: { code?: string; passkey?: PasskeyAssertion }, hour?: boolean) => Promise<void>; lock: () => Promise<void>; closed: SessionCloseReason | null }) {
   const now = useNow();
   const proof = useProof(ov, rpc);
   const act = useCodeAction(() => undefined);
@@ -347,7 +375,7 @@ function SessionBar({ ov, rpc, session, open, lock }: { ov: Overview; rpc: Rpc; 
     const ceiling = Math.max(0, Math.ceil((session.hardUntil - now) / 60_000));
     return (
       <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted px-3 py-2 text-sm" role="status">
-        <span className="min-w-0 flex-1">Сессия открыта, осталось {left} мин (скользящие 15 мин от каждого действия; потолок — через {ceiling} мин). Опасное всё равно требует свежего {ov.guard ? "касания" : "кода"}.</span>
+        <span className="min-w-0 flex-1">Сессия открыта, осталось {left} мин (потолок — через {ceiling} мин; 15-минутная продлевается от каждого действия). Опасное всё равно требует свежего {ov.guard ? "касания" : "кода"}.</span>
         <button className={btnPrimary} onClick={() => void act.run(() => lock())}>Заблокировать</button>
       </div>
     );
@@ -358,6 +386,7 @@ function SessionBar({ ov, rpc, session, open, lock }: { ov: Overview; rpc: Rpc; 
   return (
     <div className={card}>
       <h3 className="font-semibold">Сессия подтверждения</h3>
+      {closed ? <p className="mt-1 rounded-md border border-yellow-500/60 bg-yellow-500/10 px-2 py-1" role="status" data-secure-bb-session-closed>{sessionClosedText(closed)}</p> : null}
       <p className={muted}>{st.line}</p>
       {st.foldDetails ? (
         <Fold id="session-details" summary="Подробнее" summaryClassName={`cursor-pointer text-xs ${muted}`}><p className={`mt-1 text-xs ${muted}`}>{st.details}</p></Fold>
@@ -370,7 +399,10 @@ function SessionBar({ ov, rpc, session, open, lock }: { ov: Overview; rpc: Rpc; 
       <div className="mt-2 flex flex-wrap items-center gap-2">
         <ProofField proof={proof} />
         <button className={btn} disabled={act.busy || !proof.ready() || blockers.length > 0 || blocked} onClick={() => void act.run(async () => { await proof.run({ kind: "session.open" }, (p) => open(p as { code?: string; passkey?: PasskeyAssertion })); })}>
-          Открыть сессию
+          Открыть на 15 минут
+        </button>
+        <button className={btn} disabled={act.busy || !proof.ready() || blockers.length > 0 || blocked} title="Один час подряд, без продления. Дольше потолка политики сессия не живёт." onClick={() => void act.run(async () => { await proof.run({ kind: "session.open", hour: true }, (p) => open(p as { code?: string; passkey?: PasskeyAssertion }, true)); })}>
+          Открыть на 1 час
         </button>
       </div>
       <ProofNotes proof={proof} />
@@ -471,8 +503,7 @@ function ScanResultView({ scan, other }: { scan: ScanView | undefined; other?: s
       {scan.flags.length > 0 ? <ul className="list-disc pl-5 text-red-600">{scan.flags.map((f, i) => <li key={i}>{f}</li>)}</ul> : null}
       {scan.models.some((m) => m.status === "unavailable") ? <p className={muted}>Не отвечала: {scan.models.filter((m) => m.status === "unavailable").map((m) => `${m.label} (${m.detail})`).join("; ")}</p> : null}
       {scan.models.some((m) => m.report) ? (
-        <details className="mt-1">
-          <summary className="cursor-pointer">Что нашли модели</summary>
+        <Fold id={`scan-${scan.id}-models`} className="mt-1" summary="Что нашли модели">
           {scan.models.map((m) => (
             <div key={m.model} className="mt-1">
               <h4 className="font-medium">{m.label} — {MODEL_STATUS[m.status] ?? m.status}</h4>
@@ -487,7 +518,7 @@ function ScanResultView({ scan, other }: { scan: ScanView | undefined; other?: s
             </div>
           ))}
           <p className={muted}>Отправлено файлов: {scan.files}, {scan.chars} знаков (без комментариев). Модели одобрить версию не могут.</p>
-        </details>
+        </Fold>
       ) : null}
     </div>
   );
@@ -564,8 +595,7 @@ function PublishCard({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; refetch: ()
         <button className={btn} disabled={act.busy || (url === cur.repoUrl && branch === cur.branch)} onClick={() => set({ repoUrl: url, branch })}>Сохранить адрес и ветку</button>
       </div>
       {ov.publish.recent.length > 0 ? (
-        <details className="mt-1">
-          <summary className="cursor-pointer">Последние публикации ({ov.publish.recent.length})</summary>
+        <Fold id="publish-recent" className="mt-1" summary={`Последние публикации (${ov.publish.recent.length})`}>
           <ul className="mt-1 list-disc pl-5">
             {ov.publish.recent.slice(0, 15).map((r) => (
               <li key={r.id} className={r.status === "failed" ? "text-destructive" : undefined}>
@@ -573,7 +603,7 @@ function PublishCard({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; refetch: ()
               </li>
             ))}
           </ul>
-        </details>
+        </Fold>
       ) : null}
       <Msg error={act.error} ok={act.ok} />
     </div>
@@ -634,10 +664,9 @@ function AiCard({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; refetch: () => v
         {ai.availability.cursor ? ` · cursor-agent: ${ai.availability.cursor.found ? "" : "недоступен — "}${ai.availability.cursor.detail}` : ""}
       </p>
       {ai.recent.length > 0 ? (
-        <details className="mt-1">
-          <summary className="cursor-pointer">Последние сканы ({ai.recent.length})</summary>
+        <Fold id="ai-recent" className="mt-1" summary={`Последние сканы (${ai.recent.length})`}>
           {ai.recent.map((r) => <ScanResultView key={r.id} scan={r} other={r.trigger} />)}
-        </details>
+        </Fold>
       ) : null}
       <Msg error={act.error} ok={act.ok} />
     </div>
@@ -667,8 +696,7 @@ function QuestionEditor({ q, rpc, refetch }: { q: QuestionView; rpc: Rpc; refetc
   useEffect(() => setThreshold(String(q.threshold ?? "")), [q.threshold]);
   const save = (patch: Record<string, unknown>) => void act.run(async () => { await rpc.call("sentinel.settings", defined({ ...patch, code }) as never); setCode(""); return { note: "Сохранено." }; });
   return (
-    <details className="rounded-md border border-border p-2">
-      <summary className="cursor-pointer">{q.label}{q.threshold !== null ? ` · порог ${q.threshold}` : ""}{q.edited ? " · изменён" : ""}</summary>
+    <Fold id={`sentinel-q-${q.id}`} className="rounded-md border border-border p-2" summary={`${q.label}${q.threshold !== null ? ` · порог ${q.threshold}` : ""}${q.edited ? " · изменён" : ""}`}>
       <div className="mt-2 space-y-2">
         <textarea className="w-full rounded-md border border-border bg-background p-2 text-xs" rows={4} value={text} onChange={(e) => setText(e.target.value)} />
         {q.threshold !== null ? (
@@ -684,7 +712,7 @@ function QuestionEditor({ q, rpc, refetch }: { q: QuestionView; rpc: Rpc; refetc
         </div>
         <Msg error={act.error} ok={act.ok} />
       </div>
-    </details>
+    </Fold>
   );
 }
 
@@ -725,10 +753,9 @@ function SentinelSection({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; refetch
         <h3 className="font-semibold">Лента дозора ({v.feed.length})</h3>
         {v.feed.length === 0 ? <p className={muted}>Пока пусто.</p> : <ul className="mt-2 space-y-2">{v.feed.map((r) => <FeedItem key={r.id} row={r} riskThreshold={v.settings.riskThreshold} />)}</ul>}
       </div>
-      <details className={card}>
-        <summary className="cursor-pointer font-semibold">Вопросы и пороги ({v.questions.length})</summary>
+      <Fold id="sentinel-questions" className={card} summaryClassName="cursor-pointer font-semibold" summary={`Вопросы и пороги (${v.questions.length})`}>
         <div className="mt-2 space-y-2">{v.questions.map((q) => <QuestionEditor key={q.id} q={q} rpc={rpc} refetch={refetch} />)}</div>
-      </details>
+      </Fold>
     </div>
   );
 }
@@ -736,13 +763,13 @@ function SentinelSection({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; refetch
 // ------------------------------------------------------------ window bar ---
 
 function windowLine(w: WindowView, remainingSec: number): string {
-  const subs = w.scope === "tree" && w.subthreads > 0 ? ` и ${w.subthreads} сабтредов` : "";
-  const only = w.scope === "thread" ? " (только этот тред)" : "";
-  return `Окно доверия: плагин ${w.pluginId} из треда ${w.threadId}${subs}${only} — ещё ${minutes(remainingSec)}`;
+  const subs = w.scope === "tree" && w.subthreads > 0 ? ` и ${w.subthreads} вложенных чатов` : "";
+  const only = w.scope === "thread" ? " (только этот чат)" : "";
+  return `Временное доверие: плагин ${w.pluginId} из чата ${w.threadId}${subs}${only} — ещё ${minutes(remainingSec)}`;
 }
 
 function cfgWindowLine(w: ConfigWindowView, remainingSec: number): string {
-  return `Окно доверия: ${w.scopeLabels.join(", ")} — ещё ${minutes(remainingSec)}`;
+  return `Временное доверие: ${w.scopeLabels.join(", ")} — ещё ${minutes(remainingSec)}`;
 }
 
 function WindowRows({ windows, cfgWindows, rpc, refetch }: { windows: WindowView[]; cfgWindows: ConfigWindowView[]; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void }) {
@@ -857,8 +884,7 @@ function StageCard({ ov }: { ov: Overview }) {
         </div>
       </div>
       <p className="mt-3"><span className="font-medium">Следующий шаг: </span>{a.nextStep}</p>
-      <details className="mt-3">
-        <summary className="cursor-pointer font-medium">Проверки</summary>
+      <Fold id="stage-checks" className="mt-3" summaryClassName="cursor-pointer font-medium" summary="Проверки">
         <ul className="mt-2 space-y-1.5">
           {a.checks.map((c) => (
             <li key={c.id} className="flex gap-2">
@@ -867,7 +893,7 @@ function StageCard({ ov }: { ov: Overview }) {
             </li>
           ))}
         </ul>
-      </details>
+      </Fold>
     </div>
   );
 }
@@ -967,14 +993,11 @@ function QrSvg({ matrix }: { matrix: boolean[][] }) {
 }
 
 /** What the deterministic checks found in one version (the decision table of spec §5.3 acts on it). */
-function ChecksView({ result }: { result: CheckResult | undefined }) {
+function ChecksView({ id, result }: { id: string; result: CheckResult | undefined }) {
   if (!result) return <p className={`mt-2 text-xs ${muted}`}>Проверки ещё выполняются или не запускались для этой версии.</p>;
   const sev = (s: string) => (s === "block" ? "блок" : s === "review" ? "на ревью" : "инфо");
   return (
-    <details className="mt-2" open={result.findings.some((f) => f.severity === "block")}>
-      <summary className="cursor-pointer">
-        Проверки: {result.findings.length === 0 ? "находок нет" : `${result.findings.length} находок`} · возможностей: {result.capabilities.length}
-      </summary>
+    <Fold id={`checks-${id}`} className="mt-2" defaultOpen={result.findings.some((f) => f.severity === "block")} summary={`Проверки: ${result.findings.length === 0 ? "находок нет" : `${result.findings.length} находок`} · возможностей: ${result.capabilities.length}`}>
       {result.findings.length > 0 ? (
         <ul className="mt-1 list-disc pl-5">
           {result.findings.map((f, i) => (
@@ -998,7 +1021,7 @@ function ChecksView({ result }: { result: CheckResult | undefined }) {
         </ul>
       )}
       <DependenciesView result={result} />
-    </details>
+    </Fold>
   );
 }
 
@@ -1084,14 +1107,14 @@ function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; rpc: Re
       </div>
       <p className={`mt-1 break-all ${muted}`}>
         {q.sourceKind}: {q.source}
-        {q.threadId ? ` · из треда ${q.threadId}` : ""}
+        {q.threadId ? ` · из чата ${q.threadId}` : ""}
         {q.kind === "afterfact" ? " · выключен после загрузки (его код уже выполнялся)" : ""}
         {q.kind === "proposal" && !q.contentHash ? " · предложен агентом, окно было закрыто" : ""}
       </p>
       {q.contentHash ? <p className={`break-all font-mono text-xs ${muted}`}>{q.contentHash}</p> : null}
       {q.reason ? <p className={`mt-1 ${blocked || unsafeDir ? "font-semibold text-red-700 dark:text-red-400" : muted}`}>{q.reason}</p> : null}
       {unsafeDir && held ? <p className="mt-1 text-red-600">Одобрить нельзя: пока в каталоге или выше может писать кто-то кроме пользователя сервера, его содержимое может измениться после проверки. Исправьте права (владелец — пользователь сервера, без записи для группы и остальных) или предложите плагин через <span className="font-mono">bb secure-bb propose</span>: снимок гейт хранит у себя.</p> : null}
-      <ChecksView result={ov.queueChecks[q.id] ?? (q.contentHash ? ov.checks[q.contentHash] : undefined)} />
+      <ChecksView id={cardFoldId(q, "checks-q")} result={ov.queueChecks[q.id] ?? (q.contentHash ? ov.checks[q.contentHash] : undefined)} />
       <ScanResultView scan={ov.ai.queueScans[q.id]} />
       {held ? (
         <div className="mt-3 space-y-3">
@@ -1104,8 +1127,7 @@ function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; rpc: Re
                 <span className={muted}>Без кода: отклонение только ужесточает.</span>
                 <ScanButton ov={ov} target={{ queueId: q.id }} rpc={rpc} refetch={refetch} />
               </div>
-              {isMismatch(q.reason) ? <p className={muted}>{MISMATCH_HINT}</p> : <details className="rounded-md border border-red-300 p-2 dark:border-red-900">
-                <summary className="cursor-pointer text-red-700 dark:text-red-400">Всё равно одобрить (опасно)…</summary>
+              {isMismatch(q.reason) ? <p className={muted}>{MISMATCH_HINT}</p> : <Fold id={cardFoldId(q, "force")} className="rounded-md border border-red-300 p-2 dark:border-red-900" summaryClassName="cursor-pointer text-red-700 dark:text-red-400" summary="Всё равно одобрить (опасно)…">
                 <div className="mt-2 flex flex-wrap items-center gap-2">
                   {pk.keyOnly ? null : <RoutineCode value={code} onChange={setCode} dangerous />}
                   <label className="flex items-center gap-1 text-xs">
@@ -1122,7 +1144,7 @@ function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; rpc: Re
                     </button>
                   )}
                 </div>
-              </details>}
+              </Fold>}
             </>
           ) : (
             <div className="flex flex-wrap items-center gap-2">
@@ -1201,13 +1223,13 @@ function PluginRow({ p, ov, rpc, refetch, registered, checks }: { p: PluginView;
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h3 className="font-semibold">{p.id} <span className={muted}>{p.version} · {p.status}</span></h3>
         <span className={muted}>
-          {p.pin ? `${p.frozenPin ? "закреплена при заморозке" : "пин"}: ${p.pin.version} (${approvalWhy(p.pin)}, ${when(p.pin.approvedAt)})` : p.unreviewedBaseline ? "стоял до secure-bb, не проверялся" : "не одобрен"}
+          {p.pin ? `${p.frozenPin ? "закреплена при заморозке" : "пин"}: ${p.pin.version} (${approvedByText(p.pin, now)})` : p.unreviewedBaseline ? "стоял до secure-bb, не проверялся" : "не одобрен"}
         </span>
       </div>
       {launchProblem(p) && p.pin ? <p className="mt-1 font-semibold text-red-700 dark:text-red-400" role="alert">{launchProblem(p)}</p> : null}
       <p className={muted}>{p.window ? windowLine(p.window, remaining) : "окно закрыто"}</p>
       {!p.window ? <PluginWindowOpen p={p} ov={ov} rpc={rpc} refetch={refetch} /> : null}
-      {p.pin ? <ChecksView result={checks[p.pin.contentHash]} /> : null}
+      {p.pin ? <ChecksView id={`plugin-${p.id}`} result={checks[p.pin.contentHash]} /> : null}
       <PublicationLine ov={ov} pluginId={p.id} version={p.pin?.version ?? null} rpc={rpc} refetch={refetch} />
       <ScanResultView scan={ov.ai.pluginScans[p.id]} other={ov.ai.pluginScans[p.id] ? (ov.ai.pluginScans[p.id]!.current ? "это закреплённая версия" : "не закреплённая версия") : undefined} />
       {ov.ai.settings.enabled ? (
@@ -1221,14 +1243,13 @@ function PluginRow({ p, ov, rpc, refetch, registered, checks }: { p: PluginView;
         </div>
       ) : null}
       {p.history.length > 1 ? (
-        <details className="mt-1">
-          <summary className="cursor-pointer">История ({p.history.length})</summary>
+        <Fold id={`plugin-${p.id}-history`} className="mt-1" summary={`История (${p.history.length})`}>
           <ul className="mt-1 list-disc pl-5">
             {p.history.map((h) => (
-              <li key={h.id}>{h.version} · {approvalWhy(h)} · {when(h.approvedAt)}</li>
+              <li key={h.id}>{h.version} · {approvedByText(h, now)}</li>
             ))}
           </ul>
-        </details>
+        </Fold>
       ) : null}
       {p.pin ? (
         <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -1398,11 +1419,10 @@ function TaintCard({ ov }: { ov: Overview }) {
           ))}
         </ul>
       )}
-      <details className="mt-2">
-        <summary className={`cursor-pointer ${muted}`}>Что не наблюдается (честно)</summary>
+      <Fold id="taint-not-observed" className="mt-2" summaryClassName={`cursor-pointer ${muted}`} summary="Что не наблюдается (честно)">
         <ul className="mt-1 list-disc pl-5 text-xs">{NOT_OBSERVED.map((n) => <li key={n}>{n}</li>)}</ul>
         <p className={`mt-1 text-xs ${muted}`}>Источник — история событий треда в API bb. Берутся только события после открытия окна; «проект с .bb-env-setup.sh» считается всегда.</p>
-      </details>
+      </Fold>
     </div>
   );
 }
@@ -1570,10 +1590,9 @@ function WatchSection({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<type
       <h3 className="font-semibold">Расхождения ({open.length})</h3>
       {open.length === 0 ? <div className={`${card} ${muted}`}>Открытых расхождений нет.</div> : open.map((d) => <DriftRow key={d.id} d={d} registered={registered} rpc={rpc} refetch={refetch} />)}
       {settled.length > 0 ? (
-        <details>
-          <summary className={`cursor-pointer ${muted}`}>Лента ({settled.length})</summary>
+        <Fold id="watch-settled" summaryClassName={`cursor-pointer ${muted}`} summary={`Лента (${settled.length})`}>
           <div className="mt-2 space-y-2">{settled.map((d) => <DriftRow key={d.id} d={d} registered={registered} rpc={rpc} refetch={refetch} />)}</div>
-        </details>
+        </Fold>
       ) : null}
 
       {w.failed.length > 0 ? (
@@ -1588,10 +1607,9 @@ function WatchSection({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<type
           <ul className="list-disc pl-5">{w.notApplicable.map((f) => <li key={f.source} className="break-all"><span className="font-mono">{f.source}</span>: {f.reason}</li>)}</ul>
         </div>
       ) : null}
-      <details className={card}>
-        <summary className="cursor-pointer font-medium">Что не наблюдается вообще ({w.blind.length})</summary>
+      <Fold id="watch-blind" className={card} summaryClassName="cursor-pointer font-medium" summary={`Что не наблюдается вообще (${w.blind.length})`}>
         <ul className="mt-2 list-disc pl-5">{w.blind.map((b) => <li key={b.source}>{b.reason}</li>)}</ul>
-      </details>
+      </Fold>
     </div>
   );
 }
@@ -1726,16 +1744,14 @@ function SkillsSection({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typ
       <h3 className="font-semibold">Очередь скиллов ({k.open.length})</h3>
       {k.open.length === 0 ? <div className={`${card} ${muted}`}>Ничего не ждёт.</div> : k.open.map((q) => <SkillRow key={q.id} q={q} registered={registered} rpc={rpc} refetch={refetch} />)}
       {k.recent.length > 0 ? (
-        <details>
-          <summary className={`cursor-pointer ${muted}`}>Недавно рассмотренные ({k.recent.length})</summary>
+        <Fold id="skills-recent" summaryClassName={`cursor-pointer ${muted}`} summary={`Недавно рассмотренные (${k.recent.length})`}>
           <div className="mt-2 space-y-2">{k.recent.map((q) => <SkillRow key={q.id} q={q} registered={registered} rpc={rpc} refetch={refetch} />)}</div>
-        </details>
+        </Fold>
       ) : null}
       <SkillTrusted ov={ov} rpc={rpc} refetch={refetch} />
-      <details className={card}>
-        <summary className="cursor-pointer font-medium">Что не видно в скиллах ({k.blind.length})</summary>
+      <Fold id="skills-blind" className={card} summaryClassName="cursor-pointer font-medium" summary={`Что не видно в скиллах (${k.blind.length})`}>
         <ul className="mt-2 list-disc pl-5">{k.blind.map((b) => <li key={b}>{b}</li>)}</ul>
-      </details>
+      </Fold>
     </div>
   );
 }
@@ -1776,7 +1792,7 @@ function AgentsAlarm({ ov, onShow }: { ov: Overview; onShow: () => void }) {
     <div className="rounded-md border-2 border-destructive bg-destructive/10 p-2 text-destructive" role="alert" data-secure-bb-alarm>
       {alarms.length > 0 ? (
         <>
-          <p className="font-semibold">ТРЕВОГА: сторож не читает файлы агентов ({alarms.length})</p>
+          <p className="font-semibold">ТРЕВОГА: защита не может прочитать файлы агентов ({alarms.length})</p>
           <ul className="mt-1 list-disc pl-5 text-xs">{alarms.slice(0, 5).map((x) => <li key={x.path} className="break-all">{x.path} — {alarmText(x)}</li>)}</ul>
           <p className="mt-1 text-xs">Так выглядит снятый ACL на каталоге агентов (его может снять владелец файлов — агент) или сломанные права. Пока доступа нет, наблюдатель слепой: изменения в этих путях никто не видит.</p>
         </>
@@ -1806,14 +1822,14 @@ function DriftCard({ d, picked, onPick, threads, marked, accept }: { d: AgentDri
         )}
         <span className={critical ? "font-semibold" : muted}>
           {CLASS_LABEL[d.class] ?? d.class} · {CHANGE_LABEL[d.change] ?? d.change}
-          {d.initial ? " · первый эталон" : ""} · {when(d.firstSeen)}
+          {d.initial ? " · первый просмотр" : ""} · {when(d.firstSeen)}
         </span>
       </div>
       <p className={`break-all text-xs ${muted}`}>
         {d.rootKind === "global" ? "домашний каталог агентов" : `рабочий каталог ${d.rootName}`} · {d.path}
-        {threads.length > 0 ? ` · тред${threads.length > 1 ? "ы" : ""}: ${threads.join(", ")}` : ""}
+        {threads.length > 0 ? ` · ${threads.length > 1 ? "чаты" : "чат"}: ${threads.join(", ")}` : ""}
       </p>
-      {marked ? <p className="mt-1 text-xs font-semibold">Тред помечен загрязнённым, окна доверия его дерева закрыты.</p> : null}
+      {marked ? <p className="mt-1 text-xs font-semibold">Чат помечен «под подозрением»: временное доверие в нём и в его вложенных чатах закрыто.</p> : null}
       {d.reasons.length > 0 ? <ul className="mt-1 list-disc pl-5">{criticalMeanings(d.reasons).map((r, i) => <li key={i}><Rich text={r} /></li>)}</ul> : null}
       {d.findings.length > 0 ? (
         <ul className="mt-1 space-y-0.5 text-xs">
@@ -1871,7 +1887,7 @@ function CriticalAccept({ d, ov, rpc, refetch, canCode, pk }: { d: AgentDrift; o
         ) : null}
         <CodeHint ov={ov} />
       </div>
-      <p className={`mt-1 text-xs ${muted}`}>Свежий {pk.has ? "код или касание" : "код"} именно на это изменение: сессия, «выбрать все» и пакет его не принимают.</p>
+      <p className={`mt-1 text-xs ${muted}`}>Нужен свежий {pk.has ? "код или касание" : "код"} именно на это изменение: сессия и «выбрать все» его не принимают.</p>
     </>
   );
   return (
@@ -1879,7 +1895,7 @@ function CriticalAccept({ d, ov, rpc, refetch, canCode, pk }: { d: AgentDrift; o
       <p className="font-semibold text-red-800 dark:text-red-300"><Rich text={title} /></p>
       {d.rejected ? (
         <div className="mt-2 rounded-md border border-yellow-500/70 p-2" data-agent-rejected={d.id}>
-          <p className="font-semibold">Вы отклонили это изменение: в эталон оно не попало. Но в файле оно всё ещё есть, поэтому тревога и пометка «загрязнён» остаются.</p>
+          <p className="font-semibold">Вы отклонили это изменение{d.rejectedAt ? ` (${clockText(d.rejectedAt, Date.now())}, кнопкой «Это не я»)` : ""}: в одобренные настройки оно не попало. Но в самом файле оно всё ещё есть, поэтому тревога и пометка «под подозрением» остаются. Пока файл не исправлен, агент работает с ним как есть.</p>
           <p className="mt-1">{manualRollback(d.path, d.reasons)}</p>
           <Fold id={`drift-${d.id}-late-accept`} className="mt-2" summaryClassName={`cursor-pointer ${muted}`} summary="Передумали и это всё-таки вы? Принять изменение">
             {acceptControls}
@@ -1936,7 +1952,7 @@ function AgentsSection({ ov, rpc, refetch, showDone }: { ov: Overview; rpc: Rpc;
       setCode("");
       setPickedIds([]);
       return r;
-    }, ids.length === 1 ? "принято одно изменение в эталон" : `приняты изменения в эталон: ${ids.length}`);
+    }, ids.length === 1 ? "принято одно изменение" : `приняты изменения: ${ids.length}`);
   const canCode = !pk.keyOnly;
   const buttons = (ids: number[], label: string) =>
     ids.length === 0 ? null : (
@@ -1963,18 +1979,20 @@ function AgentsSection({ ov, rpc, refetch, showDone }: { ov: Overview; rpc: Rpc;
       {showDone ? <DoneNotes /> : null}
       <div className={`${card} space-y-1`}>
         <p>
-          Сторож читает настройки, правила и память агентов и сверяет их с эталоном, который принял человек. Просмотрено файлов: {st.scannedFiles ?? 0}, каталогов-корней: {st.roots ?? 0}
-          {st.lastScanAt ? `, последний просмотр ${when(st.lastScanAt)}` : ""}. В эталоне: {st.baselineFiles ?? 0}.
+          Защита следит за настройками, правилами и памятью агентов и сравнивает их с теми, что вы одобрили. Просмотрено файлов: {st.scannedFiles ?? 0}
+          {st.lastScanAt ? `, последний просмотр ${when(st.lastScanAt)}` : ""}.
         </p>
-        <p className={`text-xs ${muted}`}>
-          Рабочие каталоги тредов сторож находит сам; каталоги проектов в доме владельца в v1 не наблюдаются. Это сигнал, не блок: запуск агента остановить нельзя — критичное изменение закрывает окна доверия и помечает тред загрязнённым.
-        </p>
+        <Fold id="agents-more" summaryClassName={`cursor-pointer text-xs ${muted}`} summary="Подробнее">
+          <p className={`mt-1 text-xs ${muted}`}>
+            Одобренных файлов: {st.baselineFiles ?? 0}; каталогов-корней: {st.roots ?? 0}. Рабочие каталоги чатов защита находит сама; каталоги проектов в домашней папке в v1 не просматриваются. Это сигнал, а не запрет: остановить запуск агента нельзя — критичное изменение закрывает временное доверие и помечает чат «под подозрением».
+          </p>
+        </Fold>
         <div className="flex flex-wrap items-center gap-2">
           <button className={btn} disabled={act.busy} onClick={() => void act.run(async () => { await rpc.call("agents.scan", null); })}>Просмотреть сейчас</button>
           <span className={`text-xs ${muted}`}>не чаще раза в 10 с</span>
         </div>
       </div>
-      {ag.error ? <Msg error={`сторож не ответил на последний запрос: ${ag.error}`} /> : null}
+      {ag.error ? <Msg error={`Защита не ответила на последний запрос: ${humanError(ag.error)}`} /> : null}
       {(st.alarms ?? []).length > 0 ? (
         <div className={cardBlocked} role="alert">
           <p className="font-semibold">Файлы агентов не читаются ({st.alarms!.length})</p>
@@ -1987,12 +2005,12 @@ function AgentsSection({ ov, rpc, refetch, showDone }: { ov: Overview; rpc: Rpc;
       ) : null}
       {firstBaseline ? (
         <div className={`${card} space-y-2 border-yellow-500/70`}>
-          <h3 className="font-semibold">Первый эталон</h3>
+          <h3 className="font-semibold">Первые одобренные настройки</h3>
           <p>Первый просмотр нашёл {pending} файлов. Если всё это — как должно быть, примите их как есть одним касанием; дальше каждое расхождение будет ждать решения.{criticalCount > 0 ? ` Критичных среди них ${criticalCount}: каждое принимается отдельно, ниже, со своим касанием и своим объяснением, что именно вы разрешаете.` : ""}</p>
           {buttons(plain, "Принять всё как есть")}
         </div>
       ) : null}
-      {drifts.length === 0 ? <div className={`${card} ${muted}`}>Расхождений с эталоном нет.</div> : null}
+      {drifts.length === 0 ? <div className={`${card} ${muted}`}>Расхождений с одобренными настройками нет.</div> : null}
       {drifts.map((d) => (
         <DriftCard key={d.id} d={d} picked={chosen.includes(d.id)} onPick={(on) => toggle(d.id, on)} threads={ag.threads[d.root] ?? []} marked={(ag.threads[d.root] ?? []).some((t) => ag.marked[t]?.includes(d.id))} accept={isCriticalDrift(d) ? <CriticalAccept d={d} ov={ov} rpc={rpc} refetch={refetch} canCode={canCode} pk={pk} /> : null} />
       ))}
@@ -2010,16 +2028,15 @@ function AgentsSection({ ov, rpc, refetch, showDone }: { ov: Overview; rpc: Rpc;
       <TouchNote text={touching} />
       <Msg error={act.error} ok={act.ok} reserve />
       {(st.recent ?? []).length > 0 ? (
-        <details>
-          <summary className={`cursor-pointer ${muted}`}>Недавно закрытые ({st.recent!.length})</summary>
+        <Fold id="agents-recent" summaryClassName={`cursor-pointer ${muted}`} summary={`Недавно закрытые (${st.recent!.length})`}>
           <ul className="mt-1 space-y-1 text-xs">
             {st.recent!.map((d) => (
               <li key={d.id} className="break-all">
-                <span className="font-mono">{d.rel}</span> · {CLASS_LABEL[d.class] ?? d.class} · {d.status === "accepted" ? "принято" : d.status === "reverted" ? "файл вернули как был" : "заменено более новым изменением"} · {d.resolvedAt ? when(d.resolvedAt) : ""}
+                <span className="font-mono">{d.rel}</span> · {CLASS_LABEL[d.class] ?? d.class} · {d.status === "accepted" ? "принято вами" : d.status === "reverted" ? "файл вернули как был" : "заменено более новым изменением"}{d.resolvedAt ? ` ${clockText(d.resolvedAt, Date.now())}` : ""}
               </li>
             ))}
           </ul>
-        </details>
+        </Fold>
       ) : null}
     </div>
   );
@@ -2031,16 +2048,16 @@ function GuardAlarm({ ov }: { ov: Overview }) {
   if (!g.connected)
     return (
       <div className="rounded-md border-2 border-destructive bg-destructive/10 p-2 text-destructive" role="alert" data-secure-bb-alarm>
-        <p className="font-semibold">Сторож решений не отвечает</p>
-        <p className="mt-1 text-xs">Ядро держит всё не встроенное: новые плагины не загрузятся, уже загруженные работают. Одобрить сейчас ничего нельзя. Проверьте службу сторожа (<span className="font-mono">sbb-guard status</span> на машине). {g.error}</p>
+        <p className="font-semibold">Защита решений не отвечает</p>
+        <p className="mt-1 text-xs">Ядро держит всё не встроенное: новые плагины не загрузятся, уже загруженные работают. Одобрить сейчас ничего нельзя. Проверьте службу защиты (<span className="font-mono">sbb-guard status</span> на машине). {g.error}</p>
       </div>
     );
   if (g.journal && !g.journal.valid)
     return (
       <div className="rounded-md border-2 border-destructive bg-destructive/10 p-2 text-destructive" role="alert" data-secure-bb-alarm>
-        <p className="font-semibold">ТРЕВОГА: цепочка журнала сторожа нарушена</p>
+        <p className="font-semibold">ТРЕВОГА: журнал защиты повреждён</p>
         <ul className="mt-1 list-disc pl-5 text-xs">{g.journal.problems.slice(0, 5).map((p, i) => <li key={i}>{p.detail}</li>)}</ul>
-        <p className="mt-1 text-xs">Файлы сторожа изменены не им. Всё, что он «одобрил» до этого места, нельзя считать надёжным.</p>
+        <p className="mt-1 text-xs">Файлы защиты изменены не ею. Всё, что она «одобрила» до этого места, нельзя считать надёжным.</p>
       </div>
     );
   return null;
@@ -2205,8 +2222,7 @@ function GuardCard({ ov, rpc, refetch, enrollToken }: { ov: Overview; rpc: Retur
         </div>
         <Msg error={act.error} />
       </div>
-      <details className={card}>
-        <summary className="cursor-pointer font-medium">Последние записи журнала сторожа ({g.recent.length})</summary>
+      <Fold id="guard-journal" className={card} summaryClassName="cursor-pointer font-medium" summary={`Последние записи журнала сторожа (${g.recent.length})`}>
         <ul className="mt-2 space-y-1 font-mono text-xs">
           {g.recent.map((r) => (
             <li key={r.id} className="break-all">
@@ -2214,7 +2230,7 @@ function GuardCard({ ov, rpc, refetch, enrollToken }: { ov: Overview; rpc: Retur
             </li>
           ))}
         </ul>
-      </details>
+      </Fold>
     </div>
   );
 }
@@ -2357,8 +2373,8 @@ function TroubleshootBar({ until }: { until: number }) {
   const mmss = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
   return (
     <div className="rounded-lg border-2 border-red-600 bg-red-600 p-4 text-white" role="alert" data-secure-bb-troubleshoot>
-      <p className="text-lg font-semibold">Режим отладки сторожа: защита снята, осталось {mmss}</p>
-      <p className="text-sm">Сторож пропускает всё и пишет каждое решение в журнал. Он вернётся сам; раньше — командой «sbb-guard troubleshoot off» на этой машине. Не ставьте и не обновляйте ничего лишнего, пока плашка видна.</p>
+      <p className="text-lg font-semibold">Режим отладки: защита снята, осталось {mmss}</p>
+      <p className="text-sm">Защита пропускает всё и пишет каждое решение в журнал. Она вернётся сама; раньше — командой «sbb-guard troubleshoot off» на этой машине. Не ставьте и не обновляйте ничего лишнего, пока плашка видна.</p>
     </div>
   );
 }
@@ -2386,7 +2402,7 @@ function Origin({ ux, q }: { ux: QueueUx | undefined; q: QueueRow }) {
       {chain.map((t, i) => (
         <span key={t.id}>
           {i > 0 ? " → " : ""}
-          <button type="button" className="underline hover:no-underline" onClick={() => nav.toThread(t.id)}>{t.title ?? `тред ${t.id}`}</button>
+          <button type="button" className="underline hover:no-underline" onClick={() => nav.toThread(t.id)}>{t.title ?? `чат ${t.id}`}</button>
         </span>
       ))}
       {chain.length > 0 ? " · " : ""}
@@ -2430,14 +2446,14 @@ function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onKeep, onTrustPen
   const detail = detailLevel(ov.guard?.trust?.mode ?? null);
   const color = cardColor({ reason: q.reason, findings: found?.findings ?? [] });
   const unsafeDir = q.reason?.startsWith("каталог доступен на запись другим") ?? false;
-  const caps = found?.capabilities ?? [];
+  const caps = capsWithPaths(found);
   const red = color === "red";
   const text = isMismatch(q.reason)
     ? mismatchText(q.pluginId, q.version)
     : red
     ? (() => {
         const r = redText((found?.findings ?? []).filter((f) => f.severity === "block").map((f) => f.rule));
-        return { title: `Остановлено: ${r.title}`, line: `Плагин «${q.pluginId}» ${q.version}. ${r.line} Плагин не запущен.` };
+        return { title: `Остановлено: ${r.title}`, line: `Плагин «${q.pluginId}» ${q.version}. ${r.line}${redWhere(caps) ? ` ${redWhere(caps)}` : ""} Плагин не запущен.` };
       })()
     : yellowText({ pluginId: q.pluginId, version: q.version, level: ux?.level ?? "unknown", sourceLabel: ux?.sourceLabel ?? q.source, reason: q.reason, caps });
   const approve = (acknowledgeBlock: boolean) =>
@@ -2465,7 +2481,7 @@ function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onKeep, onTrustPen
         {red ? null : (
           <>
             <ProofField proof={proof} routine />
-            <button className={btnPrimary} disabled={act.busy || blockedApprove} onClick={() => void act.run(() => approve(false), allowedWhat)}>
+            <button className={btnPrimary} disabled={act.busy || blockedApprove} onClick={() => void act.run(async () => { await approve(false); return { note: approvedNote(q.pluginId, q.version) }; }, allowedWhat)}>
               {actionLabel("Разрешить", q.pluginId, q.version)}
             </button>
           </>
@@ -2489,19 +2505,19 @@ function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onKeep, onTrustPen
       </div>
       {red && deferred ? <p className="mt-1"><button className={btn} onClick={() => onDefer(q, false)}>Вернуть в список</button></p> : null}
       {!red ? (
-        <Fold id={cardFoldId(q, "scope")} className="mt-2" summary="Подробнее: срок и охват">
+        <Fold id={cardFoldId(q, "scope")} className="mt-2" summary="Подробнее: на какой срок">
           <div className="mt-2 space-y-2">
             <p className={muted}>«{actionLabel("Разрешить", q.pluginId, q.version)}» действует только на эту версию.</p>
             <div className="flex flex-wrap items-center gap-2">
               {win.available ? (
                 <button className={btn} disabled={act.busy || !proof.ready({ routine: true })} onClick={() => void act.run(async () => { await proof.run({ kind: "window.open", queueId: q.id }, (p) => rpc.call("window.open", { queueId: q.id, ...p } as never), { routine: true }); })}>
-                  Разрешить на окно {ov.policy.windowMin} мин
+                  Доверять новым версиям {ov.policy.windowMin} мин
                 </button>
               ) : null}
-              <button
+              {trust.enabled ? <button
                 className={btn}
-                disabled={act.busy || blockedApprove || !trust.enabled}
-                title="Одна операция сторожа: одобрить версию и добавить источник. Одно касание."
+                disabled={act.busy || blockedApprove}
+                title="Одна операция: разрешить версию и добавить источник. Одно касание."
                 onClick={() =>
                   void act.run(async () => {
                     const r = (await proof.run({ kind: "approve.trust", queueId: q.id }, (p) => rpc.call("queue.approveTrust", { id: q.id, ...p } as never))) as { note: string };
@@ -2510,10 +2526,9 @@ function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onKeep, onTrustPen
                 }
               >
                 Разрешить и доверять источнику
-              </button>
+              </button> : null}
             </div>
-            {win.note ? <p className={muted}>{win.note}</p> : <p className={muted}>Окно: версии этого плагина из этого треда проходят без вопросов на время.</p>}
-            {trust.note ? <p className={muted}>{trust.note}</p> : null}
+            <p className={muted}>{uniqueSentences([win.note ?? "Временное доверие: новые версии этого плагина из этого чата проходят без вопросов на время.", trust.note]).join(" ")}</p>
           </div>
         </Fold>
       ) : null}
@@ -2523,7 +2538,7 @@ function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onKeep, onTrustPen
           {q.reason ? <p className="text-xs">Причина: {q.reason}</p> : null}
           {detail.hashes && q.contentHash ? <p className="break-all font-mono text-xs">{q.contentHash}</p> : null}
           {caps.length > 0 ? <p className="text-xs">Возможности: <Emph text={caps.map((c) => capabilitySegments(c).map((x) => x.text).join("")).join("; ")} />.</p> : null}
-          <ChecksView result={found} />
+          <ChecksView id={cardFoldId(q, "checks")} result={found} />
           <ScanResultView scan={ov.ai.queueScans[q.id]} />
           <ScanButton ov={ov} target={{ queueId: q.id }} rpc={rpc} refetch={refetch} />
           {red && bypassAllowed(ov.guard?.trust?.mode ?? null, q.reason) ? (
@@ -2532,7 +2547,7 @@ function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onKeep, onTrustPen
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 <input className="w-56 rounded-md border border-border bg-background px-2 py-1.5 font-mono text-sm" placeholder={q.pluginId} aria-label="Введите имя плагина" value={typed} onChange={(e) => setTyped(e.target.value)} />
                 <ProofField proof={proof} routine dangerous />
-                <button className={btnDanger} disabled={act.busy || typed !== q.pluginId || unsafeDir || !proof.ready({ routine: true, dangerous: true })} onClick={() => void act.run(async () => { const r = await approve(true); setTyped(""); return r; }, allowedWhat)}>
+                <button className={btnDanger} disabled={act.busy || typed !== q.pluginId || unsafeDir || !proof.ready({ routine: true, dangerous: true })} onClick={() => void act.run(async () => { await approve(true); setTyped(""); return { note: approvedNote(q.pluginId, q.version) }; }, allowedWhat)}>
                   Всё равно разрешить
                 </button>
               </div>
@@ -2632,11 +2647,11 @@ function AwayCard({ ov, since, onSeen, onReview, canReview, kept, alarms, onShow
         {groups.slice(0, 12).map((g) => (
           <li key={g.key} className={g.counts.stopped + g.counts.alarm > 0 ? "font-semibold text-red-700 dark:text-red-400" : ""}>
             {g.text}
-            {g.threadId ? <> · <button type="button" className="underline hover:no-underline" onClick={() => nav.toThread(g.threadId!)}>из треда</button></> : null}
+            {g.threadId ? <> · <button type="button" className="underline hover:no-underline" onClick={() => nav.toThread(g.threadId!)}>из чата</button></> : null}
           </li>
         ))}
       </ul>
-      <p className={`mt-1 text-xs ${muted}`}>С {when(since)}. Журналы показывают последние записи; более старые могли не поместиться.</p>
+      <p className={`mt-1 text-xs ${muted}`}>С {when(since)}. Показаны последние записи; более старые могли не поместиться.</p>
       <div className="mt-2 flex flex-wrap gap-2">
         <button className={btnPrimary} title={alarmBlock ? "Скрывает только строки выше, без тревог. Тревоги остаются, пока их не разберут." : undefined} onClick={() => onSeen(awaySeenMark(events, Date.now()))}>{alarmBlock ? "Скрыть эти строки (тревоги останутся)" : "Всё в порядке"}</button>
         {canReview ? <button className={btn} onClick={onReview}>Разобрать</button> : null}
@@ -2747,19 +2762,32 @@ const removedSkillsOf = (ov: Overview): SkillQueueView[] => [...ov.skills.open, 
 function RejectedRow({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; rpc: Rpc; refetch: () => void }) {
   const act = useCodeAction(refetch);
   const proof = useProof(ov, rpc);
-  const back = () => proof.run({ kind: "approve", queueId: q.id, acknowledgeBlock: false }, (p) => rpc.call("queue.approve", { id: q.id, ...p, acknowledgeBlock: false } as never), { routine: true });
+  // The files on disk are no longer the ones that were rejected: the guard says so only when asked, and from then on the button is not offered.
+  const [gone, setGone] = useState(false);
+  const back = () =>
+    proof.run({ kind: "approve", queueId: q.id, acknowledgeBlock: false }, (p) => rpc.call("queue.approve", { id: q.id, ...p, acknowledgeBlock: false } as never), { routine: true }).catch((e: unknown) => {
+      if (e instanceof Error && /hash did not match|never approved/i.test(e.message)) setGone(true);
+      throw e;
+    });
+  const restorable = canRestore(q) && !gone;
   return (
     <div className={card} id={`sbb-rejected-${q.id}`}>
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h3 className="font-semibold">{q.pluginId} <span className={muted}>{q.version}</span></h3>
-        <span className={muted}>отклонено вами · {when(q.firstSeen)}</span>
+        <span className={muted}>{rejectedByText(rejectedAtOf(q, awayEventsOf(ov)), Date.now())}</span>
       </div>
-      <p className="mt-1">Эта версия не запущена. Отклонение остаётся, пока вы сами его не отмените.</p>
-      <div className="mt-2 flex flex-wrap items-center gap-2">
-        <ProofField proof={proof} routine />
-        <button className={btn} disabled={act.busy || !proof.ready({ routine: true })} onClick={() => void act.run(back, `вернули ${q.pluginId} ${q.version}`)}>Вернуть</button>
-      </div>
-      <ProofNotes proof={proof} />
+      {restorable ? (
+        <>
+          <p className="mt-1">Эта версия не запущена. Отклонение остаётся, пока вы сами его не отмените.</p>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <ProofField proof={proof} routine />
+            <button className={btn} disabled={act.busy || !proof.ready({ routine: true })} onClick={() => void act.run(back, `вернули ${q.pluginId} ${q.version}`)}>Вернуть</button>
+          </div>
+          <ProofNotes proof={proof} />
+        </>
+      ) : (
+        <p className="mt-1">Эта версия не запущена, и вернуть её нельзя: {isMismatch(q.reason) ? "её файлы изменились после проверки" : "нет данных, по которым её можно узнать"}. Чтобы пользоваться плагином, установите его заново из источника.</p>
+      )}
       <Msg error={act.error} ok={act.ok} reserve />
     </div>
   );
@@ -2823,7 +2851,7 @@ function ExceptionsTab({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; refetch: 
           <ul className="space-y-1">
             {approvals.map((a) => (
               <li key={a.id} className={`${card} flex flex-wrap items-center justify-between gap-2`}>
-                <span>{a.pluginId} <span className={muted}>{a.version} · {approvalWhy(a)} · {when(a.approvedAt)}</span></span>
+                <span>{a.pluginId} <span className={muted}>{a.version} · {approvedByText(a, now)}</span></span>
                 <button className={btn} disabled={act.busy} onClick={() => void act.run(async () => { await rpc.call("approval.revoke", { approvalId: a.id }); return { note: "Отозвано: следующая версия снова спросит." }; })}>Отозвать</button>
               </li>
             ))}
@@ -2930,7 +2958,7 @@ const TAB_LABEL: Record<TabId, string> = { status: "Статус", quarantine: "
 function GatePage() {
   const { rpc, data: ov, error, refetch } = useOverview();
   usePagePing(rpc);
-  const { approval, open, lock } = useApprovalSession(rpc, refetch);
+  const { approval, open, lock, closed: sessionClosed } = useApprovalSession(rpc, refetch);
   // The link from `sbb-guard setup` (#enroll=TOKEN): taken once, from the fragment (it never went to a server), and the address bar is cleaned at once.
   const [enrollToken] = useState<string | null>(enrollTokenOnce);
   const [tab, setTab] = useState<TabId>(enrollToken !== null ? "more" : "status");
@@ -2940,7 +2968,6 @@ function GatePage() {
   const [wizardDone, setWizardDone] = useState<boolean>(() => lsGet(WIZARD_KEY) !== null);
   const [pending, setPending] = useState<Array<{ entry: string; label: string }>>([]);
   const [focus, setFocus] = useState<string | null>(null);
-  const [deferredOpen, setDeferredOpen] = useState(false);
   const [doneNotes, setDoneNotes] = useState<Array<{ id: number; text: string }>>([]);
   const doneSeq = useRef(0);
   const announce = useCallback((text: string) => {
@@ -2960,7 +2987,7 @@ function GatePage() {
       window.setTimeout(() => el.classList.remove("sbb-flash"), 1800);
       setFocus(null);
     }
-  }, [focus, tab, deferredOpen, ov]);
+  }, [focus, tab, ov]);
   if (error && !ov) return <div className="p-6 text-destructive">Не удалось загрузить: {error}</div>;
   if (!ov)
     return (
@@ -3011,7 +3038,7 @@ function GatePage() {
   const agentsAlarms = (ov.agents?.state?.alarms ?? []).length;
   // While something critical or an alarm waits, the section is on «Статус» (the banner leads to it); otherwise it stays in «Подробно».
   const agentsTab = agentsSectionTab({ critical: agentsCritical, alarms: agentsAlarms });
-  if (ov.agents && (agentsAlarms > 0 || agentsCritical > 0)) alarms.push({ anchor: "sbb-agents", tab: agentsTab, text: `Настройки агентов: ${[agentsCritical > 0 ? `критичных изменений — ${agentsCritical}` : "", agentsAlarms > 0 ? `файлов не прочитать — ${agentsAlarms}` : ""].filter(Boolean).join(", ")}` });
+  if (ov.agents && (agentsAlarms > 0 || agentsCritical > 0)) alarms.push({ anchor: "sbb-agents", tab: agentsTab, text: `Настройки агентов: ${[agentsCritical > 0 ? `критичных изменений — ${agentsCritical}` : "", agentsAlarms > 0 ? `файлов не прочитать — ${agentsAlarms}` : ""].filter(Boolean).join(", ")}`, weight: agentsCritical + agentsAlarms });
   if (ov.watch.drifts.some((d) => d.status === "open" || d.status === "rollback-failed")) alarms.push({ anchor: "sbb-watch", tab: "more", text: "Настройки bb изменились" });
   if (!registered) alarms.push({ anchor: "sbb-registration", tab: "more", text: "Второй фактор не настроен" });
   if ((ov.guard?.troubleshootUntil ?? 0) > ov.now) alarms.push({ anchor: "sbb-guard-alarm", tab: "status", text: "Включён режим отладки сторожа: он пропускает всё" });
@@ -3020,7 +3047,7 @@ function GatePage() {
   const showProblem = (p: ProblemRef) => {
     setTab(p.tab);
     const id = Number(p.anchor.replace("sbb-card-", ""));
-    if (p.anchor.startsWith("sbb-card-") && heldAll.some((q) => q.id === id && isDeferred(q))) setDeferredOpen(true);
+    if (p.anchor.startsWith("sbb-card-") && heldAll.some((q) => q.id === id && isDeferred(q))) openFold("deferred", true);
     setFocus(p.anchor);
   };
   const since = awaySince(seenAt, Math.max(ov.now, Date.now()));
@@ -3072,7 +3099,7 @@ function GatePage() {
             <PendingTrust entries={pending} ov={ov} rpc={rpc} refetch={refetch} onDone={(e) => setPending((p) => p.filter((x) => x.entry !== e))} />
             <AwayCard ov={ov} since={since} onSeen={seen} canReview={status.first !== null} onReview={() => status.first && showProblem(status.first)} kept={keptIds} alarms={alarms} onShowAlarm={showProblem} />
             <SkillsLine ov={ov} onOpen={() => showProblem({ anchor: "sbb-skills", tab: "more", text: "" })} />
-            <SessionBar ov={ov} rpc={rpc} session={approval.session} open={open} lock={lock} />
+            <SessionBar ov={ov} rpc={rpc} session={approval.session} open={open} lock={lock} closed={sessionClosed} />
             {ov.totp.blockedUntil > 0 ? (
               <p className="rounded-md border border-destructive p-2 text-destructive">Слишком много неверных кодов: коды заблокированы до {when(ov.totp.blockedUntil)}.{(ov.guard?.passkey?.keys.length ?? 0) > 0 ? " Касание ключом работает: подпись не подобрать, поэтому её это не касается." : ""}</p>
             ) : null}
@@ -3088,11 +3115,10 @@ function GatePage() {
               {plan.active.length === 0 ? <div className={`${card} ${muted}`}>Сейчас решать нечего.</div> : plan.active.map((c) => renderCard(c, false))}
             </Section>
             {plan.later.length > 0 ? (
-              <details open={deferredOpen} onToggle={(e) => setDeferredOpen((e.currentTarget as HTMLDetailsElement).open)}>
-                <summary className="cursor-pointer font-semibold">Отложено ({plan.later.length})</summary>
+              <Fold id="deferred" summaryClassName="cursor-pointer font-semibold" summary={`Отложено (${plan.later.length})`}>
                 <p className={`mt-1 text-xs ${muted}`}>Вы отложили эти карточки кнопкой «Решить позже». Плагины остаются в карантине и не запущены.</p>
                 <div className="mt-2 space-y-2">{plan.later.map((c) => renderCard(c, true))}</div>
-              </details>
+              </Fold>
             ) : null}
             {plan.kept.length > 0 ? <p className={`text-xs ${muted}`}>Оставлено вами в карантине: {plan.kept.map((q) => `${q.pluginId} ${q.version}`).join(", ")}. Они не запущены; вернуть решение можно на вкладке «Карантин».</p> : null}
             {launchFailed.length > 0 ? (
@@ -3114,10 +3140,9 @@ function GatePage() {
             <Section title={`Гейт плагинов — очередь, расширенный вид (${heldAll.length})`}>
               {heldAll.length === 0 ? <div className={`${card} ${muted}`}>Ничего не держится.</div> : heldAll.map((q) => <QueueCard key={q.id} q={q} ov={ov} rpc={rpc} refetch={refetch} />)}
               {settled.length > 0 ? (
-                <details>
-                  <summary className={`cursor-pointer ${muted}`}>Недавно рассмотренные ({settled.length})</summary>
+                <Fold id="queue-settled" summaryClassName={`cursor-pointer ${muted}`} summary={`Недавно рассмотренные (${settled.length})`}>
                   <div className="mt-2 space-y-2">{settled.map((q) => <QueueCard key={q.id} q={q} ov={ov} rpc={rpc} refetch={refetch} />)}</div>
-                </details>
+                </Fold>
               ) : null}
             </Section>
             <BatchCard ov={ov} rpc={rpc} refetch={refetch} />

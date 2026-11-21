@@ -116,6 +116,8 @@ export async function runChecks(dir: string): Promise<CheckResult> {
     for (const h of facts.hosts) addCap(caps, "network", `host:${h.host}`, rel, h.line);
   }
 
+  const fsPaths = [...new Set(perFile.flatMap(({ facts }) => facts.fsPaths))].slice(0, 5);
+
   // A secret-looking env variable next to any network capability (DNS names are enough to carry it out).
   const envCap = caps.get("env");
   if (caps.has("network") && envCap) {
@@ -141,7 +143,7 @@ export async function runChecks(dir: string): Promise<CheckResult> {
   const sorted = [...uniq.values()].sort(
     (a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity] || (a.file < b.file ? -1 : a.file > b.file ? 1 : 0) || a.line - b.line || (a.rule < b.rule ? -1 : 1),
   );
-  return { findings: sorted, capabilities, stats: { files: tree.files, parsed, bytes: tree.bytes, ms: Date.now() - t0 }, dependencies };
+  return { findings: sorted, capabilities, stats: { files: tree.files, parsed, bytes: tree.bytes, ms: Date.now() - t0 }, dependencies, ...(caps.has("fs") && fsPaths.length > 0 ? { fsPaths } : {}) };
 }
 
 /** Plain-text report for `bb secure-bb check` and logs. */
