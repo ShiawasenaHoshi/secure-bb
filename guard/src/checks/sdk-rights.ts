@@ -4,7 +4,7 @@
 // the same module, so both count the same rights.
 import type { CapabilityKind } from "./types.ts";
 
-export type SdkRightKind = Extract<CapabilityKind, "sdk_read" | "sdk_agents" | "sdk_send" | "sdk_answer" | "sdk_settings" | "fs" | "child_process">;
+export type SdkRightKind = Extract<CapabilityKind, "sdk_read" | "sdk_meta" | "sdk_questions" | "sdk_agents" | "sdk_send" | "sdk_answer" | "sdk_settings" | "fs" | "child_process">;
 export interface SdkRight {
   kind: SdkRightKind;
   /** Stable token `area.method` (`threads.spawn`): it is what the window compares, so it names the call, not its arguments. */
@@ -17,13 +17,18 @@ export interface SdkUnclassified {
 }
 
 // ---- threads ---------------------------------------------------------------------------------------------------------------
-/** Read what is said in the conversations (and who is running what). */
+/** Read what is said in the conversations: messages, outputs, searches, prompts. */
 const THREADS_READ = new Set([
-  "get", "list", "listRunning", "count", "search", "timeline", "timelineTurnSummaryDetails", "output", "conversationOutline", "childSummary", "context",
-  "promptHistory", "storageFiles", "storageLocation", "storagePaths", "resolveMentions", "wait", "defaultExecutionOptions",
-  "experimental_listPluginMetadata", "experimental_listAncestors", "experimental_listDescendants", "experimental_listCascade",
-  "events.list", "events.wait", "queue.list", "queuedMessages.list", "interactions.get", "interactions.list",
+  "timeline", "timelineTurnSummaryDetails", "output", "conversationOutline", "search", "promptHistory", "storageFiles", "storageLocation", "storagePaths",
+  "events.list", "events.wait", "queue.list", "queuedMessages.list",
 ]);
+/** Titles and states of threads, who is running: not what is written in them. */
+const THREADS_META = new Set([
+  "get", "list", "listRunning", "count", "childSummary", "context", "resolveMentions", "wait", "defaultExecutionOptions",
+  "experimental_listPluginMetadata", "experimental_listAncestors", "experimental_listDescendants", "experimental_listCascade",
+]);
+/** Which questions and permission requests the agents raise. */
+const THREADS_QUESTIONS = new Set(["interactions.get", "interactions.list"]);
 /** Start, stop, archive, delete agents' threads. */
 const THREADS_AGENTS = new Set(["spawn", "stop", "archive", "archiveAll", "unarchive", "fork", "delete", "retry", "compact", "clearContext", "clearGoal", "cancelPlan", "restoreEnvironment"]);
 /** Put a message into a conversation: it goes out as the person's own. */
@@ -72,7 +77,9 @@ export function classifySdkChain(chain: string, rooted = false): SdkRight | SdkU
     if (THREADS_ANSWER.has(method)) return { kind: "sdk_answer", detail: `threads.${method}` };
     if (THREADS_SEND.has(method)) return { kind: "sdk_send", detail: `threads.${method}` };
     if (THREADS_AGENTS.has(method)) return { kind: "sdk_agents", detail: `threads.${method}` };
+    if (THREADS_QUESTIONS.has(method)) return { kind: "sdk_questions", detail: `threads.${method}` };
     if (THREADS_READ.has(method)) return { kind: "sdk_read", detail: `threads.${method}` };
+    if (THREADS_META.has(method)) return { kind: "sdk_meta", detail: `threads.${method}` };
     if (THREADS_HARMLESS.has(method) || THREADS_HARMLESS.has(first)) return null;
     if (["events", "queue", "interactions", "queuedMessages"].includes(first) && t.rest.length === 1) return null; // the area itself, not a call
     return t.rooted || rooted ? { unclassified: true, detail: `threads.${method}` } : null;
@@ -119,3 +126,12 @@ export const UI_CLICK_ANSWERS = "agent-prompts";
 
 /** The detail of an `fs` right when the code reaches the person's own folders (home directory, Documents…). */
 export const FS_HOME = "home";
+
+/** A lifecycle event of bb (`bb.events.on(name)`): the right it gives; null for events that are not about threads. A name the code does not give is the wider right. */
+export function classifyEvent(name: string | null): { kind: "sdk_read" | "sdk_meta"; detail: string } | null {
+  if (name === null) return { kind: "sdk_read", detail: "events.on" };
+  // Events that carry what is written (messages, turns, the thread's event stream).
+  if (/^(experimental_)?(message|turn)\b|^experimental_thread\.events$/.test(name)) return { kind: "sdk_read", detail: `events.on:${name}` };
+  if (/thread|terminal/i.test(name)) return { kind: "sdk_meta", detail: `events.on:${name}` };
+  return null;
+}

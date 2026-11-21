@@ -17,8 +17,12 @@ export type CapabilityKind =
   | "server_access"
   /** `bb.storage.database()` / `node:sqlite`: a database handle in the gate's own process and uid can reach other databases (ATTACH, extensions). */
   | "database"
-  /** bb's own API (`sdk.threads.get/list/timeline/output`, `bb.events.on`): reads the person's conversations. */
+  /** `sdk.threads.timeline/output/search`, message and turn events: reads what is written in the person's conversations. */
   | "sdk_read"
+  /** `sdk.threads.get/list`, `bb.events.on("thread.idle")`: titles and states of threads (when agents start and finish), not what is written in them. */
+  | "sdk_meta"
+  /** `sdk.threads.interactions.list/get`: sees which questions and permission requests the agents raise. */
+  | "sdk_questions"
   /** `sdk.threads.spawn/stop/archive/fork/delete…`: starts, stops and removes agents. */
   | "sdk_agents"
   /** `sdk.threads.send/message/editMessage…`: writes into conversations as the person. */
@@ -44,6 +48,8 @@ export const CAPABILITY_KINDS: readonly CapabilityKind[] = [
   "server_access",
   "database",
   "sdk_read",
+  "sdk_meta",
+  "sdk_questions",
   "sdk_agents",
   "sdk_send",
   "sdk_answer",

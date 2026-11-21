@@ -78,7 +78,7 @@ export interface GateDeps {
   /** Directory snapshots live in (no trailing slash needed); only plugins inside it can use windows or touch-approved proposals. */
   snapshotsRoot: string;
   /** Deterministic plugin checks; injectable for tests. */
-  runChecks?: (dir: string) => Promise<CheckResult>;
+  runChecks?: (dir: string, opts?: { pluginId?: string }) => Promise<CheckResult>;
   /**
    * The registry stage of the dependency checks (stage 2.3), run after the offline checks:
    * adds publish-age findings. Must not throw (it reports what it could not verify as a finding).
@@ -390,9 +390,9 @@ export class Gate {
       try {
         let result: CheckResult;
         try {
-          result = await run(dir);
+          result = await run(dir, { pluginId });
         } catch {
-          result = await run(dir); // one retry
+          result = await run(dir, { pluginId }); // one retry
         }
         if (this.d.verifyDeps) result = await this.d.verifyDeps(result);
         this.store.putCheck(key, pluginId, result);

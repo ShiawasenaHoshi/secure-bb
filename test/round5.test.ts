@@ -183,3 +183,23 @@ describe("8. restoring while a session is open", () => {
     expect(restoreNote(false)).toBeNull();
   });
 });
+
+describe("the session is blocked only by a plugin that really runs", () => {
+  it("the core's shape of a held plugin: enabled, status «disabled», statusDetail «held by activation guard»", async () => {
+    const { isRunning, runningThirdParty, sessionBlockersFromGuard } = await import("../src/probe.js");
+    const held = { id: "bb-recap", provenance: "direct", enabled: true, status: "disabled", statusDetail: 'held by activation guard "secure-bb": held by secure-bb: review #1', version: "0.2.4", source: "git:x", rootDir: "/nope" };
+    expect(isRunning(held)).toBe(false);
+    expect(runningThirdParty([held])).toEqual([]);
+    expect(sessionBlockersFromGuard([held], null)).toEqual([]);
+    // even a status that says «running» does not count while the core's detail says it is held
+    expect(isRunning({ status: "running", statusDetail: 'held by activation guard "secure-bb": review #1' })).toBe(false);
+  });
+  it("a plugin that runs blocks; starting and degraded too; the others do not", async () => {
+    const { isRunning, sessionBlockersFromGuard } = await import("../src/probe.js");
+    const run = { id: "bb-recap", provenance: "direct", enabled: true, status: "running", statusDetail: null, version: "0.2.4", source: "git:x", rootDir: "/nope" };
+    expect(isRunning(run)).toBe(true);
+    expect(sessionBlockersFromGuard([run], null).map((b) => b.id)).toEqual(["bb-recap"]);
+    for (const status of ["starting", "degraded"]) expect(isRunning({ status, statusDetail: null })).toBe(true);
+    for (const status of ["disabled", "error", "missing", "incompatible", "needs-configuration"]) expect(isRunning({ status, statusDetail: null })).toBe(false);
+  });
+});

@@ -152,7 +152,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   // Registry lookups for dependencies (stage 2.3) are made here, by the server process; answers are cached in our database.
   // The packages in node_modules are compared with the registry's tarballs here too (same process, same cache).
-  const runChecks = (dir: string) => runChecksVerified(dir, { fetch: globalThis.fetch as unknown as FetchLike, deadlineMs: 5000, cache: { get: (k) => store.getManifest(k), put: (k, v) => store.putManifest(k, v) } });
+  const runChecks = (dir: string, o: { pluginId?: string } = {}) => runChecksVerified(dir, { fetch: globalThis.fetch as unknown as FetchLike, deadlineMs: 5000, cache: { get: (k) => store.getManifest(k), put: (k, v) => store.putManifest(k, v) } }, o.pluginId);
   const verifyDeps = (result: Parameters<typeof verifyDependencies>[0]) => verifyDependencies(result, { cache: store, fetch: globalThis.fetch as unknown as FetchLike, now });
 
   // ---- optional AI scan (stage 3, spec §8): off until a human turns it on ------------------

@@ -7,7 +7,7 @@ import * as acorn from "../../vendor/acorn.mjs";
 import jsx from "../../vendor/acorn-jsx.mjs";
 import { tsPlugin } from "../../vendor/acorn-typescript.mjs";
 import { excerptOf } from "./files.ts";
-import { classifySdkChain, DOM_LOOKUPS, DOM_PRESSES, isThreadsArea, looksLikeAnswerButton, SYNTHETIC_EVENTS, UI_CLICK_ANSWERS } from "./sdk-rights.ts";
+import { classifyEvent, classifySdkChain, DOM_LOOKUPS, DOM_PRESSES, isThreadsArea, looksLikeAnswerButton, SYNTHETIC_EVENTS, UI_CLICK_ANSWERS } from "./sdk-rights.ts";
 import type { CapabilityKind, Finding } from "./types.ts";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -1272,8 +1272,8 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
         if (press && n.arguments.length >= press.minArgs && n.arguments.length <= press.maxArgs) facts.domPresses.push({ detail: press.detail, line: lineOf(n) });
         // `bb.events.on("thread.idle", …)`: the handler is handed the conversation.
         if (simple === "on" && /(^|\.)events$/.test(sdkChain(callee.object) ?? "")) {
-          const ev = n.arguments[0] ? fold(n.arguments[0], consts) : null;
-          if (ev === null || /thread|terminal/i.test(ev)) cap("sdk_read", "events.on", n);
+          const hit = classifyEvent(n.arguments[0] ? fold(n.arguments[0], consts) : null);
+          if (hit) cap(hit.kind, hit.detail, n);
         }
       }
       if (simple !== null && LOAD_EXTENSION_METHODS.has(simple)) finding("sqlite-extension", "block", n);

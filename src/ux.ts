@@ -224,6 +224,10 @@ export function capabilityPhrase(c: CapLike): string {
       return "хранить свои настройки и данные в bb";
     case "sdk_read":
       return "читать ваши переписки с агентами в bb (что вы и агенты пишете в тредах)";
+    case "sdk_meta":
+      return "знать названия и состояние ваших тредов (когда агенты начинают и заканчивают), но не то, что в них написано";
+    case "sdk_questions":
+      return "видеть, какие вопросы и запросы разрешений агенты задают";
     case "sdk_agents":
       return "запускать, останавливать и архивировать агентов";
     case "sdk_send":
@@ -1260,6 +1264,8 @@ const SDK_LINES: Array<{ kind: string; danger: boolean; text: string }> = [
   { kind: "sdk_agents", danger: true, text: "может запускать и останавливать агентов" },
   { kind: "sdk_settings", danger: true, text: "меняет настройки bb" },
   { kind: "sdk_read", danger: false, text: "читает ваши переписки в bb" },
+  { kind: "sdk_questions", danger: false, text: "видит, какие вопросы агенты задают" },
+  { kind: "sdk_meta", danger: false, text: "знает названия и состояние ваших тредов (когда агенты начинают и заканчивают)" },
 ];
 /** The first line for a plugin that uses bb's own API or presses bb's buttons; null when it does neither. «Безопасно: только оформление» is never said of it. */
 export function sdkHeadline(caps: CapLike[]): Risk | null {

@@ -47,8 +47,9 @@ const headline = (r: CheckResult) => riskHeadline(capsWithPaths(r), r.findings.f
 describe("a plugin that reads threads and starts agents (bb-recap)", () => {
   it("is not the safe class: reads conversations, starts, stops and archives agents", async () => {
     const r = await fixture("sdk-threads-read-spawn");
-    expect(kinds(r)).toEqual(expect.arrayContaining(["ui", "sdk_read", "sdk_agents"]));
-    expect(detail(r, "sdk_read")).toEqual(expect.arrayContaining(["events.on", "threads.get", "threads.output", "threads.timeline"]));
+    expect(kinds(r)).toEqual(expect.arrayContaining(["ui", "sdk_read", "sdk_meta", "sdk_agents"]));
+    expect(detail(r, "sdk_read")).toEqual(["threads.output", "threads.timeline"]);
+    expect(detail(r, "sdk_meta")).toEqual(expect.arrayContaining(["events.on:thread.idle", "threads.get"]));
     expect(detail(r, "sdk_agents")).toEqual(["threads.archive", "threads.spawn", "threads.stop"]);
     expect(r.capabilities.length).toBeGreaterThan(1); // the gate's safe class is «no capabilities at all»
   });
@@ -56,7 +57,7 @@ describe("a plugin that reads threads and starts agents (bb-recap)", () => {
     const r = await fixture("sdk-threads-read-spawn");
     const h = headline(r);
     expect(h.level).toBe("danger");
-    expect(h.text).toBe("Может запускать и останавливать агентов; читает ваши переписки в bb");
+    expect(h.text).toBe("Может запускать и останавливать агентов; читает ваши переписки в bb; знает названия и состояние ваших тредов (когда агенты начинают и заканчивают)");
     expect(h.text).not.toMatch(/Безопасно|только оформление|ничего не читает/);
   });
 });
@@ -121,7 +122,7 @@ describe("what else of bb's API counts", () => {
     const b = await app("export default function A({ sdk }: any) { const { stop } = sdk.threads; stop({}); return null; }");
     expect(detail(b, "sdk_agents")).toEqual(["threads.stop"]);
     const c = await app("export default function A(bb: any) { const t = bb.sdk.threads; t.get({}); t.get.call(t, {}); return null; }");
-    expect(detail(c, "sdk_read")).toEqual(["threads.get"]);
+    expect(detail(c, "sdk_meta")).toEqual(["threads.get"]);
   });
   it("a computed method on the threads API is a review finding and the widest right", async () => {
     const r = await app("export default function A({ sdk }: any) { const m = (window as any).m; sdk.threads[m]({}); return null; }");
@@ -135,6 +136,7 @@ describe("what else of bb's API counts", () => {
   it("a lifecycle event that is not about conversations is not a read", async () => {
     const r = await app("export default function A() { return null; }", "export default function (bb: any) { bb.events.on('plugins-changed', () => {}); }");
     expect(kinds(r)).not.toContain("sdk_read");
+    expect(kinds(r)).not.toContain("sdk_meta");
   });
   it("an unknown call into the threads API is a review finding, not silence", async () => {
     const r = await app("export default function A({ sdk }: any) { sdk.threads.teleport({}); return null; }");
@@ -161,5 +163,64 @@ describe("the guard counts the same rights (one checks module)", () => {
     const g = grown(rightsOf(old), rightsOf(now));
     expect(g.tokens).toEqual(expect.arrayContaining(["sdk_read", "sdk_agents", "sdk_agents:threads.spawn"]));
     expect(grown(rightsOf(now), rightsOf(old)).tokens).toEqual([]);
+  });
+});
+
+describe("names and states of threads are not the conversations", () => {
+  it("chime: get, interactions.list and thread.active/idle/failed → yellow, not «читает переписки»", async () => {
+    const r = await fixture("chime-sdk");
+    expect(kinds(r)).toEqual(expect.arrayContaining(["sdk_meta", "sdk_questions"]));
+    expect(kinds(r)).not.toContain("sdk_read");
+    expect(detail(r, "sdk_meta")).toEqual(["events.on:thread.active", "events.on:thread.failed", "events.on:thread.idle", "threads.get"]);
+    expect(headline(r)).toEqual({ level: "caution", text: "Видит, какие вопросы агенты задают; знает названия и состояние ваших тредов (когда агенты начинают и заканчивают)" });
+    expect(headline(r).text).not.toMatch(/переписк/);
+  });
+  it("what carries text is a read: timeline, output, message.* and turn.* events, a computed event name", async () => {
+    for (const code of [
+      "sdk.threads.timeline({})",
+      "sdk.threads.output({})",
+      "sdk.threads.search({})",
+    ]) expect(kinds(await app(`export default function A({ sdk }: any) { ${code}; return null; }`))).toContain("sdk_read");
+    for (const ev of ["message.dispatch", "turn.submit"]) {
+      const r = await app("export default function A() { return null; }", `export default function (bb: any) { bb.events.on(${JSON.stringify(ev)}, () => {}); }`);
+      expect(kinds(r)).toContain("sdk_read");
+    }
+    const dyn = await app("export default function A() { return null; }", "export default function (bb: any) { bb.events.on((globalThis as any).name, () => {}); }");
+    expect(kinds(dyn)).toContain("sdk_read");
+  });
+  it("interactions.respond is still answering for the person; list only looks", async () => {
+    expect(classifySdkChain("sdk.threads.interactions.list", true)).toEqual({ kind: "sdk_questions", detail: "threads.interactions.list" });
+    expect(classifySdkChain("sdk.threads.interactions.respond", true)).toEqual({ kind: "sdk_answer", detail: "threads.interactions.respond" });
+  });
+});
+
+describe("a repository of several plugins: only the plugin's own code counts", () => {
+  const monoDir = (): string => {
+    const dir = join(scratch, `mono${n++}`);
+    cpSync(join(FIXTURES, "monorepo"), dir, { recursive: true });
+    chmodSync(dir, 0o755);
+    normalise(dir);
+    return dir;
+  };
+  it("the theme next to a plugin with threads.send is green", async () => {
+    const r = await runChecks(monoDir(), { pluginId: "beautiful-theme" });
+    expect(kinds(r)).toEqual(["ui"]);
+    expect(headline(r)).toEqual({ level: "safe", text: "Безопасно: только оформление — ничего не читает" });
+  });
+  it("each plugin gets its own rights, not the neighbours'", async () => {
+    const dir = monoDir();
+    const a = await runChecks(dir, { pluginId: "agentation" });
+    expect(kinds(a)).toContain("sdk_send");
+    expect(kinds(a)).not.toContain("sdk_read");
+    const g = await runChecks(dir, { pluginId: "gh-stack" });
+    expect(kinds(g)).toContain("sdk_read");
+    expect(kinds(g)).not.toContain("sdk_send");
+  });
+  it("without an id and with several plugins nothing is cut out (the whole tree counts: the safe side)", async () => {
+    expect(kinds(await runChecks(monoDir()))).toEqual(expect.arrayContaining(["sdk_send", "sdk_read"]));
+  });
+  it("the guard asks with the id too: its run function takes it", async () => {
+    const r = await runChecks(monoDir(), { pluginId: "beautiful-theme" });
+    expect(r.findings.filter((f) => f.severity !== "info")).toEqual([]);
   });
 });
