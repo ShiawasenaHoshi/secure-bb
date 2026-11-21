@@ -48,7 +48,7 @@ export const rpcContract = defineRpcContract({
   // Guard mode: a challenge bound to one action (the guard describes it in its own words), and registering a key (token from the console).
   "passkey.challenge": {
     input: s.object({
-      kind: s.oneOf(["approve", "approve.trust", "session.open", "batch.approve", "window.open", "policy", "touch", "agents.accept", "trust.mode", "trust.add", "trust.migrate"] as const),
+      kind: s.oneOf(["approve", "approve.trust", "session.open", "batch.approve", "window.open", "policy", "touch", "agents.accept", "agents.restore", "trust.mode", "trust.add", "trust.migrate"] as const),
       batchId: s.optional(s.string({ min: 1, max: 64 })),
       setHash: s.optional(s.string({ min: 64, max: 64 })),
       trustMode: s.optional(s.oneOf(["simple", "detailed", "strict"] as const)),
@@ -89,6 +89,9 @@ export const rpcContract = defineRpcContract({
   "agents.scan": { input: s.nullValue(), output: s.json<AgentsView>() },
   "agents.reject": { input: s.object({ ids: s.array(id, { max: 2000 }) }), output: s.json<{ ok: true; rejected: number; note: string }>() },
   "agents.accept": { input: s.object({ ids: s.array(id, { max: 2000 }), ...factor }), output: s.json<{ ok: true; accepted: number; note: string }>() },
+  // «Вернуть как было»: a touch for this one difference; the guard writes its own baseline through the restore helper. «Остановить агентов»: no code (tightening).
+  "agents.restore": { input: s.object({ id, ...factor }), output: s.json<{ ok: true; resolved: boolean; action: "write" | "delete" | "json"; note: string }>() },
+  "agents.stop": { input: s.nullValue(), output: s.json<{ ok: true; stopped: number; failed: number; holdAvailable: boolean; note: string }>() },
   "watch.scan": { input: s.nullValue(), output: s.json<{ ok: true }>() },
   "watch.acceptAll": { input: s.object({ ...proof }), output: s.json<{ ok: true; items: number }>() },
   "watch.accept": { input: s.object({ id, ...proof }), output: s.json<{ ok: true }>() },

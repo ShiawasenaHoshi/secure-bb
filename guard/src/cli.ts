@@ -40,7 +40,7 @@ export const terminalIo: Io = {
 
 const USAGE = `sbb-guard ${VERSION} — decision guard for secure-bb
 
-  sbb-guard serve [--data DIR] [--socket PATH] [--socket-gid GID] [--rp-id ID] [--origin URL] [--agents-home DIR] [--agents-root DIR]... [--agents-scan-sec N]
+  sbb-guard serve [--data DIR] [--socket PATH] [--socket-gid GID] [--rp-id ID] [--origin URL] [--agents-home DIR] [--agents-root DIR]... [--agents-scan-sec N] [--restore-socket PATH]
                   [--plugins-root DIR]... [--known-source ENTRY]... [--offline]
   sbb-guard totp-register [--data DIR] [--code CODE] [--replacing-code CODE]
   sbb-guard totp-disable [--data DIR] [--yes]
@@ -56,6 +56,8 @@ const USAGE = `sbb-guard ${VERSION} — decision guard for secure-bb
 Agent watch (serve): --agents-home / SBB_GUARD_AGENTS_HOME (default /var/bbagent) is the agents' home; the working directories of threads are found in it
 (data/plugins/*/host-data/workspaces/*). --agents-root DIR (repeatable) / SBB_GUARD_AGENTS_ROOTS (comma-separated) add more roots: the list is extended
 from the console only. --agents-scan-sec (default 120) is the period of the scan. The guard's user needs read access to the home (the installer's ACL).
+Putting a file back («Вернуть как было»): --restore-socket / SBB_GUARD_RESTORE_SOCKET (default /var/sbb-restore-run/restore.sock) is the socket of sbb-restore, the helper that runs
+as the agents' user; the guard's user must be the only member of that socket's group. The guard itself never writes the agents' files.
 Trust by source (serve): --plugins-root DIR (repeatable) / SBB_GUARD_PLUGINS_ROOTS: where the core keeps plugins installed from git; the guard reads a version
 only from there (the guard's user needs read access: the installer's ACL), and without it nothing from git passes by itself. --known-source ENTRY (repeatable) /
 SBB_GUARD_KNOWN_SOURCES: sources of the official catalog (github:owner/name or github:owner/*), the level "known". The owner's own sources are kept by the guard (a touch adds one).
@@ -99,7 +101,7 @@ const optStr = (o: Opts, k: string): string | undefined => (typeof o[k] === "str
 function open(paths: GuardPaths, now: () => number): { guard: Guard; close: () => void } {
   privateDir(paths.stateDir);
   const db = openDb(paths.db);
-  return { guard: new Guard({ db, now, secretPath: paths.secret, headPath: paths.head, rp: paths.rp, trust: { pluginsRoots: paths.pluginsRoots, knownSources: paths.knownSources, offline: paths.offline }, agents: { home: paths.agentsHome, extraRoots: paths.agentsRoots, deny: [paths.dataDir, dirname(paths.socket)] } }), close: () => db.close() };
+  return { guard: new Guard({ db, now, secretPath: paths.secret, headPath: paths.head, rp: paths.rp, trust: { pluginsRoots: paths.pluginsRoots, knownSources: paths.knownSources, offline: paths.offline }, agents: { home: paths.agentsHome, extraRoots: paths.agentsRoots, deny: [paths.dataDir, dirname(paths.socket), dirname(paths.restoreSocket)], restore: { socket: paths.restoreSocket } } }), close: () => db.close() };
 }
 
 /** One request to a running guard. */
@@ -777,7 +779,7 @@ export async function main(argv: string[], io: Io = terminalIo): Promise<number>
   }
   let paths: GuardPaths;
   try {
-    paths = resolvePaths({ data: optStr(opts, "data"), socket: optStr(opts, "socket"), socketGid: optStr(opts, "socket-gid"), rpId: optStr(opts, "rp-id"), origin: optStr(opts, "origin"), agentsHome: optStr(opts, "agents-home"), agentsRoots: optStr(opts, "agents-root"), pluginsRoots: optStr(opts, "plugins-root"), knownSources: optStr(opts, "known-source"), offline: opts.offline === true });
+    paths = resolvePaths({ data: optStr(opts, "data"), socket: optStr(opts, "socket"), socketGid: optStr(opts, "socket-gid"), rpId: optStr(opts, "rp-id"), origin: optStr(opts, "origin"), agentsHome: optStr(opts, "agents-home"), agentsRoots: optStr(opts, "agents-root"), restoreSocket: optStr(opts, "restore-socket"), pluginsRoots: optStr(opts, "plugins-root"), knownSources: optStr(opts, "known-source"), offline: opts.offline === true });
   } catch (err) {
     io.err(err instanceof Error ? err.message : String(err));
     return 64;

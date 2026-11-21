@@ -43,7 +43,8 @@ async function boot(initial: Installed[], hook: "missing-throws" | "silent" | "w
   let onCalls = 0;
   let handler: ((ctx: unknown) => Promise<unknown>) | null = null;
   (bb as unknown as { experimental_hooks: unknown }).experimental_hooks = {
-    on(_name: string, h: (ctx: unknown) => Promise<unknown>) {
+    on(name: string, h: (ctx: unknown) => Promise<unknown>) {
+      if (name !== "plugin.activate") return; // another hook (message.dispatch: «Остановить агентов») is not what this test is about
       onCalls++;
       handler = h;
       if (hook === "missing-throws") throw new Error('a "plugin.activate" hook handler is already registered by this plugin');

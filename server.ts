@@ -15,6 +15,7 @@ import {
 } from "@get-bb/plugin-sdk";
 import { Alive } from "./src/alive.js";
 import { AgentWatchLink, type AgentThreadSource } from "./src/agents.js";
+import { AgentStopper } from "./src/stop.js";
 import { agentAcceptProblem } from "./src/ux.js";
 import { GuardLink, GuardLinkError, guardSocketFromEnv, type GuardAction, type GuardPolicy, type GuardProof, type GuardQueueEntry, type PasskeyAssertion } from "./src/guardlink.js";
 import { MODE_RANK, normalizeEntry } from "./guard/src/trust.ts";
@@ -352,6 +353,26 @@ export default async function plugin(bb: BbPluginApi) {
       return [...ids];
     },
   };
+  // ---- «Остановить агентов»: stop the running threads through the SDK, and hold new turns while a critical difference is open ----
+  // The hold is the `message.dispatch` hook. Without it (bb has none) the page says honestly that agents may be started again.
+  let holdAvailable = false;
+  let holdNow: () => boolean = () => false;
+  try {
+    bb.experimental_hooks.on("message.dispatch", () => (holdNow() ? { action: "wait", reason: "secure-bb: агенты остановлены, пока настройки агента не исправлены (кнопка «Вернуть как было» на странице Secure BB)", sendAt: now() + 60_000 } : { action: "proceed" }));
+    holdAvailable = true;
+  } catch (err) {
+    bb.log.warn(`no message.dispatch hook in this bb: «Остановить агентов» cannot hold new turns (${err instanceof Error ? err.message : String(err)})`);
+  }
+  const stopper = new AgentStopper({
+    port: {
+      listRunning: async () => (await bb.sdk.threads.listRunning()).map((t) => ({ id: t.id })),
+      stop: async (threadId) => void (await bb.sdk.threads.stop({ threadId })),
+    },
+    store,
+    now,
+    holdAvailable,
+    log: (m) => bb.log.warn(m),
+  });
   const agents = guardLink
     ? new AgentWatchLink({
         guard: guardLink,
@@ -366,8 +387,12 @@ export default async function plugin(bb: BbPluginApi) {
           return n;
         },
         onChange: () => changed(),
+        stopper,
+        // The hold ended: core is asked to try the held messages again at once (not at the next `sendAt`).
+        onHoldReleased: () => void bb.experimental_hooks.recheck("message.dispatch").catch((e) => bb.log.warn(`recheck of held messages failed: ${String(e)}`)),
       })
     : null;
+  holdNow = () => stopper.holding(agents?.criticalOpen() ?? false);
 
   // ---- journal integrity (stage 5): verified at start, on every tick, and on demand --------------------
   let journalReport: JournalReport = store.verifyJournal();
@@ -655,7 +680,7 @@ export default async function plugin(bb: BbPluginApi) {
    * In guard mode a code that arrives with any RPC is checked by the guard first (it consumes the code there: the secret is not here),
    * and the handler then runs with the mark that says so. RPCs that need more than that (they act at the guard) do it themselves.
    */
-  const OWN_GUARD_PATH = new Set(["queue.approve", "queue.approveTrust", "batch.approve", "window.open", "policy.set", "session.open", "totp.begin", "totp.confirm", "agents.accept", "trust.mode", "trust.add", "trust.migrate"]);
+  const OWN_GUARD_PATH = new Set(["queue.approve", "queue.approveTrust", "batch.approve", "window.open", "policy.set", "session.open", "totp.begin", "totp.confirm", "agents.accept", "agents.restore", "trust.mode", "trust.add", "trust.migrate"]);
   const withGuardTouch = <T extends object>(handlers: T): T => {
     const out: Record<string, unknown> = {};
     if (!guardLink) {
@@ -818,6 +843,29 @@ export default async function plugin(bb: BbPluginApi) {
       await agents.refresh(false);
       changed();
       return { ok: true as const, accepted: r.accepted, note: `принято в эталон: ${r.accepted}` };
+    }),
+    // «Вернуть как было»: a touch for this one difference. Nothing is written here: the guard puts its own baseline back through the restore helper.
+    "agents.restore": wrap(async ({ id, code, passkey }) => {
+      if (!agents || !guardLink) throw new GateError("invalid", "вернуть файл можно только через сторожа");
+      const proof = proofOf(code, passkey);
+      if (proof === undefined) throw new GateError("invalid_code", "a code or a touch is needed: the guard checks it");
+      const r = await guardLink.agentsRestore(id, proof);
+      await agents.refresh(false);
+      changed();
+      return {
+        ok: true as const,
+        resolved: r.resolved,
+        action: r.action,
+        note: r.resolved ? "Готово: настройки агента возвращены, тревога снята" : "Файл возвращён, но сторож всё ещё видит расхождение (возможно, агент изменил его снова): посмотрите карточку",
+      };
+    }),
+    // «Остановить агентов»: no code (a tightening). Every running thread is stopped; new turns are held while the critical difference is open.
+    "agents.stop": wrap(async () => {
+      const r = await stopper.stopAll();
+      if (agents) await agents.refresh(false);
+      changed();
+      const note = `Агенты остановлены (${r.stopped.length}${r.failed.length > 0 ? `, не удалось остановить: ${r.failed.length}` : ""}). Пока настройки не исправлены, лучше не запускать их снова.${holdAvailable ? " Новые сообщения агентам будут держаться, пока тревога не снята." : " Но удержать новые сообщения этот bb не позволяет: агенты могут быть запущены снова."}`;
+      return { ok: true as const, stopped: r.stopped.length, failed: r.failed.length, holdAvailable, note };
     }),
     "queue.approve": wrap(async ({ id, code, passkey, session, acknowledgeBlock }) => {
       if (guardLink) {
@@ -1126,6 +1174,10 @@ export default async function plugin(bb: BbPluginApi) {
         case "agents.accept": {
           if (q.ids === undefined || q.ids.length === 0) throw new GateError("invalid", "ids are needed");
           return out({ op: "agents-accept", ids: q.ids });
+        }
+        case "agents.restore": {
+          if (q.ids === undefined || q.ids.length !== 1) throw new GateError("invalid", "one difference id is needed");
+          return out({ op: "agents-restore", id: q.ids[0]! });
         }
         case "trust.mode": {
           if (q.trustMode === undefined) throw new GateError("invalid", "trustMode is needed");

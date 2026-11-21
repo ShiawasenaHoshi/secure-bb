@@ -136,8 +136,9 @@ export interface Installed {
 }
 
 /** Boots the plugin with BB_SECURE_BB_GUARD_SOCKET set (or without it: `socket: null`). */
-export async function bootPlugin(socket: string | null, opts: { onInstall?: (source: string) => Promise<void>; environments?: Array<{ id: string; path: string | null }>; threadsOfEnvironment?: Record<string, string[]> } = {}) {
+export async function bootPlugin(socket: string | null, opts: { onInstall?: (source: string) => Promise<void>; environments?: Array<{ id: string; path: string | null }>; threadsOfEnvironment?: Record<string, string[]>; running?: string[]; stopFails?: string[]; noDispatchHook?: boolean } = {}) {
   let plugins: Installed[] = [];
+  const stopped: string[] = [];
   const installs: string[] = [];
   const dataDir = realpathSync(mkdtempSync(join(tmpdir(), "sbb-gm-")));
   const prev = process.env.BB_SECURE_BB_GUARD_SOCKET;
@@ -166,9 +167,23 @@ export async function bootPlugin(socket: string | null, opts: { onInstall?: (sou
         get: async ({ threadId }: { threadId: string }) => ({ environmentId: "e1", projectId: `P-${threadId}` }),
         events: { list: async () => [] },
         list: async ({ environmentId }: { environmentId?: string }) => ((environmentId && opts.threadsOfEnvironment?.[environmentId]) || []).map((id) => ({ id })),
+        listRunning: async () => (opts.running ?? []).filter((id) => !stopped.includes(id)).map((id) => ({ id, hostId: "h1" })),
+        stop: async ({ threadId }: { threadId: string }) => {
+          if (opts.stopFails?.includes(threadId)) throw new Error(`cannot stop ${threadId}`);
+          stopped.push(threadId);
+          return { ok: true };
+        },
       },
     } as never,
   } as never);
+  if (opts.noDispatchHook) {
+    // A bb without the message hook: the plugin must say so, not pretend.
+    const real = bb.experimental_hooks.on.bind(bb.experimental_hooks);
+    (bb.experimental_hooks as { on: unknown }).on = (hook: string, handler: never) => {
+      if (hook === "message.dispatch") throw new Error("no such hook in this bb");
+      return (real as (h: string, f: never) => void)(hook, handler);
+    };
+  }
   try {
     await plugin(bb);
   } finally {
@@ -177,7 +192,7 @@ export async function bootPlugin(socket: string | null, opts: { onInstall?: (sou
   }
   const rpc = <T = unknown>(name: string, input: unknown = null) => harness.behavior.callRpc(name as never, input as never) as Promise<T>;
   const hook = harness.registrations.hooks["plugin.activate"]!;
-  return { bb, harness, rpc, hook, installs, dataDir, setPlugins: (p: Installed[]) => (plugins = p) };
+  return { bb, harness, rpc, hook, stopped, installs, dataDir, setPlugins: (p: Installed[]) => (plugins = p) };
 }
 export type Booted = Awaited<ReturnType<typeof bootPlugin>>;
 

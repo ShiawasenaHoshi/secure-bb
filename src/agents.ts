@@ -5,6 +5,7 @@
 // accepts anything (that is a touch at the guard).
 import type { AgentDrift, AgentsState, GuardPort } from "./guardlink.js";
 import type { Store } from "./store.js";
+import type { AgentStopper, StopView } from "./stop.js";
 
 /** What bb tells about environments and the threads in them (real SDK calls: bb-source side). */
 export interface AgentThreadSource {
@@ -23,6 +24,8 @@ export interface AgentsView {
   threads: Record<string, string[]>;
   /** Threads marked polluted because of a critical difference (id → the difference ids). */
   marked: Record<string, number[]>;
+  /** «Остановить агентов»: whether agents were stopped, and whether new turns are held (set by the plugin, not the guard). */
+  stop?: StopView;
 }
 
 /** The pseudo-sequence of a pollution hit made by a difference: unique per difference, below every real event's seq and the env-setup one. */
@@ -48,8 +51,16 @@ export class AgentWatchLink {
       /** The plugin's own windows opened before `at` are closed (configuration windows; the guard closes its own). */
       closeWindowsOpenedBefore: (at: number, reason: string) => number;
       onChange: () => void;
+      /** «Остановить агентов»: the stopper (its hold ends when no critical difference is open) and what to do when it ends (core re-asks the held messages). */
+      stopper?: AgentStopper;
+      onHoldReleased?: () => void;
     },
   ) {}
+
+  /** A critical difference that is not part of the first baseline is open. */
+  criticalOpen(): boolean {
+    return (this.state?.drifts ?? []).some((x) => x.class === "critical" && !x.initial);
+  }
 
   /** Asks the guard (a scan when `scan`; the guard rate-limits it) and applies the consequences. Never throws: the guard being away is an `error` on the page. */
   async refresh(scan: boolean): Promise<AgentsView> {
@@ -57,6 +68,8 @@ export class AgentWatchLink {
       this.state = scan ? await this.d.guard.agentsScan() : await this.d.guard.agentsState();
       this.error = undefined;
       await this.consequences(this.state);
+      // Only a state the guard really gave may end the hold: an unreachable guard keeps it.
+      if (this.d.stopper?.release(this.criticalOpen())) this.d.onHoldReleased?.();
     } catch (err) {
       this.error = err instanceof Error ? err.message : String(err);
       this.d.log(`agent watch: ${this.error}`);
@@ -74,7 +87,7 @@ export class AgentWatchLink {
       if (known) threads[drift.root] = known;
       if (drift.class === "critical" && !drift.initial) for (const t of known ?? []) (marked[t] ??= []).push(drift.id);
     }
-    return { enabled: s?.enabled ?? false, ...(this.error ? { error: this.error } : {}), state: s, threads, marked };
+    return { enabled: s?.enabled ?? false, ...(this.error ? { error: this.error } : {}), state: s, threads, marked, ...(this.d.stopper ? { stop: this.d.stopper.view(this.criticalOpen()) } : {}) };
   }
 
   /** Threads whose working directory this is. */
