@@ -33,7 +33,7 @@ import {
   isCriticalDrift, launchProblem, moreVersionsText, planCards, proofHint, reconcileSelection, sameData, selectableDriftIds, sessionText, setFold,
   toggleId, trustButton, windowAvailability,
 } from "./src/ux";
-import { isMismatch } from "./src/ux";
+import { isMismatch, riskHeadline, approveVerb, enabledWhat, agentConfigNote, scopeText, makeStub, stableOrder, layoutItems, friendlySource, WIZARD_SOURCES_TEXT, secondFactorText, AWAY_HIDE_LABEL, type Stub } from "./src/ux";
 import { isFoldOpen, openFold, toggleFold } from "./src/fold";
 import type { AwayEvent, CapLike, HeldNow, ProblemRef, TabId } from "./src/ux";
 
@@ -148,21 +148,32 @@ function Section({ title, children, id }: { title: string; children: ReactNode; 
 // «Готово: …»: after a card is gone (deleted, allowed, accepted) a short message stays where the cards are for a few seconds, so that a press is seen to have worked.
 const DONE_MS = 3000;
 const LOCK_MS = 8000;
-const DoneContext = createContext<{ notes: Array<{ id: number; text: string }>; announce: (what: string) => void }>({ notes: [], announce: () => undefined });
-function DoneNotes() {
-  const { notes } = useContext(DoneContext);
+interface Note { id: number; text: string; kind: "done" | "info" | "error" }
+interface AnnounceOpts { kind?: Note["kind"]; slot?: { key: string; height: number } }
+const DoneContext = createContext<{ notes: Note[]; announce: (what: string, opts?: AnnounceOpts) => void; dismiss: (id: number) => void }>({ notes: [], announce: () => undefined, dismiss: () => undefined });
+/**
+ * Messages live in a strip pinned to the top of the window and take no room in the flow: when one appears or goes, nothing under it moves.
+ * «Готово» and information go by themselves; an error stays until it is closed.
+ */
+function PinnedNotes() {
+  const { notes, dismiss } = useContext(DoneContext);
   if (notes.length === 0) return null;
   return (
-    <div className="space-y-1" role="status" aria-live="polite" data-secure-bb-done>
-      {notes.map((n) => (
-        <p key={n.id} className="rounded-md border border-green-600/50 bg-green-50 px-3 py-2 text-sm font-semibold text-green-900 dark:bg-green-950/40 dark:text-green-100">{doneMessage(n.text)}</p>
-      ))}
+    <div className="pointer-events-none fixed inset-x-0 top-2 z-30 mx-auto w-full max-w-3xl px-4" data-secure-bb-pinned>
+      <div className="space-y-1" role="status" aria-live="polite">
+        {notes.map((n) => (
+          <p key={n.id} className={`pointer-events-auto flex items-start justify-between gap-2 rounded-md border px-3 py-2 text-sm font-semibold shadow ${n.kind === "error" ? "border-red-600/60 bg-red-50 text-red-900 dark:bg-red-950 dark:text-red-100" : "border-green-600/50 bg-green-50 text-green-900 dark:bg-green-950 dark:text-green-100"}`}>
+            <span>{n.kind === "done" ? doneMessage(n.text) : n.text}</span>
+            {n.kind === "error" ? <button type="button" className="underline" onClick={() => dismiss(n.id)}>Закрыть</button> : null}
+          </p>
+        ))}
+      </div>
     </div>
   );
 }
 
 /** A one-shot action that needs a fresh TOTP code. `done` (a short phrase: «удалён плагин X 1.0») is announced as «Готово: …» where the cards are. */
-function useCodeAction(refetch: () => void) {
+function useCodeAction(refetch: () => void, opts: { pin?: boolean; slot?: { key: string; elId: string } } = {}) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ok, setOk] = useState<string | null>(null);
@@ -177,9 +188,13 @@ function useCodeAction(refetch: () => void) {
     setOk(null);
     try {
       const res = (await fn()) as { note?: string } | undefined;
-      if (res?.note) setOk(res.note);
+      if (res?.note) {
+        if (opts.pin) announce(res.note, { kind: "info" });
+        else setOk(res.note);
+      }
       if (done) {
-        announce(done);
+        const height = opts.slot ? (document.getElementById(opts.slot.elId)?.offsetHeight ?? 0) : 0;
+        announce(done, opts.slot ? { slot: { key: opts.slot.key, height } } : undefined);
         setLocked(true);
         window.setTimeout(() => { if (alive.current) setLocked(false); }, LOCK_MS);
       }
@@ -188,7 +203,8 @@ function useCodeAction(refetch: () => void) {
       // The server's words are English and have inner names in them: the person reads a Russian sentence; the original goes to the console for whoever looks.
       const raw = e instanceof Error ? e.message : String(e);
       console.error("[secure-bb]", raw);
-      setError(humanError(raw));
+      if (opts.pin) announce(humanError(raw), { kind: "error" });
+      else setError(humanError(raw));
     } finally {
       setBusy(false);
     }
@@ -2031,7 +2047,6 @@ function AgentsSection({ ov, rpc, refetch, showDone }: { ov: Overview; rpc: Rpc;
     );
   return (
     <div className="space-y-3">
-      {showDone ? <DoneNotes /> : null}
       <div className={`${card} space-y-1`}>
         <p>
           Защита следит за настройками, правилами и памятью агентов и сравнивает их с теми, что вы одобрили. Просмотрено файлов: {st.scannedFiles ?? 0}
@@ -2479,6 +2494,10 @@ function AuthorWhy({ why }: { why: string | null | undefined }) {
 
 interface ReviewProps {
   q: QueueRow;
+  /** The card is the one of its plugin in the list (a resolved one leaves a stub of the same height); the older versions folded under it are not. */
+  slotted?: boolean;
+  /** Came after the page was opened. */
+  fresh?: boolean;
   ov: Overview;
   rpc: Rpc;
   refetch: () => void;
@@ -2491,8 +2510,8 @@ interface ReviewProps {
 }
 
 /** Yellow «Проверьте» (a new right or an unknown source) and red «Остановлено» (a hard flag). Every action on it is about THIS version, and says so. */
-function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onKeep, onTrustPending }: ReviewProps) {
-  const act = useCodeAction(refetch);
+function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onKeep, onTrustPending, slotted = true, fresh = false }: ReviewProps) {
+  const act = useCodeAction(refetch, { pin: true, ...(slotted ? { slot: { key: q.pluginId, elId: `sbb-card-${q.id}` } } : {}) });
   const proof = useProof(ov, rpc);
   const [typed, setTyped] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -2513,7 +2532,11 @@ function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onKeep, onTrustPen
     : yellowText({ pluginId: q.pluginId, version: q.version, level: ux?.level ?? "unknown", sourceLabel: ux?.sourceLabel ?? q.source, reason: q.reason, caps });
   const approve = (acknowledgeBlock: boolean) =>
     proof.run({ kind: "approve", queueId: q.id, acknowledgeBlock }, (p) => rpc.call("queue.approve", { id: q.id, ...p, acknowledgeBlock } as never), { routine: true, dangerous: acknowledgeBlock });
-  const allowedWhat = `разрешён плагин ${q.pluginId} ${q.version}`;
+  const risk = riskHeadline(caps, (found?.findings ?? []).filter((f) => f.severity === "review").map((f) => f.rule));
+  const allowedWhat = enabledWhat(q.pluginId, q.version);
+  const verb = approveVerb(risk);
+  const configNote = agentConfigNote(found?.findings ?? []);
+  const riskClass = risk.level === "safe" ? "text-green-800 dark:text-green-300" : risk.level === "danger" ? "text-red-700 dark:text-red-400" : "text-yellow-900 dark:text-yellow-200";
   const trustEntry = ux?.entry ?? null;
   const blockedApprove = unsafeDir || !proof.ready({ routine: true });
   const win = windowAvailability({ threadId: q.threadId, queueId: q.id, sourceKind: q.sourceKind, level: ux?.level ?? "unknown" });
@@ -2526,9 +2549,16 @@ function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onKeep, onTrustPen
     }, `удалён плагин ${q.pluginId} ${q.version}`);
   return (
     <div className={red ? cardBlocked : cardYellow} id={`sbb-card-${q.id}`} data-secure-bb-card={color} data-secure-bb-version={q.version}>
-      <h3 className="text-base font-semibold">{text.title}</h3>
-      <p className={`text-xs ${muted}`}>Версия {q.version}: всё, что вы нажмёте на этой карточке, относится только к ней.</p>
+      {red ? (
+        <h3 className="text-base font-semibold">{text.title}{fresh ? <span className="ml-2 rounded bg-blue-600 px-1.5 py-0.5 text-xs font-medium text-white">новое</span> : null}</h3>
+      ) : (
+        <>
+          <h3 className={`text-base font-semibold ${riskClass}`} data-secure-bb-risk={risk.level}>{risk.text}{fresh ? <span className="ml-2 rounded bg-blue-600 px-1.5 py-0.5 text-xs font-medium text-white">новое</span> : null}</h3>
+          <p className={`text-xs ${muted}`}>«{q.pluginId}» {q.version}{risk.level === "safe" ? ": можно включить" : ""}</p>
+        </>
+      )}
       <p className="mt-1"><Emph text={text.line} /></p>
+      {configNote && !red ? <p className="mt-1 text-xs">{configNote}</p> : null}
       <AuthorWhy why={ux?.why} />
       <Origin ux={ux} q={q} />
       {unsafeDir ? <p className="mt-1 font-semibold text-red-700 dark:text-red-400">Разрешить нельзя: в папке плагина или выше может писать кто-то кроме пользователя сервера, и после проверки файлы можно подменить. Исправьте права или предложите плагин через <span className="font-mono">bb secure-bb propose</span>.</p> : null}
@@ -2537,7 +2567,7 @@ function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onKeep, onTrustPen
           <>
             <ProofField proof={proof} routine />
             <button className={btnPrimary} disabled={act.busy || blockedApprove} onClick={() => void act.run(async () => { await approve(false); return { note: approvedNote(q.pluginId, q.version) }; }, allowedWhat)}>
-              {actionLabel("Разрешить", q.pluginId, q.version)}
+              {actionLabel(verb, q.pluginId, q.version)}
             </button>
           </>
         )}
@@ -2562,7 +2592,7 @@ function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onKeep, onTrustPen
       {!red ? (
         <Fold id={cardFoldId(q, "scope")} className="mt-2" summary="Подробнее: на какой срок">
           <div className="mt-2 space-y-2">
-            <p className={muted}>«{actionLabel("Разрешить", q.pluginId, q.version)}» действует только на эту версию.</p>
+            <p className={muted}>{scopeText(q.version)} «{actionLabel(verb, q.pluginId, q.version)}» действует только на эту версию.</p>
             <div className="flex flex-wrap items-center gap-2">
               {win.available ? (
                 <button className={btn} disabled={act.busy || !proof.ready({ routine: true })} onClick={() => void act.run(async () => { await proof.run({ kind: "window.open", queueId: q.id }, (p) => rpc.call("window.open", { queueId: q.id, ...p } as never), { routine: true }); })}>
@@ -2589,6 +2619,7 @@ function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onKeep, onTrustPen
       ) : null}
       <Fold id={cardFoldId(q, "tech")} className="mt-2" defaultOpen={detail.expanded} summary={red ? "Подробности" : "Технические подробности"}>
         <div className="mt-2 space-y-1">
+          {red ? <p className={`text-xs ${muted}`}>{scopeText(q.version)}</p> : null}
           <p className="break-all text-xs">{q.sourceKind}: {q.source} · версия {q.version}{q.trigger ? ` · ${q.trigger}` : ""}</p>
           {q.reason ? <p className="text-xs">Причина: {q.reason}</p> : null}
           {detail.hashes && q.contentHash ? <p className="break-all font-mono text-xs">{q.contentHash}</p> : null}
@@ -2613,7 +2644,6 @@ function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onKeep, onTrustPen
         </div>
       </Fold>
       <ProofNotes proof={proof} />
-      <Msg error={act.error} ok={act.ok} reserve />
     </div>
   );
 }
@@ -2708,7 +2738,7 @@ function AwayCard({ ov, since, onSeen, onReview, canReview, kept, alarms, onShow
       </ul>
       <p className={`mt-1 text-xs ${muted}`}>С {when(since)}. Показаны последние записи; более старые могли не поместиться.</p>
       <div className="mt-2 flex flex-wrap gap-2">
-        <button className={btnPrimary} title={alarmBlock ? "Скрывает только строки выше, без тревог. Тревоги остаются, пока их не разберут." : undefined} onClick={() => onSeen(awaySeenMark(events, Date.now()))}>{alarmBlock ? "Скрыть эти строки (тревоги останутся)" : "Всё в порядке"}</button>
+        <button className={btnPrimary} title={alarmBlock ? "Скрывает только строки выше, без тревог. Тревоги остаются, пока их не разберут." : undefined} onClick={() => onSeen(awaySeenMark(events, Date.now()))}>{alarmBlock ? "Скрыть эти строки (тревоги останутся)" : AWAY_HIDE_LABEL}</button>
         {canReview ? <button className={btn} onClick={onReview}>Разобрать</button> : null}
       </div>
     </div>
@@ -2854,7 +2884,6 @@ function QuarantineTab({ ov, rpc, refetch, onTrustPending, onShowCard, isKept, o
   const skills = removedSkillsOf(ov);
   return (
     <div className="space-y-3">
-      <DoneNotes />
       <p className={muted}>Здесь то, что стоит на паузе: плагины, которые не запущены, пока вы не решите, и удалённые скиллы. Ничего не потеряно: любую вещь можно вернуть.</p>
       <Section title={`Плагины (${held.length})`} id="sbb-quarantine-plugins">
         {held.length === 0 ? <div className={`${card} ${muted}`}>В карантине ничего нет.</div> : held.map((q) => <QuarantineRow key={q.id} q={q} ov={ov} rpc={rpc} refetch={refetch} onTrustPending={onTrustPending} onShowCard={onShowCard} kept={isKept(q)} onUnkeep={onUnkeep} />)}
@@ -2968,13 +2997,13 @@ function Wizard({ ov, rpc, refetch, onClose }: { ov: Overview; rpc: Rpc; refetch
       ) : null}
       {step === 1 ? (
         <div className="mt-2 space-y-2">
-          <p>Откуда вы ставите плагины сами? Из «моих источников» новые версии проходят без вопросов, пока плагин не попросит новых прав. Добавление — касанием.</p>
+          <p>{WIZARD_SOURCES_TEXT}</p>
           {suggestions.length === 0 ? <p className={muted}>Подходящих источников у установленных плагинов не нашлось. Свои можно добавить позже на вкладке «Исключения и доверие».</p> : suggestions.map((s) => (
-            <label key={s} className="flex items-center gap-2"><input type="checkbox" checked={picked.includes(s)} onChange={(e) => setPicked(e.target.checked ? [...picked, s] : picked.filter((x) => x !== s))} /><span className="font-mono text-xs">{s}</span></label>
+            <label key={s} className="flex items-center gap-2"><input type="checkbox" checked={picked.includes(s)} onChange={(e) => setPicked(e.target.checked ? [...picked, s] : picked.filter((x) => x !== s))} /><span className="text-sm">{friendlySource(s)}</span></label>
           ))}
           <div className="flex flex-wrap items-center gap-2">
             {picked.length > 0 ? <ProofField proof={proof} /> : null}
-            <button className={btnPrimary} disabled={act.busy || (picked.length > 0 && !proof.ready())} onClick={() => void act.run(async () => { if (picked.length > 0) await proof.run({ kind: "trust.add", entries: picked }, (p) => rpc.call("trust.add", { entries: picked, ...p } as never)); setStep(2); })}>{picked.length > 0 ? "Добавить и дальше" : "Дальше"}</button>
+            <button className={btnPrimary} disabled={act.busy || (picked.length > 0 && !proof.ready())} onClick={() => void act.run(async () => { if (picked.length > 0) await proof.run({ kind: "trust.add", entries: picked }, (p) => rpc.call("trust.add", { entries: picked, ...p } as never)); setStep(2); })}>{picked.length > 0 ? "Добавить и дальше" : "Пропустить"}</button>
             <button className={btn} onClick={() => setStep(0)}>Назад</button>
           </div>
         </div>
@@ -2982,7 +3011,7 @@ function Wizard({ ov, rpc, refetch, onClose }: { ov: Overview; rpc: Rpc; refetch
       {step === 2 ? (
         <div className="mt-2 space-y-2">
           <p>Второй фактор подтверждает ваши решения: без него одобрить нельзя.</p>
-          <p className={second ? "text-green-700 dark:text-green-400" : "font-semibold text-red-700 dark:text-red-400"}>{second ? `Второй фактор настроен (ключей: ${keys.length}).` : "Второй фактор ещё не настроен."}</p>
+          <p className={second ? "text-green-700 dark:text-green-400" : "font-semibold text-red-700 dark:text-red-400"}>{secondFactorText({ codes: ov.totp.state === "locked" || ov.totp.state === "external", keys: keys.length })}</p>
           {second ? null : <p>На машине со сторожем выполните <span className="font-mono">sbb-guard setup</span>: мастер сам подключит коды или ключ, напечатает ссылку для этой страницы и проверит касание. Если такой команды в вашей сборке ещё нет, используйте <span className="font-mono">sudo sbb-guard passkey-enroll</span>, а затем вернитесь сюда.</p>}
           <div className="flex flex-wrap gap-2">
             <button className={btnPrimary} onClick={onClose}>Готово</button>
@@ -3023,14 +3052,26 @@ function GatePage() {
   const [wizardDone, setWizardDone] = useState<boolean>(() => lsGet(WIZARD_KEY) !== null);
   const [pending, setPending] = useState<Array<{ entry: string; label: string }>>([]);
   const [focus, setFocus] = useState<string | null>(null);
-  const [doneNotes, setDoneNotes] = useState<Array<{ id: number; text: string }>>([]);
+  const [doneNotes, setDoneNotes] = useState<Note[]>([]);
   const doneSeq = useRef(0);
-  const announce = useCallback((text: string) => {
+  // A resolved card leaves a stub of its height where it stood; it stays until the person closes it. The list keeps its order while the page is open.
+  const [stubs, setStubs] = useState<Stub[]>([]);
+  const orderRef = useRef<string[] | null>(null);
+  const laterOrderRef = useRef<string[] | null>(null);
+  const freshRef = useRef<Set<string>>(new Set());
+  const pageStart = useRef(Date.now());
+  const dismissNote = useCallback((id: number) => setDoneNotes((l) => l.filter((n) => n.id !== id)), []);
+  const announce = useCallback((text: string, opts: AnnounceOpts = {}) => {
     const id = ++doneSeq.current;
-    setDoneNotes((l) => [...l, { id, text }].slice(-3));
-    window.setTimeout(() => setDoneNotes((l) => l.filter((n) => n.id !== id)), DONE_MS);
+    const kind = opts.kind ?? "done";
+    setDoneNotes((l) => [...l, { id, text, kind }].slice(-4));
+    if (kind !== "error") window.setTimeout(() => setDoneNotes((l) => l.filter((n) => n.id !== id)), DONE_MS);
+    if (opts.slot && kind === "done") {
+      const { key, height } = opts.slot;
+      setStubs((l) => [...l.filter((x) => x.key !== key), makeStub(key, text, height)]);
+    }
   }, []);
-  const doneCtx = useMemo(() => ({ notes: doneNotes, announce }), [doneNotes, announce]);
+  const doneCtx = useMemo(() => ({ notes: doneNotes, announce, dismiss: dismissNote }), [doneNotes, announce, dismissNote]);
   // «Показать» and the banners: switch to the tab that holds the element, open the list of put-aside cards if it is there, scroll to it and
   // flash it, so that a press is always seen to do something (also when the element is already on the screen).
   useEffect(() => {
@@ -3082,6 +3123,13 @@ function GatePage() {
   const plan = planCards(heldAll, decisions);
   const cardColorOf = (c: { all: QueueRow[] }): "red" | "yellow" => (c.all.some((q) => colorOf(q) === "red") ? "red" : "yellow");
   const refOf = (c: { shown: QueueRow; all: QueueRow[]; pluginId: string }): ProblemRef => ({ anchor: `sbb-card-${c.shown.id}`, tab: "status", text: `${c.pluginId} ${c.shown.version}` });
+  const stubKeys = stubs.map((x) => x.key);
+  const activeOrder = stableOrder(orderRef.current, plan.active.map((c) => c.pluginId), stubKeys);
+  orderRef.current = activeOrder.order;
+  const laterOrder = stableOrder(laterOrderRef.current, plan.later.map((c) => c.pluginId));
+  laterOrderRef.current = laterOrder.order;
+  for (const k of [...activeOrder.fresh, ...laterOrder.fresh]) freshRef.current.add(k);
+  const activeItems = layoutItems(activeOrder.order, new Set(plan.active.map((c) => c.pluginId)), stubs);
   const planned = [...plan.active, ...plan.later];
   const reds = planned.filter((c) => cardColorOf(c) === "red");
   const yellows = planned.filter((c) => cardColorOf(c) === "yellow");
@@ -3105,7 +3153,8 @@ function GatePage() {
     if (p.anchor.startsWith("sbb-card-") && heldAll.some((q) => q.id === id && isDeferred(q))) openFold("deferred", true);
     setFocus(p.anchor);
   };
-  const since = awaySince(seenAt, Math.max(ov.now, Date.now()));
+  // Fixed for as long as the page is open: «С …» must not change under the eyes.
+  const since = awaySince(seenAt, Math.max(pageStart.current, Number(seenAt ?? 0) || 0));
   const seen = (mark: number) => {
     lsSet(AWAY_KEY, String(mark));
     setSeenAt(String(mark));
@@ -3120,11 +3169,11 @@ function GatePage() {
   const launchFailed = ov.plugins.filter((p) => p.pin !== null && launchProblem(p) !== null);
   /** A card of a plugin: its latest version, the other waiting versions folded under it. */
   const renderCard = (c: { shown: QueueRow; others: QueueRow[] }, deferred: boolean) => (
-    <div key={cardKey(c.shown)} className="space-y-2">
-      <ReviewCard q={c.shown} {...cardProps} deferred={deferred} />
+    <div key={c.shown.pluginId} className="space-y-2">
+      <ReviewCard key={cardKey(c.shown)} q={c.shown} {...cardProps} deferred={deferred} fresh={freshRef.current.has(c.shown.pluginId)} />
       {c.others.length > 0 ? (
         <Fold id={`more-${c.shown.pluginId}`} className="ml-3" summary={`${moreVersionsText(c.others.length)} (${c.others.map((o) => o.version).join(", ")})`}>
-          <div className="mt-2 space-y-2">{c.others.map((o) => <ReviewCard key={cardKey(o)} q={o} {...cardProps} deferred={isDeferred(o)} />)}</div>
+          <div className="mt-2 space-y-2">{c.others.map((o) => <ReviewCard key={cardKey(o)} q={o} {...cardProps} deferred={isDeferred(o)} slotted={false} />)}</div>
         </Fold>
       ) : null}
     </div>
@@ -3139,6 +3188,7 @@ function GatePage() {
       <style>{".sbb-flash{outline:3px solid #eab308;outline-offset:3px;border-radius:0.5rem}"}</style>
       <div className="mx-auto max-w-3xl space-y-6 p-4 sm:p-6">
         <h1 className="text-xl font-semibold">secure-bb</h1>
+        <PinnedNotes />
         <TroubleshootBar until={ov.guard?.troubleshootUntil ?? 0} />
         <StatusBar level={status.level} label={status.label} text={guardDown ? GUARD_DOWN_TEXT : status.first ? `Сначала: ${status.first.text}.` : "Всё, что нужно решить, решено."} onShow={status.first ? () => showProblem(status.first!) : null} />
         <div role="tablist" className="flex flex-wrap gap-1 border-b border-border">
@@ -3166,13 +3216,24 @@ function GatePage() {
             <AgentsAlarm ov={ov} onShow={() => showProblem({ anchor: "sbb-agents", tab: agentsTab, text: "" })} />
             <WindowRows windows={ov.windows} cfgWindows={ov.watch.windows} rpc={rpc} refetch={refetch} />
             <Section title={`Ждут решения вас${plan.active.length > 0 ? ` (${plan.active.length})` : ""}`}>
-              <DoneNotes />
-              {plan.active.length === 0 ? <div className={`${card} ${muted}`}>Сейчас решать нечего.</div> : plan.active.map((c) => renderCard(c, false))}
+              {activeItems.length === 0 ? <div className={`${card} ${muted}`}>Сейчас решать нечего.</div> : activeItems.map((it) => {
+                if (it.stub) {
+                  const st = it.stub;
+                  return (
+                    <div key={`stub:${st.key}`} className="flex items-center justify-between gap-2 rounded-lg border-2 border-green-600/50 bg-green-50 p-4 text-sm font-semibold text-green-900 dark:bg-green-950/40 dark:text-green-100" style={{ minHeight: st.height }} data-secure-bb-stub>
+                      <span>{st.text}</span>
+                      <button type="button" className={btn} onClick={() => setStubs((l) => l.filter((x) => x.key !== st.key))}>Скрыть</button>
+                    </div>
+                  );
+                }
+                const c = plan.active.find((x) => x.pluginId === it.key)!;
+                return renderCard(c, false);
+              })}
             </Section>
             {plan.later.length > 0 ? (
               <Fold id="deferred" summaryClassName="cursor-pointer font-semibold" summary={`Отложено (${plan.later.length})`}>
                 <p className={`mt-1 text-xs ${muted}`}>Вы отложили эти карточки кнопкой «Решить позже». Плагины остаются в карантине и не запущены.</p>
-                <div className="mt-2 space-y-2">{plan.later.map((c) => renderCard(c, true))}</div>
+                <div className="mt-2 space-y-2">{laterOrder.order.map((k) => plan.later.find((c) => c.pluginId === k)).filter((c): c is NonNullable<typeof c> => c !== undefined).map((c) => renderCard(c, true))}</div>
               </Fold>
             ) : null}
             {plan.kept.length > 0 ? <p className={`text-xs ${muted}`}>Оставлено вами в карантине: {plan.kept.map((q) => `${q.pluginId} ${q.version}`).join(", ")}. Они не запущены; вернуть решение можно на вкладке «Карантин».</p> : null}

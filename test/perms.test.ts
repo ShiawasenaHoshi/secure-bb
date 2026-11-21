@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, lchmodSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -86,6 +86,36 @@ describe("writableByOthers (spec: only the server's user may write to where a pl
     const issues = await writableByOthers(link, mine);
     expect(issues[0]).toMatchObject({ where: "dir", why: "other-write", path: open });
     expect(await writableByOthers(plugin, mine)).toEqual([]);
+  });
+
+  it("the mode of a symbolic link inside is never judged (on Linux a link is always rwxrwxrwx): node_modules/.bin/* is not «writable by others»", async () => {
+    const { plugin } = tree();
+    mkdirSync(join(plugin, "node_modules", ".bin"), { recursive: true });
+    mkdirSync(join(plugin, "node_modules", "tool"), { recursive: true });
+    for (const d of [join(plugin, "node_modules"), join(plugin, "node_modules", ".bin"), join(plugin, "node_modules", "tool")]) chmodSync(d, 0o755);
+    writeFileSync(join(plugin, "node_modules", "tool", "cli.js"), "#!/usr/bin/env node\n", { mode: 0o755 });
+    const link = join(plugin, "node_modules", ".bin", "tool");
+    symlinkSync("../tool/cli.js", link);
+    // macOS can give a link its own mode; Linux cannot (it is rwxrwxrwx already)
+    if (typeof lchmodSync === "function") {
+      try {
+        lchmodSync(link, 0o777);
+      } catch {
+        /* not supported here */
+      }
+    }
+    expect(await writableByOthers(plugin, mine)).toEqual([]);
+  });
+
+  it("a real file or directory behind the link is still judged where it really is", async () => {
+    const { plugin } = tree();
+    mkdirSync(join(plugin, "node_modules", "tool"), { recursive: true });
+    for (const d of [join(plugin, "node_modules"), join(plugin, "node_modules", "tool")]) chmodSync(d, 0o755);
+    writeFileSync(join(plugin, "node_modules", "tool", "cli.js"), "x\n", { mode: 0o666 });
+    chmodSync(join(plugin, "node_modules", "tool", "cli.js"), 0o666);
+    symlinkSync("tool/cli.js", join(plugin, "node_modules", "cli"));
+    const issues = await writableByOthers(plugin, mine);
+    expect(issues.map((i) => i.path)).toEqual([join(plugin, "node_modules", "tool", "cli.js")]);
   });
 
   it("describes issues for the page", () => {

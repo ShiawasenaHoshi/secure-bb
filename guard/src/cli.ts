@@ -8,6 +8,7 @@ import { resolvePaths, type GuardPaths } from "./config.ts";
 import { openDb, privateDir } from "./db.ts";
 import { Guard, GuardError, SETUP_CHECK_PURPOSE, type ImportItem, type PasskeyRow } from "./guard.ts";
 import { encodeQr } from "./qr.ts";
+import { SocketGroupError } from "./chown.ts";
 import { listen } from "./server.ts";
 import { generateSecret, otpauthUri } from "./totp.ts";
 
@@ -825,6 +826,11 @@ export async function main(argv: string[], io: Io = terminalIo): Promise<number>
         return 64;
     }
   } catch (err) {
+    // The administrator's to fix (the socket's group): the sentence says how; nothing else.
+    if (err instanceof SocketGroupError) {
+      io.err(err.message);
+      return 78;
+    }
     io.err(`sbb-guard: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }

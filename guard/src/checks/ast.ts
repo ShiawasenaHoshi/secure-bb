@@ -792,7 +792,9 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
 
   const markExec = (call: N, label: string): void => {
     facts.execSink = true;
-    cap("dynamic_code", label, call);
+    // Code given as plain string literals is fixed text (`new Function("return this")`, common in bundles): the label says so, and the page does not show it as «code built on the fly».
+    const fixedText = call.arguments.length > 0 && call.arguments.every((a: N) => a.type === "Literal" && typeof a.value === "string");
+    cap("dynamic_code", fixedText ? `${label}(literal)` : label, call);
     if (call.arguments.some((a: N) => decoded(a))) finding("decode-eval", "block", call);
   };
 

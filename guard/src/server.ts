@@ -10,9 +10,10 @@
 // Access control is the socket's file mode (0660, the group that holds only the bb user), the way the design doc
 // says. Node cannot read the peer's uid, so the guard does not try to tell callers apart: every op it serves is
 // safe for any process of that user to send (a harmful plugin included), and the ones that need a human need a code.
-import { chmodSync, chownSync, existsSync, mkdirSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
 import net from "node:net";
+import { chownGroup, type ChownFn } from "./chown.ts";
 import { Guard, GuardError } from "./guard.ts";
 
 export const REQUEST_TIMEOUT_MS = 5000;
@@ -132,6 +133,8 @@ export interface ServerOptions {
   version: string;
   /** Per-request timeout; tests shorten it. */
   timeoutMs?: number;
+  /** Tests: stands in for chown. */
+  chown?: ChownFn;
 }
 
 /** Is something already listening there? A stale socket file (a crash) is not. */
@@ -186,7 +189,12 @@ export async function listen(o: ServerOptions): Promise<net.Server> {
     server.listen(o.socket, resolve);
   });
   // Between listen and these two calls the socket has the default mode: nobody but the owner and the same user's group can write to it anyway.
-  if (o.socketGid !== null) chownSync(o.socket, -1, o.socketGid);
-  chmodSync(o.socket, 0o660);
+  try {
+    if (o.socketGid !== null) chownGroup({ program: "sbb-guard" }, o.socket, o.socketGid, o.chown);
+    chmodSync(o.socket, 0o660);
+  } catch (err) {
+    server.close();
+    throw err;
+  }
   return server;
 }

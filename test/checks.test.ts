@@ -65,14 +65,26 @@ describe("structure (spec §5.1)", () => {
   });
   it("blocks .npmrc", async () => expect(rules(await fixture("npmrc"), "block")).toContain("npmrc"));
   // Built on the fly: the repository's .gitignore excludes .claude/, so a fixture could not be committed.
-  it("blocks agent/IDE configs", async () => {
+  it("agent/IDE configs inside the plugin are a review, not a block", async () => {
     const r = await tree({ ".claude/settings.json": "{}\n", ".cursor/rules": "x\n", "index.js": "export {};\n" });
     expect(r.findings.filter((f) => f.rule === "agent-config").map((f) => f.file).sort()).toEqual([".claude", ".cursor"]);
+    expect(r.findings.filter((f) => f.rule === "agent-config").every((f) => f.severity === "review")).toBe(true);
+    expect(rules(r, "block")).not.toContain("agent-config");
   });
-  it("blocks .vscode, .codex, CLAUDE.md and AGENTS.md; GitHub CI is only information", async () => {
+  it("reviews .vscode, .codex, CLAUDE.md and AGENTS.md; GitHub CI is only information", async () => {
     const r = await tree({ ".github/workflows/ci.yml": "on: push\n", ".vscode/tasks.json": "{}\n", ".codex/config.toml": "x\n", "CLAUDE.md": "x\n", "AGENTS.md": "x\n", "index.js": "export {};\n" });
-    expect(r.findings.filter((f) => f.rule === "agent-config" && f.severity === "block").map((f) => f.file).sort()).toEqual([".codex", ".vscode", "AGENTS.md", "CLAUDE.md"]);
+    expect(r.findings.filter((f) => f.rule === "agent-config" && f.severity === "review").map((f) => f.file).sort()).toEqual([".codex", ".vscode", "AGENTS.md", "CLAUDE.md"]);
     expect(r.findings.find((f) => f.file === ".github/workflows")).toMatchObject({ rule: "ci-config", severity: "info" });
+  });
+  it("code that writes agent settings is still a block (the reachable code, not a folder)", async () => {
+    const r = await tree({ "i.js": "import { writeFileSync } from 'node:fs';\nwriteFileSync('/Users/me/.claude/settings.json', '{}');\n", ".claude/settings.json": "{}\n" });
+    expect(rules(r, "block")).toContain("rc-or-agent-config-write");
+  });
+  it("Function with plain string literals is marked fixed text; a built string is not", async () => {
+    const lit = await tree({ "i.js": "export const g = new Function('return this')();\n" });
+    expect(cap(lit, "dynamic_code")?.detail.join(",")).toContain("new Function(literal)");
+    const dyn = await tree({ "i.js": "export const run = (code) => new Function(code)();\n" });
+    expect(cap(dyn, "dynamic_code")?.detail).toContain("new Function");
   });
   it("blocks minified source", async () => expect(rules(await fixture("minified"), "block")).toContain("minified"));
   it("blocks obfuscated identifiers", async () => {
@@ -184,7 +196,7 @@ describe("bypasses: each is a finding, a capability or an explicit 'dynamic acce
   it('require("child_" + "process")', async () => expect(cap(await fixture("require-concat"), "child_process")).toBeDefined());
   it('process["env"]', async () => expect(cap(await fixture("process-env-computed"), "env")!.detail).toEqual(["TOKEN"]));
   it('const {exec} = await import("node:child_process")', async () => expect(cap(await fixture("dynamic-import-cp"), "child_process")).toBeDefined());
-  it("new Function", async () => expect(cap(await fixture("new-function"), "dynamic_code")!.detail).toContain("new Function"));
+  it("new Function (a plain string literal is marked as fixed text)", async () => expect(cap(await fixture("new-function"), "dynamic_code")!.detail.join(",")).toMatch(/new Function(\(literal\))?/));
   it("atob → eval is a block", async () => {
     const r = await fixture("decode-eval");
     expect(r.findings.find((f) => f.rule === "decode-eval")).toMatchObject({ severity: "block", file: "index.js", line: 2 });
@@ -350,7 +362,7 @@ describe("review 2.1 — what used to be silent", () => {
     expect(rules(r, "review")).toContain("global-proxy");
     expect(cap(r, "dynamic_code")!.detail.join()).toContain("Proxy");
   });
-  it("g.eval(…) through a proxy is an eval", async () => expect(cap(await fixture("proxy-global"), "dynamic_code")!.detail).toContain("eval"));
+  it("g.eval(…) through a proxy is an eval", async () => expect(cap(await fixture("proxy-global"), "dynamic_code")!.detail.join(",")).toMatch(/eval/));
   it("a Proxy over an ordinary object is nothing", async () => expect((await fixture("proxy-plain")).capabilities).toEqual([]));
   it("setTimeout/setInterval with a string execute code", async () => {
     for (const name of ["settimeout-string", "setinterval-string"]) {
