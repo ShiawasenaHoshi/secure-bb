@@ -157,6 +157,12 @@ export const MIGRATIONS: string[] = [
      fetched_at INTEGER NOT NULL,
      dist_tags TEXT NOT NULL,
      times TEXT NOT NULL)`,
+  // What the registry's tarball of a package version holds (file → sha256), so that a copy in node_modules can be compared
+  // without downloading it again. Only filled after the tarball matched the registry's integrity.
+  `CREATE TABLE IF NOT EXISTS integrity_cache (
+     key TEXT PRIMARY KEY,
+     fetched_at INTEGER NOT NULL,
+     files TEXT NOT NULL)`,
   // Stage 3: optional AI scan results (spec §8). Keyed by the scanned source tree; the core's hash is kept when known.
   `CREATE TABLE IF NOT EXISTS scans (
      id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -719,6 +725,16 @@ export class Store implements RegistryCache {
                 ON CONFLICT(name) DO UPDATE SET state = excluded.state, fetched_at = excluded.fetched_at, dist_tags = excluded.dist_tags, times = excluded.times`)
       .run(e.name, e.state, e.fetchedAt, JSON.stringify(e.distTags), JSON.stringify(e.times));
     this.db.prepare(`DELETE FROM registry_cache WHERE fetched_at < ?`).run(this.now() - PRUNE_MS);
+  }
+
+  // ---- tarball file hashes (integrity of node_modules) ---------------------
+  getManifest(key: string): Record<string, string> | undefined {
+    const r = this.db.prepare(`SELECT files FROM integrity_cache WHERE key = ?`).get(key) as Raw | undefined;
+    return r ? (JSON.parse(r.files as string) as Record<string, string>) : undefined;
+  }
+  putManifest(key: string, files: Record<string, string>): void {
+    this.db.prepare(`INSERT INTO integrity_cache (key, fetched_at, files) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET fetched_at = excluded.fetched_at, files = excluded.files`).run(key, this.now(), JSON.stringify(files));
+    this.db.prepare(`DELETE FROM integrity_cache WHERE fetched_at < ?`).run(this.now() - PRUNE_MS);
   }
 
   // ---- queue ------------------------------------------------------------

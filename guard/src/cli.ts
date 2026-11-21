@@ -41,7 +41,7 @@ export const terminalIo: Io = {
 const USAGE = `sbb-guard ${VERSION} — decision guard for secure-bb
 
   sbb-guard serve [--data DIR] [--socket PATH] [--socket-gid GID] [--rp-id ID] [--origin URL] [--agents-home DIR] [--agents-root DIR]... [--agents-scan-sec N]
-                  [--plugins-root DIR]... [--known-source ENTRY]...
+                  [--plugins-root DIR]... [--known-source ENTRY]... [--offline]
   sbb-guard totp-register [--data DIR] [--code CODE] [--replacing-code CODE]
   sbb-guard totp-disable [--data DIR] [--yes]
   sbb-guard setup [--data DIR] [--label NAME] [--rp-id ID] [--origin URL]
@@ -59,6 +59,7 @@ from the console only. --agents-scan-sec (default 120) is the period of the scan
 Trust by source (serve): --plugins-root DIR (repeatable) / SBB_GUARD_PLUGINS_ROOTS: where the core keeps plugins installed from git; the guard reads a version
 only from there (the guard's user needs read access: the installer's ACL), and without it nothing from git passes by itself. --known-source ENTRY (repeatable) /
 SBB_GUARD_KNOWN_SOURCES: sources of the official catalog (github:owner/name or github:owner/*), the level "known". The owner's own sources are kept by the guard (a touch adds one).
+Offline (serve): --offline / SBB_GUARD_OFFLINE=1: the checks make no network requests; node_modules is not compared with the npm registry and every package is scanned in full, as before registry verification existed.
 Troubleshooting (console only, with a code): "troubleshoot 30" (or "30m") makes the guard pass everything for that long (at most 240 minutes), write every
 decision into the journal and return by itself; the page shows a red bar with the time left. It is not an off switch: the guard has none. "troubleshoot off" ends it earlier.
 Setup: a step-by-step wizard in Russian (a code from an app, a passkey with a link to the page, a test touch); run again, it does only what is missing.
@@ -79,7 +80,7 @@ export function parseArgs(argv: string[]): { cmd: string | undefined; positional
       const key = a.slice(2);
       const eq = key.indexOf("=");
       if (eq >= 0) opts[key.slice(0, eq)] = REPEATABLE.has(key.slice(0, eq)) && typeof opts[key.slice(0, eq)] === "string" ? `${opts[key.slice(0, eq)] as string},${key.slice(eq + 1)}` : key.slice(eq + 1);
-      else if (key === "yes" || key === "help") opts[key] = true;
+      else if (key === "yes" || key === "help" || key === "offline") opts[key] = true;
       else {
         const v = argv[i + 1];
         if (v === undefined || v.startsWith("--")) throw new Error(`--${key} needs a value`);
@@ -98,7 +99,7 @@ const optStr = (o: Opts, k: string): string | undefined => (typeof o[k] === "str
 function open(paths: GuardPaths, now: () => number): { guard: Guard; close: () => void } {
   privateDir(paths.stateDir);
   const db = openDb(paths.db);
-  return { guard: new Guard({ db, now, secretPath: paths.secret, headPath: paths.head, rp: paths.rp, trust: { pluginsRoots: paths.pluginsRoots, knownSources: paths.knownSources }, agents: { home: paths.agentsHome, extraRoots: paths.agentsRoots, deny: [paths.dataDir, dirname(paths.socket)] } }), close: () => db.close() };
+  return { guard: new Guard({ db, now, secretPath: paths.secret, headPath: paths.head, rp: paths.rp, trust: { pluginsRoots: paths.pluginsRoots, knownSources: paths.knownSources, offline: paths.offline }, agents: { home: paths.agentsHome, extraRoots: paths.agentsRoots, deny: [paths.dataDir, dirname(paths.socket)] } }), close: () => db.close() };
 }
 
 /** One request to a running guard. */
@@ -776,7 +777,7 @@ export async function main(argv: string[], io: Io = terminalIo): Promise<number>
   }
   let paths: GuardPaths;
   try {
-    paths = resolvePaths({ data: optStr(opts, "data"), socket: optStr(opts, "socket"), socketGid: optStr(opts, "socket-gid"), rpId: optStr(opts, "rp-id"), origin: optStr(opts, "origin"), agentsHome: optStr(opts, "agents-home"), agentsRoots: optStr(opts, "agents-root"), pluginsRoots: optStr(opts, "plugins-root"), knownSources: optStr(opts, "known-source") });
+    paths = resolvePaths({ data: optStr(opts, "data"), socket: optStr(opts, "socket"), socketGid: optStr(opts, "socket-gid"), rpId: optStr(opts, "rp-id"), origin: optStr(opts, "origin"), agentsHome: optStr(opts, "agents-home"), agentsRoots: optStr(opts, "agents-root"), pluginsRoots: optStr(opts, "plugins-root"), knownSources: optStr(opts, "known-source"), offline: opts.offline === true });
   } catch (err) {
     io.err(err instanceof Error ? err.message : String(err));
     return 64;

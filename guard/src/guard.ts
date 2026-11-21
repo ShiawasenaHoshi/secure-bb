@@ -32,7 +32,13 @@ import {
 } from "./passkey.ts";
 import { verifyTotp } from "./totp.ts";
 import { analyze as analyzeAgents, maskSecrets, unifiedDiff, type Change } from "./agents-rules.ts";
-import { runChecks, type CheckResult } from "./checks/index.ts";
+import { memoryManifestCache, runChecks as runChecksPlain, runChecksVerified, type CheckResult, type RegistryFetch } from "./checks/index.ts";
+
+/** What the guard's own checks may spend on comparing node_modules with the registry; the budget of one evaluation is {@link DEFAULT_BUDGET_MS}. */
+const INTEGRITY_DEADLINE_MS = 2500;
+const manifestCache = memoryManifestCache();
+const runChecksOffline = (dir: string): Promise<CheckResult> => runChecksPlain(dir);
+const runChecks = (dir: string): Promise<CheckResult> => runChecksVerified(dir, { fetch: globalThis.fetch as unknown as RegistryFetch, cache: manifestCache, deadlineMs: INTEGRITY_DEADLINE_MS });
 import { readTree, TreeRefused, type TreeLimits } from "./tree-read.ts";
 import {
   brief,
@@ -286,6 +292,8 @@ export interface TrustConfig {
   knownSources?: string[];
   /** Tests: the checks of a plugin directory (default: the checks module of this tree, the one the plugin uses). */
   checks?: (dir: string) => Promise<CheckResult>;
+  /** No network: the checks do not compare node_modules with the npm registry (`--offline`). */
+  offline?: boolean;
   /** How long a version may be read before the guard gives up and queues it (default 3.5 s: the core waits 5). */
   budgetMs?: number;
   /** Tests: smaller limits of the one pass over a directory. */
@@ -390,7 +398,7 @@ export class Guard {
       if (n === null) throw new Error(`known source ${JSON.stringify(k)} is not github:owner/name, github:owner/* or path:/dir`);
       known.push(n);
     }
-    this.trustCfg = { pluginsRoots: o.trust?.pluginsRoots ?? [], budgetMs: o.trust?.budgetMs ?? DEFAULT_BUDGET_MS, ...(o.trust?.treeLimits ? { treeLimits: o.trust.treeLimits } : {}), known, checks: o.trust?.checks ?? runChecks };
+    this.trustCfg = { pluginsRoots: o.trust?.pluginsRoots ?? [], budgetMs: o.trust?.budgetMs ?? DEFAULT_BUDGET_MS, ...(o.trust?.treeLimits ? { treeLimits: o.trust.treeLimits } : {}), known, checks: o.trust?.checks ?? (o.trust?.offline ? runChecksOffline : runChecks) };
     this.secretDir = dirname(o.secretPath);
     this.headDir = dirname(o.headPath);
     this.rp = o.rp ?? { rpId: DEFAULT_RP_ID, origin: DEFAULT_ORIGIN };
