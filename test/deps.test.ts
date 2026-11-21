@@ -81,7 +81,7 @@ describe("lookalike names (Levenshtein, vendored list)", () => {
     expect(lookalikeOf("mz")).toBeNull();
   });
   it("the vendored list is data with its source and date", async () => {
-    const m = await import("../vendor/popular-packages.mjs");
+    const m = await import("../guard/vendor/popular-packages.mjs");
     expect(m.POPULAR_SOURCE).toMatchObject({ package: "npm-high-impact", version: "1.13.0", license: "MIT", publishedAt: "2026-06-08", vendoredAt: "2026-11-21" });
     expect(m.POPULAR_PACKAGES.length).toBe(5000);
     expect(new Set(m.POPULAR_PACKAGES).size).toBe(5000);

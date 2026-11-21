@@ -21,16 +21,23 @@ export const MAX_CONNECTIONS = 64;
 export const PROTOCOL = 1;
 
 /** Dispatches one parsed request. Never returns a secret: nothing the guard holds is shaped like one. */
-export function dispatch(guard: Guard, req: unknown, version: string): Record<string, unknown> {
+export function dispatch(guard: Guard, req: unknown, version: string): Record<string, unknown> | Promise<Record<string, unknown>> {
   if (typeof req !== "object" || req === null || Array.isArray(req)) throw new GuardError("invalid", "a request is a JSON object");
   const r = req as Record<string, unknown>;
   switch (r.op) {
     case "ping":
       return { protocol: PROTOCOL, version, ts: Date.now() };
-    case "decide": {
-      const d = guard.decide(r);
-      return d.action === "proceed" ? { action: "proceed", via: d.via } : { action: "wait", reason: d.reason, requestId: d.requestId };
-    }
+    // The only op that takes time: the guard reads the version's directory itself before it answers.
+    case "decide":
+      return guard.decideChecked(r).then((d) => (d.action === "proceed" ? { action: "proceed", via: d.via } : { action: "wait", reason: d.reason, requestId: d.requestId }));
+    case "trust":
+      return guard.trustState();
+    case "trust-mode":
+      return { mode: guard.setTrustMode(r.mode, { code: r.code, passkey: r.passkey }) };
+    case "sources-add":
+      return guard.addSources(r);
+    case "sources-remove":
+      return guard.removeSource(r);
     case "hold":
       return guard.hold(r);
     case "state":
@@ -83,12 +90,12 @@ export function dispatch(guard: Guard, req: unknown, version: string): Record<st
   }
 }
 
-export function answer(guard: Guard, line: string, version: string): string {
+export async function answer(guard: Guard, line: string, version: string): Promise<string> {
   let id: unknown;
   try {
     const req = JSON.parse(line) as unknown;
     if (typeof req === "object" && req !== null && "id" in req) id = (req as { id: unknown }).id;
-    const body = dispatch(guard, req, version);
+    const body = await dispatch(guard, req, version);
     return JSON.stringify({ ...(id !== undefined ? { id } : {}), ...body, ok: true });
   } catch (err) {
     if (err instanceof GuardError) return JSON.stringify({ ...(id !== undefined ? { id } : {}), ok: false, error: { code: err.code, message: err.message } });
@@ -136,6 +143,8 @@ export async function listen(o: ServerOptions): Promise<net.Server> {
     conn.once("close", () => open--);
     conn.setTimeout(o.timeoutMs ?? REQUEST_TIMEOUT_MS, () => conn.destroy());
     let buf = "";
+    // Requests of one connection are answered in order, even when one of them takes time.
+    let chain: Promise<void> = Promise.resolve();
     conn.setEncoding("utf8");
     conn.on("data", (chunk: string) => {
       buf += chunk;
@@ -143,7 +152,11 @@ export async function listen(o: ServerOptions): Promise<net.Server> {
       while ((nl = buf.indexOf("\n")) >= 0) {
         const line = buf.slice(0, nl);
         buf = buf.slice(nl + 1);
-        if (line.trim() !== "") conn.write(`${answer(o.guard, line, o.version)}\n`);
+        if (line.trim() !== "")
+          chain = chain.then(async () => {
+            const out = await answer(o.guard, line, o.version);
+            if (!conn.destroyed) conn.write(`${out}\n`);
+          });
       }
       if (buf.length > MAX_LINE_BYTES) conn.destroy(); // an endless line is not a request
     });

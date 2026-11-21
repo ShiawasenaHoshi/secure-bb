@@ -9,8 +9,8 @@
 // The TOTP secret is only ever written by `sbb-guard totp-register` on the console, and is never returned
 // by anything in this file. A touch is either a TOTP code or a passkey signature over a challenge the guard issued for exactly
 // that action (see "Passkeys" below); passkeys are registered only through the console (`sbb-guard passkey-enroll`).
-import { readFileSync, renameSync, unlinkSync, writeFileSync, openSync, closeSync, writeSync, constants, lstatSync } from "node:fs";
-import { basename, dirname } from "node:path";
+import { readFileSync, renameSync, unlinkSync, writeFileSync, openSync, closeSync, writeSync, constants, lstatSync, realpathSync } from "node:fs";
+import { basename, dirname, sep } from "node:path";
 import { timingSafeEqual } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { DEFAULT_ORIGIN, DEFAULT_RP_ID, type RelyingParty } from "./config.ts";
@@ -32,6 +32,25 @@ import {
 } from "./passkey.ts";
 import { verifyTotp } from "./totp.ts";
 import { analyze as analyzeAgents, maskSecrets, unifiedDiff, type Change } from "./agents-rules.ts";
+import { runChecks, type CheckResult } from "./checks/index.ts";
+import { readTree, TreeRefused, type TreeLimits } from "./tree-read.ts";
+import {
+  brief,
+  DEFAULT_TRUST_MODE,
+  grown,
+  hardFlags,
+  identityOf,
+  levelOf,
+  MAX_SOURCES,
+  MODE_RANK,
+  normalizeEntry,
+  parseRights,
+  rightsOf,
+  TRUST_MODES,
+  type Level,
+  type Rights,
+  type TrustMode,
+} from "./trust.ts";
 import { scan as scanAgents, type FileKind, type Limits, type ScanResult } from "./agents-scan.ts";
 
 export type GuardErrorCode = "invalid" | "not_found" | "conflict" | "not_registered" | "invalid_code" | "invalid_passkey" | "expired" | "blocked" | "unknown_op";
@@ -89,7 +108,7 @@ export interface DecideInput {
   sourceKind: string;
   trigger: string;
 }
-export type Decision = { action: "proceed"; via: "approval" | "window" } | { action: "wait"; reason: string; requestId: number | null };
+export type Decision = { action: "proceed"; via: "approval" | "window" | "source" } | { action: "wait"; reason: string; requestId: number | null };
 
 export interface ApprovalRow {
   id: number;
@@ -104,6 +123,10 @@ export interface ApprovalRow {
   windowId: number | null;
   approvedAt: number;
   revokedAt: number | null;
+  /** The source this approval is from (`github:owner/name`, `path:/dir`), or null. */
+  sourceId: string | null;
+  /** What the guard itself found in the version (the baseline for later versions of the same source), or null: not computed. */
+  rights: Rights | null;
 }
 export interface QueueRow {
   id: number;
@@ -118,6 +141,9 @@ export interface QueueRow {
   firstSeen: number;
   lastSeen: number;
   seenCount: number;
+  /** Why the version did not pass by itself (the guard's words), or null. */
+  note: string | null;
+  rights: Rights | null;
 }
 export interface WindowRow {
   id: number;
@@ -147,6 +173,8 @@ const approvalOf = (r: Raw): ApprovalRow => ({
   windowId: r.window_id === null ? null : Number(r.window_id),
   approvedAt: Number(r.approved_at),
   revokedAt: r.revoked_at === null ? null : Number(r.revoked_at),
+  sourceId: (r.source_id as string | null) ?? null,
+  rights: parseRights(r.rights),
 });
 const queueOf = (r: Raw): QueueRow => ({
   id: Number(r.id),
@@ -161,6 +189,8 @@ const queueOf = (r: Raw): QueueRow => ({
   firstSeen: Number(r.first_seen),
   lastSeen: Number(r.last_seen),
   seenCount: Number(r.seen_count),
+  note: (r.note as string | null) ?? null,
+  rights: parseRights(r.rights),
 });
 const windowOf = (r: Raw): WindowRow => ({
   id: Number(r.id),
@@ -209,9 +239,30 @@ export interface GuardOptions {
   headPath: string;
   /** The relying party passkeys are bound to (default localhost). */
   rp?: RelyingParty;
+  /** Trust by source and rights. Absent: no plugin directory is read by the guard, nothing passes by itself. */
+  trust?: TrustConfig;
   /** Agent watch: the agents' home (default /var/bbagent in `serve`) and the extra roots the console named. Absent: the watch is off. */
   agents?: AgentsConfig;
 }
+export interface TrustConfig {
+  /** Where the core keeps plugins installed from git (read access for the guard's user): a version is read only from under one of them. */
+  pluginsRoots?: string[];
+  /** Sources of the official catalog (`github:owner/name`, `github:owner/*`): the level "known". */
+  knownSources?: string[];
+  /** Tests: the checks of a plugin directory (default: the checks module of this tree, the one the plugin uses). */
+  checks?: (dir: string) => Promise<CheckResult>;
+  /** How long a version may be read before the guard gives up and queues it (default 3.5 s: the core waits 5). */
+  budgetMs?: number;
+  /** Tests: smaller limits of the one pass over a directory. */
+  treeLimits?: TreeLimits;
+}
+/** What the guard found in a version's directory by itself, or why it could not. */
+/** `hash`: the core's hash of the directory, computed by the guard in the same pass that the checks ran on (it equals the request's contentHash, or the evaluation is not ok). */
+export type Evaluation = { ok: true; hash: string; rights: Rights; blocks: string[] } | { ok: false; reason: string };
+const MAX_CONCURRENT_EVALS = 2;
+const MAX_EVALS_PER_MINUTE = 30;
+const DEFAULT_BUDGET_MS = 3500;
+
 export interface AgentsConfig {
   home: string;
   extraRoots: string[];
@@ -258,7 +309,13 @@ export interface ImportItem {
   approvedAt: number;
 }
 
+/** The approval to insert: the guard fills in the source id; the rights come from its own checks. */
+type NewApproval = Omit<ApprovalRow, "id" | "approvedAt" | "revokedAt" | "sourceId" | "rights"> & { rights?: Rights | null };
+
 export class Guard {
+  private readonly trustCfg: Required<Pick<TrustConfig, "pluginsRoots" | "budgetMs">> & { treeLimits?: TreeLimits } & { known: string[]; checks: (dir: string) => Promise<CheckResult> };
+  private evalsRunning = 0;
+  private evalTimes: number[] = [];
   private readonly db: DatabaseSync;
   private readonly now: () => number;
   private readonly secretPath: string;
@@ -271,6 +328,13 @@ export class Guard {
 
   constructor(o: GuardOptions) {
     this.agents = o.agents ?? null;
+    const known: string[] = [];
+    for (const k of o.trust?.knownSources ?? []) {
+      const n = normalizeEntry(k);
+      if (n === null) throw new Error(`known source ${JSON.stringify(k)} is not github:owner/name, github:owner/* or path:/dir`);
+      known.push(n);
+    }
+    this.trustCfg = { pluginsRoots: o.trust?.pluginsRoots ?? [], budgetMs: o.trust?.budgetMs ?? DEFAULT_BUDGET_MS, ...(o.trust?.treeLimits ? { treeLimits: o.trust.treeLimits } : {}), known, checks: o.trust?.checks ?? runChecks };
     this.secretDir = dirname(o.secretPath);
     this.headDir = dirname(o.headPath);
     this.rp = o.rp ?? { rpId: DEFAULT_RP_ID, origin: DEFAULT_ORIGIN };
@@ -464,15 +528,21 @@ export class Guard {
   }
 
   // ---- approvals ----------------------------------------------------------
-  private activeApproval(pluginId: string, contentHash: string): ApprovalRow | null {
-    const r = this.db.prepare(`SELECT * FROM approvals WHERE content_hash = ? AND plugin_id = ? AND revoked_at IS NULL ORDER BY id DESC LIMIT 1`).get(contentHash, pluginId) as Raw | undefined;
-    return r ? approvalOf(r) : null;
+  /**
+   * An approval of this version that covers the request. One made by the source rule is bound to (plugin, hash, source): it counts only for a
+   * caller that names the same source (a hash alone does not say where the code came from), so without a source it never counts.
+   */
+  private activeApproval(pluginId: string, contentHash: string, source: string | null = null): ApprovalRow | null {
+    const rows = this.db.prepare(`SELECT * FROM approvals WHERE content_hash = ? AND plugin_id = ? AND revoked_at IS NULL ORDER BY id DESC`).all(contentHash, pluginId) as Raw[];
+    return rows.map(approvalOf).find((a) => a.via !== "source" || (source !== null && a.source === source)) ?? null;
   }
-  private addApproval(i: Omit<ApprovalRow, "id" | "approvedAt" | "revokedAt">): ApprovalRow {
+  private addApproval(i: NewApproval): ApprovalRow {
+    const sourceId = identityOf(i.sourceKind, i.source)?.id ?? null;
+    const rights = i.rights ?? null;
     const info = this.db
-      .prepare(`INSERT INTO approvals (content_hash, plugin_id, version, source, source_kind, git_commit, npm_integrity, via, window_id, approved_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(i.contentHash, i.pluginId, i.version, i.source, i.sourceKind, i.gitCommit, i.npmIntegrity, i.via, i.windowId, this.now());
-    return { ...i, id: Number(info.lastInsertRowid), approvedAt: this.now(), revokedAt: null };
+      .prepare(`INSERT INTO approvals (content_hash, plugin_id, version, source, source_kind, git_commit, npm_integrity, via, window_id, approved_at, source_id, rights) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(i.contentHash, i.pluginId, i.version, i.source, i.sourceKind, i.gitCommit, i.npmIntegrity, i.via, i.windowId, this.now(), sourceId, rights === null ? null : JSON.stringify(rights));
+    return { ...i, rights, sourceId, id: Number(info.lastInsertRowid), approvedAt: this.now(), revokedAt: null };
   }
   private resolveQueue(pluginId: string, contentHash: string, status: "approved" | "dismissed"): void {
     this.db.prepare(`UPDATE queue SET status = ? WHERE content_hash = ? AND plugin_id = ? AND status = 'held'`).run(status, contentHash, pluginId);
@@ -496,10 +566,12 @@ export class Guard {
   }
 
   /** The held entry of a version (made if there was none, unless too many were made this hour). `stop`: a window does not lift this hold. */
-  private upsertHeld(req: DecideInput, stop: boolean): { id: number | null; created: boolean } {
+  private upsertHeld(req: DecideInput, stop: boolean, why: { rights: Rights | null; note: string | null } = { rights: null, note: null }): { id: number | null; created: boolean } {
     const held = this.db.prepare(`SELECT * FROM queue WHERE content_hash = ? AND plugin_id = ? AND status = 'held' ORDER BY id DESC LIMIT 1`).get(req.contentHash, req.pluginId) as Raw | undefined;
+    const rightsJson = why.rights === null ? null : JSON.stringify(why.rights);
     if (held) {
-      this.db.prepare(`UPDATE queue SET last_seen = ?, seen_count = seen_count + 1, version = ?, source = ?, source_kind = ?, root_dir = ?, trigger = ?, stop = MAX(stop, ?) WHERE id = ?`).run(this.now(), req.version, req.source, req.sourceKind, req.rootDir, req.trigger, stop ? 1 : 0, Number(held.id));
+      // The note and the rights are the guard's own latest reading; a call that could not read keeps the earlier one.
+      this.db.prepare(`UPDATE queue SET last_seen = ?, seen_count = seen_count + 1, version = ?, source = ?, source_kind = ?, root_dir = ?, trigger = ?, stop = MAX(stop, ?), note = COALESCE(?, note), rights = COALESCE(?, rights) WHERE id = ?`).run(this.now(), req.version, req.source, req.sourceKind, req.rootDir, req.trigger, stop ? 1 : 0, why.note, rightsJson, Number(held.id));
       return { id: Number(held.id), created: false };
     }
     // A process that can talk to the guard must not be able to fill it: a flood of new holds is not recorded (one record says so).
@@ -512,11 +584,11 @@ export class Guard {
       return { id: null, created: false };
     }
     const info = this.db
-      .prepare(`INSERT INTO queue (content_hash, plugin_id, version, source, source_kind, root_dir, trigger, status, first_seen, last_seen, stop) VALUES (?, ?, ?, ?, ?, ?, ?, 'held', ?, ?, ?)`)
-      .run(req.contentHash, req.pluginId, req.version, req.source, req.sourceKind, req.rootDir, req.trigger, this.now(), this.now(), stop ? 1 : 0);
+      .prepare(`INSERT INTO queue (content_hash, plugin_id, version, source, source_kind, root_dir, trigger, status, first_seen, last_seen, stop, note, rights) VALUES (?, ?, ?, ?, ?, ?, ?, 'held', ?, ?, ?, ?, ?)`)
+      .run(req.contentHash, req.pluginId, req.version, req.source, req.sourceKind, req.rootDir, req.trigger, this.now(), this.now(), stop ? 1 : 0, why.note, rightsJson);
     const id = Number(info.lastInsertRowid);
     this.db.prepare(`DELETE FROM queue WHERE status != 'held' AND NOT (status = 'dismissed' AND stop = 1) AND id NOT IN (SELECT id FROM queue ORDER BY id DESC LIMIT ?)`).run(MAX_QUEUE_ROWS);
-    this.log("hold", req.pluginId, req.contentHash, { review: id, version: req.version, trigger: req.trigger, source: req.source, sourceKind: req.sourceKind, ...(stop ? { stop: true } : {}) });
+    this.log("hold", req.pluginId, req.contentHash, { review: id, version: req.version, trigger: req.trigger, source: req.source, sourceKind: req.sourceKind, ...(why.note !== null ? { note: why.note } : {}), ...(stop ? { stop: true } : {}) });
     return { id, created: true };
   }
 
@@ -530,23 +602,31 @@ export class Guard {
     return this.tx(() => {
       this.sweepInner();
       // Already approved by a human or imported: nothing to hold (a window's approval is withdrawn by `revoke` first).
-      if (this.activeApproval(req.pluginId, req.contentHash)) return { requestId: null };
+      if (this.activeApproval(req.pluginId, req.contentHash, req.source)) return { requestId: null };
       return { requestId: this.upsertHeld(req, raw.stop === true).id };
     });
   }
 
-  /** What the core asks before it loads a plugin. Holds when nothing a human decided covers it. */
-  decide(raw: Record<string, unknown>): Decision {
+  /** An approval that covers this request. One made by the source rule covers only the source it was made for (the hash alone does not say where the code came from). */
+  private coveringApproval(req: DecideInput): ApprovalRow | null {
+    return this.activeApproval(req.pluginId, req.contentHash, req.source);
+  }
+
+  /**
+   * What the core asks before it loads a plugin. Holds when nothing a human decided covers it. `ev`: what the guard itself read in the version's
+   * directory (see `evaluate`); with it, a version of a trusted source whose rights did not grow passes by itself (`sourceVerdict`).
+   */
+  decide(raw: Record<string, unknown>, ev: Evaluation | null = null): Decision {
     const req = this.parseDecide(raw);
     return this.tx(() => {
       this.sweepInner();
-      if (this.activeApproval(req.pluginId, req.contentHash)) return { action: "proceed", via: "approval" } as const;
+      if (this.coveringApproval(req)) return { action: "proceed", via: "approval" } as const;
 
       // A stop survives a rejection: dismiss needs no code, so a process that can reach the guard could otherwise clear the stop and let the window in.
       const stopped = this.isStopped(req.pluginId, req.contentHash);
       const w = stopped ? null : this.openWindowOf(req.pluginId);
       if (w) {
-        const a = this.addApproval({ contentHash: req.contentHash, pluginId: req.pluginId, version: req.version, source: req.source, sourceKind: req.sourceKind, gitCommit: null, npmIntegrity: null, via: "window", windowId: w.id });
+        const a = this.addApproval({ contentHash: req.contentHash, pluginId: req.pluginId, version: req.version, source: req.source, sourceKind: req.sourceKind, gitCommit: null, npmIntegrity: null, via: "window", windowId: w.id, rights: ev?.ok && ev.hash === req.contentHash ? ev.rights : null });
         this.db.prepare(`UPDATE windows SET uses = uses + 1 WHERE id = ?`).run(w.id);
         if (w.mode === "sliding") {
           const next = Math.min(this.now() + w.sizeSec * 1000, w.hardExpiresAt);
@@ -557,9 +637,186 @@ export class Guard {
         return { action: "proceed", via: "window" } as const;
       }
 
-      const h = this.upsertHeld(req, stopped);
+      const verdict = this.sourceVerdict(req, ev, stopped);
+      if (verdict.pass) {
+        const a = this.addApproval({ contentHash: req.contentHash, pluginId: req.pluginId, version: req.version, source: req.source, sourceKind: req.sourceKind, gitCommit: null, npmIntegrity: null, via: "source", windowId: null, rights: verdict.rights });
+        this.resolveQueue(req.pluginId, req.contentHash, "approved");
+        this.log("approved.source", req.pluginId, req.contentHash, { approval: a.id, version: req.version, source: req.source, sourceKind: req.sourceKind, ...verdict.detail });
+        return { action: "proceed", via: "source" } as const;
+      }
+
+      const h = this.upsertHeld(req, stopped, { rights: ev?.ok && ev.hash === req.contentHash ? ev.rights : null, note: verdict.note });
       return h.id === null ? ({ action: "wait", reason: "held by secure-bb guard: too many new holds", requestId: null } as const) : ({ action: "wait", reason: `held by secure-bb guard: review #${h.id}`, requestId: h.id } as const);
     });
+  }
+
+  /** `decide` with the guard's own reading of the version first (the checks run outside the transaction, within a time budget). */
+  async decideChecked(raw: Record<string, unknown>): Promise<Decision> {
+    const req = this.parseDecide(raw);
+    if (this.coveringApproval(req)) return this.decide(raw);
+    return this.decide(raw, await this.evaluate(req));
+  }
+
+  // ---- trust by source and rights -------------------------------------------------------------------------------
+  trustMode(): TrustMode {
+    const m = this.meta("trust_mode");
+    return TRUST_MODES.includes(m as TrustMode) ? (m as TrustMode) : DEFAULT_TRUST_MODE;
+  }
+  mySources(): string[] {
+    try {
+      const j = JSON.parse(this.meta("my_sources") ?? "[]") as unknown;
+      return Array.isArray(j) ? j.filter((x): x is string => typeof x === "string" && normalizeEntry(x) === x) : [];
+    } catch {
+      return [];
+    }
+  }
+  trustState(): { mode: TrustMode; mySources: string[]; known: string[]; pluginsRoots: number } {
+    return { mode: this.trustMode(), mySources: this.mySources(), known: [...this.trustCfg.known], pluginsRoots: this.trustCfg.pluginsRoots.length };
+  }
+
+  /** Weakening the mode (Strict → Detailed → Simple) is a touch; the same or a stricter one is not. */
+  setTrustMode(modeIn: unknown, proof: Proof): TrustMode {
+    if (typeof modeIn !== "string" || !TRUST_MODES.includes(modeIn as TrustMode)) throw new GuardError("invalid", "mode is simple, detailed or strict");
+    const mode = modeIn as TrustMode;
+    const cur = this.trustMode();
+    if (mode === cur) return cur;
+    const weakens = MODE_RANK[mode] < MODE_RANK[cur];
+    const factor = weakens ? this.verifyFactor("trust.mode", this.normalizeAction({ op: "trust-mode", mode }), proof) : null;
+    return this.tx(() => {
+      this.setMeta("trust_mode", mode);
+      this.log("trust.mode", null, null, { from: cur, to: mode, touched: weakens, ...(factor ? factorDetail(factor) : {}) });
+      return mode;
+    });
+  }
+
+  /** Adding "my sources" is a touch (it widens what passes by itself). Entries already in the list need none. `migrated`: from the plugin's old list of trusted repositories. */
+  addSources(raw: Record<string, unknown>): { mySources: string[]; added: string[] } {
+    const entries = this.entriesOf(raw.entries);
+    const cur = this.mySources();
+    const fresh = entries.filter((e) => !cur.includes(e));
+    if (fresh.length === 0) return { mySources: cur, added: [] };
+    if (cur.length + fresh.length > MAX_SOURCES) throw new GuardError("invalid", `at most ${MAX_SOURCES} sources`);
+    const factor = this.verifyFactor("sources.add", this.normalizeAction({ op: "sources-add", entries: fresh }), raw);
+    return this.tx(() => {
+      const next = [...cur, ...fresh].sort();
+      this.setMeta("my_sources", JSON.stringify(next));
+      this.log("sources.add", null, null, { entries: fresh, ...(raw.migrated === true ? { migrated: "trusted repositories of the plugin" } : {}), ...factorDetail(factor) });
+      return { mySources: next, added: fresh };
+    });
+  }
+
+  /** Removing one only tightens: no touch, and not blocked after wrong codes. Versions already approved stay approved; later ones are asked about. */
+  removeSource(raw: Record<string, unknown>): { mySources: string[] } {
+    const e = normalizeEntry(raw.entry);
+    if (e === null) throw new GuardError("invalid", "entry is github:owner/name, github:owner/* or path:/dir");
+    return this.tx(() => {
+      const cur = this.mySources();
+      if (!cur.includes(e)) throw new GuardError("not_found", "this source is not in the list");
+      const next = cur.filter((x) => x !== e);
+      this.setMeta("my_sources", JSON.stringify(next));
+      this.log("sources.remove", null, null, { entry: e });
+      return { mySources: next };
+    });
+  }
+
+  private entriesOf(v: unknown): string[] {
+    if (!Array.isArray(v) || v.length === 0 || v.length > MAX_SOURCES) throw new GuardError("invalid", `entries is a list of 1..${MAX_SOURCES} sources`);
+    const out = new Set<string>();
+    for (const x of v) {
+      const n = normalizeEntry(x);
+      if (n === null) throw new GuardError("invalid", `${JSON.stringify(typeof x === "string" ? x.slice(0, 80) : x)} is not github:owner/name, github:owner/* or path:/dir`);
+      out.add(n);
+    }
+    return [...out].sort();
+  }
+
+  /**
+   * The guard reads the version's directory ITSELF: what the plugin says about its own rights is not looked at (annotate is for display only).
+   * Fails closed: a directory that cannot be read, is not where the source says, or checks that fail or run out of time → `ok: false`.
+   * Checks are limited (two at a time, thirty a minute): whoever can reach the socket must not be able to make the guard read without end.
+   */
+  async evaluate(req: DecideInput): Promise<Evaluation> {
+    const ident = identityOf(req.sourceKind, req.source);
+    if (ident === null) return { ok: false, reason: "источник не назван (не github и не каталог на диске)" };
+    let dir: string;
+    try {
+      dir = realpathSync(req.rootDir);
+      if (ident.kind === "path") {
+        if (dir !== realpathSync(ident.id.slice(5))) return { ok: false, reason: "каталог версии не тот, что назван источником" };
+      } else if (!this.trustCfg.pluginsRoots.some((r) => this.within(dir, r))) {
+        return { ok: false, reason: this.trustCfg.pluginsRoots.length === 0 ? "у сторожа не задан каталог плагинов (--plugins-root)" : "каталог версии вне каталогов плагинов ядра" };
+      }
+    } catch (err) {
+      return { ok: false, reason: `каталог не прочитан: ${this.errText(err)}` };
+    }
+    const now = this.now();
+    this.evalTimes = this.evalTimes.filter((t) => t > now - 60_000);
+    if (this.evalsRunning >= MAX_CONCURRENT_EVALS || this.evalTimes.length >= MAX_EVALS_PER_MINUTE) return { ok: false, reason: "сторож занят чтением других версий, повторите позже" };
+    this.evalTimes.push(now);
+    this.evalsRunning++;
+    let timer: NodeJS.Timeout | undefined;
+    // ONE pass: the guard reads the directory once, hashes what it read the way the core does, and the checks run on a private copy of those same bytes.
+    // The hash must be the request's: otherwise the request is about other code than the directory shows (a forged `decide`), and nothing is approved.
+    const work = (async (): Promise<Evaluation> => {
+      let tree;
+      try {
+        tree = await readTree(dir, this.trustCfg.treeLimits);
+      } catch (err) {
+        return { ok: false, reason: err instanceof TreeRefused ? `каталог не прочитан: ${err.message}` : `каталог не прочитан: ${this.errText(err)}` };
+      }
+      try {
+        if (tree.hash !== req.contentHash) return { ok: false, reason: "хеш каталога, посчитанный сторожем, не совпал с хешем из запроса" };
+        const res = await this.trustCfg.checks(tree.dir);
+        return { ok: true, hash: tree.hash, rights: rightsOf(res), blocks: hardFlags(res).map((f) => `${f.rule} ${f.file}${f.line ? `:${f.line}` : ""}`) };
+      } finally {
+        await tree.cleanup().catch(() => undefined);
+      }
+    })().finally(() => {
+      // The slot is freed when the work ends, not when the budget does: a slow directory must not pile up readers.
+      this.evalsRunning--;
+    });
+    try {
+      return await Promise.race([work, new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error("проверки не уложились во время")), this.trustCfg.budgetMs)))]);
+    } catch (err) {
+      work.catch(() => undefined);
+      return { ok: false, reason: `проверки не выполнены: ${this.errText(err)}` };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  private within = (path: string, root: string): boolean => {
+    try {
+      const r = realpathSync(root);
+      return path === r || path.startsWith(r.endsWith(sep) ? r : r + sep);
+    } catch {
+      return false;
+    }
+  };
+  private errText = (err: unknown): string => (err instanceof Error ? err.message : String(err)).slice(0, 200);
+
+  /** Does this version pass by itself? If not, the note says why in plain words. The rule is all of: source own or known · mode lets it · an approved version from the same source · rights did not grow · no hard flag. */
+  private sourceVerdict(req: DecideInput, ev: Evaluation | null, stopped: boolean): { pass: true; rights: Rights; detail: Record<string, unknown> } | { pass: false; note: string | null } {
+    const no = (note: string | null) => ({ pass: false as const, note });
+    if (stopped) return no(null); // the plugin's own check stopped this version for a human: its reason is in the queue already
+    const mode = this.trustMode();
+    const ident = identityOf(req.sourceKind, req.source);
+    const { level, entry } = levelOf(ident, this.mySources(), this.trustCfg.known);
+    if (mode === "strict") return no("режим «Строгий»: каждая версия ждёт вас");
+    if (level === "unknown") return no(ident === null ? "источник нельзя назвать своим (не github и не каталог на диске)" : "неизвестный источник");
+    if (ev === null) return no("права версии не посчитаны");
+    if (!ev.ok) return no(ev.reason);
+    if (ev.hash !== req.contentHash) return no("хеш каталога не совпал с хешем из запроса");
+    const base = this.db
+      .prepare(`SELECT * FROM approvals WHERE plugin_id = ? AND source_id = ? AND revoked_at IS NULL AND rights IS NOT NULL ORDER BY id DESC LIMIT 1`)
+      .get(req.pluginId, ident!.id) as Raw | undefined;
+    if (!base) return no("нет одобренной версии этого плагина из этого источника");
+    if (ev.blocks.length > 0) return no(`жёсткий флаг: ${brief(ev.blocks)}`);
+    const baseline = approvalOf(base);
+    const g = grown(baseline.rights!, ev.rights);
+    if (g.tokens.length > 0) return no(`новое право: ${brief(g.tokens)}`);
+    if (g.review.length > 0) return no(`новое замечание проверок: ${brief(g.review)}`);
+    const levelText = level === "own" ? "свой источник" : "известный источник";
+    return { pass: true, rights: ev.rights, detail: { why: `прошла сама: ${levelText}, права те же`, level, entry, mode, baseline: { approval: baseline.id, version: baseline.version, source: baseline.sourceId }, rights: ev.rights.tokens.length } };
   }
 
   /** Read-only: is this version approved, is a window open, what is its queue entry. For the plugin's own hook. */
@@ -614,7 +871,7 @@ export class Guard {
     const q = this.heldRequest(id);
     const factor = this.verifyFactor(`approve:${q.pluginId}`, this.normalizeAction({ op: "approve", requestId: id }), raw);
     return this.tx(() => {
-      const a = this.addApproval({ contentHash: q.contentHash, pluginId: q.pluginId, version: q.version, source: q.source, sourceKind: q.sourceKind, gitCommit: null, npmIntegrity: null, via: "touch", windowId: null });
+      const a = this.addApproval({ contentHash: q.contentHash, pluginId: q.pluginId, version: q.version, source: q.source, sourceKind: q.sourceKind, gitCommit: null, npmIntegrity: null, via: "touch", windowId: null, rights: q.rights });
       this.resolveQueue(q.pluginId, q.contentHash, "approved");
       // The record says what exactly was approved: after the fact, this is what the owner reads.
       this.log("approved.touch", q.pluginId, q.contentHash, { approval: a.id, review: q.id, version: q.version, source: q.source, sourceKind: q.sourceKind, rootDir: q.rootDir, ...factorDetail(factor) });
@@ -950,10 +1207,15 @@ export class Guard {
       }
       case "touch":
         return { op: "touch", purpose: str(a.purpose, "purpose", 80, 1) };
+      case "trust-mode":
+        if (typeof a.mode !== "string" || !TRUST_MODES.includes(a.mode as TrustMode)) throw new GuardError("invalid", "mode is simple, detailed or strict");
+        return { op: "trust-mode", mode: a.mode };
+      case "sources-add":
+        return { op: "sources-add", entries: this.entriesOf(a.entries) };
       case "agents-accept":
         return { op: "agents-accept", ids: this.agentIds(a.ids) };
       default:
-        throw new GuardError("invalid", "an action is approve, open-window, policy, touch or agents-accept");
+        throw new GuardError("invalid", "an action is approve, open-window, policy, touch, trust-mode, sources-add or agents-accept");
     }
   }
 
@@ -973,6 +1235,12 @@ export class Guard {
         const parts = Object.entries(a.patch as Record<string, unknown>).map(([k, v]) => `${k}: ${String(cur[k as keyof Policy])} → ${String(v)}`);
         return `Изменить политику окон доверия: ${parts.join(", ") || "без изменений"}`;
       }
+      case "trust-mode": {
+        const names: Record<TrustMode, string> = { simple: "Простой", detailed: "Подробный", strict: "Строгий" };
+        return `Сменить режим доверия: «${names[this.trustMode()]}» → «${names[a.mode as TrustMode]}»${MODE_RANK[a.mode as TrustMode] < MODE_RANK[this.trustMode()] ? " (слабее: больше версий будет проходить без вопросов)" : ""}`;
+      }
+      case "sources-add":
+        return `Добавить в «мои источники»: ${(a.entries as string[]).join(", ")}. Новые версии плагинов оттуда будут проходить без вопросов, если права те же, что у одобренной версии из того же источника, и нет жёстких флагов`;
       case "agents-accept": {
         if (this.agents === null) throw new GuardError("invalid", "the agent watch is not configured at this guard");
         const rows = this.openDrifts(a.ids as number[]);
@@ -1332,6 +1600,7 @@ export class Guard {
         enrollmentOpen: this.openEnrollment() !== undefined,
       },
       policy: this.policy(),
+      trust: this.trustState(),
       queue: rows(`SELECT * FROM queue ORDER BY (status = 'held') DESC, id DESC LIMIT 100`, queueOf).map(withNotes),
       approvals: rows(`SELECT * FROM approvals WHERE revoked_at IS NULL ORDER BY id DESC LIMIT 500`, approvalOf),
       revoked: rows(`SELECT * FROM approvals WHERE revoked_at IS NOT NULL ORDER BY revoked_at DESC LIMIT 20`, approvalOf),

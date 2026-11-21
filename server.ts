@@ -16,6 +16,7 @@ import {
 import { Alive } from "./src/alive.js";
 import { AgentWatchLink, type AgentThreadSource } from "./src/agents.js";
 import { GuardLink, GuardLinkError, guardSocketFromEnv, type GuardAction, type GuardPolicy, type GuardProof, type GuardQueueEntry, type PasskeyAssertion } from "./src/guardlink.js";
+import { MODE_RANK, normalizeEntry } from "./guard/src/trust.ts";
 import { buildExport, writeExport } from "./src/export.js";
 import { localCheckKey } from "./src/decision.js";
 import { mintListProof } from "./src/approval.js";
@@ -575,7 +576,7 @@ export default async function plugin(bb: BbPluginApi) {
    * In guard mode a code that arrives with any RPC is checked by the guard first (it consumes the code there: the secret is not here),
    * and the handler then runs with the mark that says so. RPCs that need more than that (they act at the guard) do it themselves.
    */
-  const OWN_GUARD_PATH = new Set(["queue.approve", "window.open", "policy.set", "session.open", "totp.begin", "totp.confirm", "agents.accept"]);
+  const OWN_GUARD_PATH = new Set(["queue.approve", "window.open", "policy.set", "session.open", "totp.begin", "totp.confirm", "agents.accept", "trust.mode", "trust.add", "trust.migrate"]);
   const withGuardTouch = <T extends object>(handlers: T): T => {
     const out: Record<string, unknown> = {};
     if (!guardLink) {
@@ -656,6 +657,29 @@ export default async function plugin(bb: BbPluginApi) {
       const repos = gate.setTrustedRepo(change, needCode(code));
       changed();
       return { ok: true as const, repos };
+    }),
+    // ---- trust by source and rights (guard mode): the mode and "my sources" are the guard's; the guard checks every touch itself ----------------
+    "trust.mode": wrap(async ({ mode, code, passkey }) => {
+      const m = await needGuard().setTrustMode(mode, proofOf(code, passkey));
+      changed();
+      return { ok: true as const, mode: m };
+    }),
+    "trust.add": wrap(async ({ entries, code, passkey }) => {
+      const mySources = await needGuard().addSources(entries, proofOf(code, passkey));
+      changed();
+      return { ok: true as const, mySources };
+    }),
+    "trust.remove": wrap(async ({ entry }) => {
+      const mySources = await needGuard().removeSource(entry);
+      changed();
+      return { ok: true as const, mySources };
+    }),
+    "trust.migrate": wrap(async ({ code, passkey }) => {
+      const moved = store.trustedRepos().map((r) => `github:${r}`);
+      if (moved.length === 0) throw new GateError("invalid", "в старом списке доверенных репозиториев ничего нет");
+      const mySources = await needGuard().addSources(moved, proofOf(code, passkey), true);
+      changed();
+      return { ok: true as const, mySources, moved };
     }),
     "page.ping": () => {
       lastPagePing = now();
@@ -939,6 +963,20 @@ export default async function plugin(bb: BbPluginApi) {
         case "agents.accept": {
           if (q.ids === undefined || q.ids.length === 0) throw new GateError("invalid", "ids are needed");
           return out({ op: "agents-accept", ids: q.ids });
+        }
+        case "trust.mode": {
+          if (q.trustMode === undefined) throw new GateError("invalid", "trustMode is needed");
+          const cur = (await link.state()).trust?.mode;
+          // Only a weaker mode takes a touch; the guard decides, this only avoids asking for a challenge that will not be used.
+          return cur !== undefined && MODE_RANK[q.trustMode] < MODE_RANK[cur] ? out({ op: "trust-mode", mode: q.trustMode }) : { needed: false as const };
+        }
+        case "trust.add":
+        case "trust.migrate": {
+          const asked = q.kind === "trust.migrate" ? store.trustedRepos().map((r) => `github:${r}`) : (q.entries ?? []);
+          const mine = (await link.state()).trust?.mySources ?? [];
+          // The touch is for what is new: the guard signs the entries that are not in the list yet.
+          const fresh = [...new Set(asked.map(normalizeEntry).filter((e): e is string => e !== null && !mine.includes(e)))].sort();
+          return fresh.length === 0 ? { needed: false as const } : out({ op: "sources-add", entries: fresh });
         }
         default:
           if (q.purpose === undefined) throw new GateError("invalid", "purpose is needed");

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type net from "node:net";
 import { resolvePaths, type GuardPaths } from "../../guard/src/config.ts";
 import { openDb, privateDir } from "../../guard/src/db.ts";
-import { Guard, type AgentsConfig } from "../../guard/src/guard.ts";
+import { Guard, type AgentsConfig, type TrustConfig } from "../../guard/src/guard.ts";
 import { request } from "../../guard/src/cli.ts";
 import { listen } from "../../guard/src/server.ts";
 import { base32Decode, generateSecret, hotp, stepAt } from "../../guard/src/totp.ts";
@@ -34,13 +34,13 @@ export interface TestGuard {
   close(): Promise<void>;
 }
 
-export async function startGuard(opts: { register?: boolean; serve?: boolean; rp?: RelyingParty; agents?: AgentsConfig } = {}): Promise<TestGuard> {
+export async function startGuard(opts: { register?: boolean; serve?: boolean; rp?: RelyingParty; agents?: AgentsConfig; trust?: TrustConfig } = {}): Promise<TestGuard> {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "sbb-guard-")));
   const paths = resolvePaths({ data: dir, socket: join(dir, "run", "guard.sock") });
   privateDir(paths.stateDir);
   const clock = new Clock();
   const db = openDb(paths.db);
-  const guard = new Guard({ db, now: clock.now, secretPath: paths.secret, headPath: paths.head, ...(opts.rp ? { rp: opts.rp } : {}), ...(opts.agents ? { agents: opts.agents } : {}) });
+  const guard = new Guard({ db, now: clock.now, secretPath: paths.secret, headPath: paths.head, ...(opts.rp ? { rp: opts.rp } : {}), ...(opts.agents ? { agents: opts.agents } : {}), ...(opts.trust ? { trust: opts.trust } : {}) });
   const secret = generateSecret();
   const code = (): string => hotp(base32Decode(secret), stepAt(clock.t));
   if (opts.register !== false) {
@@ -229,3 +229,35 @@ export async function touchFor(g: TestGuard, auth: SoftAuthenticator, action: Re
   return { passkey: auth.get(c.challenge, o), challenge: c };
 }
 export { SoftAuthenticator };
+
+// ---- the core's hash of a plugin directory -------------------------------------------------------------------------------
+import { createHash } from "node:crypto";
+import { lstatSync, readdirSync, readFileSync, readlinkSync } from "node:fs";
+/**
+ * `hashInstallDir` of the core (apps/server/src/services/plugins/install-sources.ts), repeated here as the reference the guard's own
+ * hash is compared with: sha256, entries sorted by `localeCompare`, `d\0name\0` and descent, `l\0name\0target\0`, `f\0name\0mode&0o777\0` + bytes.
+ * Synchronous (the core's is async; the bytes fed to the hash are the same).
+ */
+export function coreHash(rootDir: string): string {
+  const hash = createHash("sha256");
+  const visit = (directory: string, prefix: string): void => {
+    const entries = readdirSync(directory, { withFileTypes: true });
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const path = join(directory, entry.name);
+      const name = prefix.length === 0 ? entry.name : `${prefix}/${entry.name}`;
+      const stats = lstatSync(path);
+      if (stats.isDirectory()) {
+        hash.update(`d\0${name}\0`);
+        visit(path, name);
+      } else if (stats.isSymbolicLink()) {
+        hash.update(`l\0${name}\0${readlinkSync(path)}\0`);
+      } else if (stats.isFile()) {
+        hash.update(`f\0${name}\0${stats.mode & 0o777}\0`);
+        hash.update(readFileSync(path));
+      }
+    }
+  };
+  visit(rootDir, "");
+  return `sha256:${hash.digest("hex")}`;
+}

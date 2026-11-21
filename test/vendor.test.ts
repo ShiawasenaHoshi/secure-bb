@@ -12,18 +12,18 @@ const HASHES: Record<string, string> = {
 describe("vendored parser", () => {
   for (const [file, hash] of Object.entries(HASHES)) {
     it(`${file} matches vendor/README.md`, () => {
-      const bytes = readFileSync(new URL(`../vendor/${file}`, import.meta.url));
+      const bytes = readFileSync(new URL(`../guard/vendor/${file}`, import.meta.url));
       expect(createHash("sha256").update(bytes).digest("hex")).toBe(hash);
-      expect(readFileSync(new URL("../vendor/README.md", import.meta.url), "utf8")).toContain(hash);
+      expect(readFileSync(new URL("../guard/vendor/README.md", import.meta.url), "utf8")).toContain(hash);
     });
   }
   it("acorn-typescript differs from the npm original in exactly one line (the import of acorn)", () => {
-    const text = readFileSync(new URL("../vendor/acorn-typescript.mjs", import.meta.url), "utf8");
+    const text = readFileSync(new URL("../guard/vendor/acorn-typescript.mjs", import.meta.url), "utf8");
     expect(text).toContain('import * as acornNamespace from "./acorn.mjs";');
     expect(text).not.toContain('from "acorn"');
   });
   it("acorn-jsx embeds the original files between markers", () => {
-    const text = readFileSync(new URL("../vendor/acorn-jsx.mjs", import.meta.url), "utf8");
+    const text = readFileSync(new URL("../guard/vendor/acorn-jsx.mjs", import.meta.url), "utf8");
     expect(text).toContain("// ---- BEGIN index.js ----");
     expect(text).toContain("// ---- END xhtml.js ----");
   });

@@ -16,7 +16,7 @@
     "skipLibCheck": true,
     "paths": {
       "acorn": [
-        "./vendor/acorn.d.mts"
+        "./guard/vendor/acorn.d.mts"
       ]
     },
     "allowImportingTsExtensions": true
@@ -26,7 +26,6 @@
     "app.tsx",
     "src",
     "test",
-    "vendor/*.d.mts",
     "guard"
   ]
 }

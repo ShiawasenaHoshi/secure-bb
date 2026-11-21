@@ -7,5 +7,5 @@
   "license": "MIT",
   "engines": { "node": ">=22.18" },
   "bin": { "sbb-guard": "bin/sbb-guard.js" },
-  "files": ["bin", "src"]
+  "files": ["bin", "src", "vendor"]
 }

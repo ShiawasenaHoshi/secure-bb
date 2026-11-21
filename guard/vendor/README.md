@@ -32,7 +32,7 @@ Nothing else was changed; `diff` against the tarball's `index.js` shows that one
 
 ## Built-in hash exemption
 
-`src/checks/files.ts` carries the sha256 of the three files above
+`guard/src/checks/files.ts` carries the sha256 of the three files above
 (`KNOWN_VENDORED_SHA256`): a file with exactly these bytes is not reported as
 `minified` (Unicode tables look dense). The list is in the checker, not read from
 a checked tree's own README, so a plugin cannot vouch for its own files;

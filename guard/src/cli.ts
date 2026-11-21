@@ -41,6 +41,7 @@ export const terminalIo: Io = {
 const USAGE = `sbb-guard ${VERSION} — decision guard for secure-bb
 
   sbb-guard serve [--data DIR] [--socket PATH] [--socket-gid GID] [--rp-id ID] [--origin URL] [--agents-home DIR] [--agents-root DIR]... [--agents-scan-sec N]
+                  [--plugins-root DIR]... [--known-source ENTRY]...
   sbb-guard totp-register [--data DIR] [--code CODE] [--replacing-code CODE]
   sbb-guard totp-disable [--data DIR] [--yes]
   sbb-guard passkey-enroll [--data DIR] [--label NAME] [--rp-id ID] [--origin URL]
@@ -53,12 +54,16 @@ const USAGE = `sbb-guard ${VERSION} — decision guard for secure-bb
 Agent watch (serve): --agents-home / SBB_GUARD_AGENTS_HOME (default /var/bbagent) is the agents' home; the working directories of threads are found in it
 (data/plugins/*/host-data/workspaces/*). --agents-root DIR (repeatable) / SBB_GUARD_AGENTS_ROOTS (comma-separated) add more roots: the list is extended
 from the console only. --agents-scan-sec (default 120) is the period of the scan. The guard's user needs read access to the home (the installer's ACL).
+Trust by source (serve): --plugins-root DIR (repeatable) / SBB_GUARD_PLUGINS_ROOTS: where the core keeps plugins installed from git; the guard reads a version
+only from there (the guard's user needs read access: the installer's ACL), and without it nothing from git passes by itself. --known-source ENTRY (repeatable) /
+SBB_GUARD_KNOWN_SOURCES: sources of the official catalog (github:owner/name or github:owner/*), the level "known". The owner's own sources are kept by the guard (a touch adds one).
 Paths: --data / SBB_GUARD_DATA (default /var/sbb-guard), --socket / SBB_GUARD_SOCKET (default <data>/run/guard.sock),
 --socket-gid / SBB_GUARD_SOCKET_GID.
 Passkeys: --rp-id / SBB_GUARD_RP_ID (default localhost) and --origin / SBB_GUARD_ORIGIN (default http://localhost:38886): the page must be opened
 at exactly that origin (WebAuthn does not work on 127.0.0.1). A key is registered only here: passkey-enroll prints a one-time token, valid for 5 minutes.`;
 
 type Opts = Record<string, string | boolean>;
+const REPEATABLE = new Set(["agents-root", "plugins-root", "known-source"]);
 export function parseArgs(argv: string[]): { cmd: string | undefined; positionals: string[]; opts: Opts } {
   const opts: Opts = {};
   const positionals: string[] = [];
@@ -68,13 +73,13 @@ export function parseArgs(argv: string[]): { cmd: string | undefined; positional
     if (a.startsWith("--")) {
       const key = a.slice(2);
       const eq = key.indexOf("=");
-      if (eq >= 0) opts[key.slice(0, eq)] = key.slice(0, eq) === "agents-root" && typeof opts["agents-root"] === "string" ? `${opts["agents-root"] as string},${key.slice(eq + 1)}` : key.slice(eq + 1);
+      if (eq >= 0) opts[key.slice(0, eq)] = REPEATABLE.has(key.slice(0, eq)) && typeof opts[key.slice(0, eq)] === "string" ? `${opts[key.slice(0, eq)] as string},${key.slice(eq + 1)}` : key.slice(eq + 1);
       else if (key === "yes" || key === "help") opts[key] = true;
       else {
         const v = argv[i + 1];
         if (v === undefined || v.startsWith("--")) throw new Error(`--${key} needs a value`);
-        // `--agents-root` may be given several times (the roots are joined with a comma).
-        opts[key] = key === "agents-root" && typeof opts[key] === "string" ? `${opts[key] as string},${v}` : v;
+        // `--agents-root`, `--plugins-root` and `--known-source` may be given several times (joined with a comma).
+        opts[key] = REPEATABLE.has(key) && typeof opts[key] === "string" ? `${opts[key] as string},${v}` : v;
         i++;
       }
     } else if (cmd === undefined) cmd = a;
@@ -88,7 +93,7 @@ const optStr = (o: Opts, k: string): string | undefined => (typeof o[k] === "str
 function open(paths: GuardPaths, now: () => number): { guard: Guard; close: () => void } {
   privateDir(paths.stateDir);
   const db = openDb(paths.db);
-  return { guard: new Guard({ db, now, secretPath: paths.secret, headPath: paths.head, rp: paths.rp, agents: { home: paths.agentsHome, extraRoots: paths.agentsRoots, deny: [paths.dataDir, dirname(paths.socket)] } }), close: () => db.close() };
+  return { guard: new Guard({ db, now, secretPath: paths.secret, headPath: paths.head, rp: paths.rp, trust: { pluginsRoots: paths.pluginsRoots, knownSources: paths.knownSources }, agents: { home: paths.agentsHome, extraRoots: paths.agentsRoots, deny: [paths.dataDir, dirname(paths.socket)] } }), close: () => db.close() };
 }
 
 /** One request to a running guard. */
@@ -500,7 +505,7 @@ export async function main(argv: string[], io: Io = terminalIo): Promise<number>
   }
   let paths: GuardPaths;
   try {
-    paths = resolvePaths({ data: optStr(opts, "data"), socket: optStr(opts, "socket"), socketGid: optStr(opts, "socket-gid"), rpId: optStr(opts, "rp-id"), origin: optStr(opts, "origin"), agentsHome: optStr(opts, "agents-home"), agentsRoots: optStr(opts, "agents-root") });
+    paths = resolvePaths({ data: optStr(opts, "data"), socket: optStr(opts, "socket"), socketGid: optStr(opts, "socket-gid"), rpId: optStr(opts, "rp-id"), origin: optStr(opts, "origin"), agentsHome: optStr(opts, "agents-home"), agentsRoots: optStr(opts, "agents-root"), pluginsRoots: optStr(opts, "plugins-root"), knownSources: optStr(opts, "known-source") });
   } catch (err) {
     io.err(err instanceof Error ? err.message : String(err));
     return 64;

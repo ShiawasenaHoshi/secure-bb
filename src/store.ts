@@ -288,7 +288,7 @@ export interface ApprovalRow {
   sourceKind: string;
   gitCommit: string | null;
   npmIntegrity: string | null;
-  via: "touch" | "window" | "pin" | "auto";
+  via: "touch" | "window" | "pin" | "auto" | "source";
   windowId: number | null;
   threadId: string | null;
   approvedAt: number;
