@@ -33,6 +33,7 @@ import {
 import { verifyTotp } from "./totp.ts";
 import { analyze as analyzeAgents, maskSecrets, unifiedDiff, type Change } from "./agents-rules.ts";
 import { runChecks, type CheckResult } from "./checks/index.ts";
+import { readTree, TreeRefused, type TreeLimits } from "./tree-read.ts";
 import {
   brief,
   DEFAULT_TRUST_MODE,
@@ -252,9 +253,12 @@ export interface TrustConfig {
   checks?: (dir: string) => Promise<CheckResult>;
   /** How long a version may be read before the guard gives up and queues it (default 3.5 s: the core waits 5). */
   budgetMs?: number;
+  /** Tests: smaller limits of the one pass over a directory. */
+  treeLimits?: TreeLimits;
 }
 /** What the guard found in a version's directory by itself, or why it could not. */
-export type Evaluation = { ok: true; rights: Rights; blocks: string[] } | { ok: false; reason: string };
+/** `hash`: the core's hash of the directory, computed by the guard in the same pass that the checks ran on (it equals the request's contentHash, or the evaluation is not ok). */
+export type Evaluation = { ok: true; hash: string; rights: Rights; blocks: string[] } | { ok: false; reason: string };
 const MAX_CONCURRENT_EVALS = 2;
 const MAX_EVALS_PER_MINUTE = 30;
 const DEFAULT_BUDGET_MS = 3500;
@@ -309,7 +313,7 @@ export interface ImportItem {
 type NewApproval = Omit<ApprovalRow, "id" | "approvedAt" | "revokedAt" | "sourceId" | "rights"> & { rights?: Rights | null };
 
 export class Guard {
-  private readonly trustCfg: Required<Pick<TrustConfig, "pluginsRoots" | "budgetMs">> & { known: string[]; checks: (dir: string) => Promise<CheckResult> };
+  private readonly trustCfg: Required<Pick<TrustConfig, "pluginsRoots" | "budgetMs">> & { treeLimits?: TreeLimits } & { known: string[]; checks: (dir: string) => Promise<CheckResult> };
   private evalsRunning = 0;
   private evalTimes: number[] = [];
   private readonly db: DatabaseSync;
@@ -330,7 +334,7 @@ export class Guard {
       if (n === null) throw new Error(`known source ${JSON.stringify(k)} is not github:owner/name, github:owner/* or path:/dir`);
       known.push(n);
     }
-    this.trustCfg = { pluginsRoots: o.trust?.pluginsRoots ?? [], budgetMs: o.trust?.budgetMs ?? DEFAULT_BUDGET_MS, known, checks: o.trust?.checks ?? runChecks };
+    this.trustCfg = { pluginsRoots: o.trust?.pluginsRoots ?? [], budgetMs: o.trust?.budgetMs ?? DEFAULT_BUDGET_MS, ...(o.trust?.treeLimits ? { treeLimits: o.trust.treeLimits } : {}), known, checks: o.trust?.checks ?? runChecks };
     this.secretDir = dirname(o.secretPath);
     this.headDir = dirname(o.headPath);
     this.rp = o.rp ?? { rpId: DEFAULT_RP_ID, origin: DEFAULT_ORIGIN };
@@ -524,9 +528,13 @@ export class Guard {
   }
 
   // ---- approvals ----------------------------------------------------------
-  private activeApproval(pluginId: string, contentHash: string): ApprovalRow | null {
-    const r = this.db.prepare(`SELECT * FROM approvals WHERE content_hash = ? AND plugin_id = ? AND revoked_at IS NULL ORDER BY id DESC LIMIT 1`).get(contentHash, pluginId) as Raw | undefined;
-    return r ? approvalOf(r) : null;
+  /**
+   * An approval of this version that covers the request. One made by the source rule is bound to (plugin, hash, source): it counts only for a
+   * caller that names the same source (a hash alone does not say where the code came from), so without a source it never counts.
+   */
+  private activeApproval(pluginId: string, contentHash: string, source: string | null = null): ApprovalRow | null {
+    const rows = this.db.prepare(`SELECT * FROM approvals WHERE content_hash = ? AND plugin_id = ? AND revoked_at IS NULL ORDER BY id DESC`).all(contentHash, pluginId) as Raw[];
+    return rows.map(approvalOf).find((a) => a.via !== "source" || (source !== null && a.source === source)) ?? null;
   }
   private addApproval(i: NewApproval): ApprovalRow {
     const sourceId = identityOf(i.sourceKind, i.source)?.id ?? null;
@@ -594,15 +602,14 @@ export class Guard {
     return this.tx(() => {
       this.sweepInner();
       // Already approved by a human or imported: nothing to hold (a window's approval is withdrawn by `revoke` first).
-      if (this.activeApproval(req.pluginId, req.contentHash)) return { requestId: null };
+      if (this.activeApproval(req.pluginId, req.contentHash, req.source)) return { requestId: null };
       return { requestId: this.upsertHeld(req, raw.stop === true).id };
     });
   }
 
   /** An approval that covers this request. One made by the source rule covers only the source it was made for (the hash alone does not say where the code came from). */
   private coveringApproval(req: DecideInput): ApprovalRow | null {
-    const a = this.activeApproval(req.pluginId, req.contentHash);
-    return a !== null && !(a.via === "source" && a.source !== req.source) ? a : null;
+    return this.activeApproval(req.pluginId, req.contentHash, req.source);
   }
 
   /**
@@ -619,7 +626,7 @@ export class Guard {
       const stopped = this.isStopped(req.pluginId, req.contentHash);
       const w = stopped ? null : this.openWindowOf(req.pluginId);
       if (w) {
-        const a = this.addApproval({ contentHash: req.contentHash, pluginId: req.pluginId, version: req.version, source: req.source, sourceKind: req.sourceKind, gitCommit: null, npmIntegrity: null, via: "window", windowId: w.id, rights: ev?.ok ? ev.rights : null });
+        const a = this.addApproval({ contentHash: req.contentHash, pluginId: req.pluginId, version: req.version, source: req.source, sourceKind: req.sourceKind, gitCommit: null, npmIntegrity: null, via: "window", windowId: w.id, rights: ev?.ok && ev.hash === req.contentHash ? ev.rights : null });
         this.db.prepare(`UPDATE windows SET uses = uses + 1 WHERE id = ?`).run(w.id);
         if (w.mode === "sliding") {
           const next = Math.min(this.now() + w.sizeSec * 1000, w.hardExpiresAt);
@@ -638,7 +645,7 @@ export class Guard {
         return { action: "proceed", via: "source" } as const;
       }
 
-      const h = this.upsertHeld(req, stopped, { rights: ev?.ok ? ev.rights : null, note: verdict.note });
+      const h = this.upsertHeld(req, stopped, { rights: ev?.ok && ev.hash === req.contentHash ? ev.rights : null, note: verdict.note });
       return h.id === null ? ({ action: "wait", reason: "held by secure-bb guard: too many new holds", requestId: null } as const) : ({ action: "wait", reason: `held by secure-bb guard: review #${h.id}`, requestId: h.id } as const);
     });
   }
@@ -748,15 +755,30 @@ export class Guard {
     this.evalTimes.push(now);
     this.evalsRunning++;
     let timer: NodeJS.Timeout | undefined;
-    // The slot is freed when the checks end, not when the budget does: a slow directory must not pile up readers.
-    const run = this.trustCfg.checks(dir).finally(() => {
+    // ONE pass: the guard reads the directory once, hashes what it read the way the core does, and the checks run on a private copy of those same bytes.
+    // The hash must be the request's: otherwise the request is about other code than the directory shows (a forged `decide`), and nothing is approved.
+    const work = (async (): Promise<Evaluation> => {
+      let tree;
+      try {
+        tree = await readTree(dir, this.trustCfg.treeLimits);
+      } catch (err) {
+        return { ok: false, reason: err instanceof TreeRefused ? `каталог не прочитан: ${err.message}` : `каталог не прочитан: ${this.errText(err)}` };
+      }
+      try {
+        if (tree.hash !== req.contentHash) return { ok: false, reason: "хеш каталога, посчитанный сторожем, не совпал с хешем из запроса" };
+        const res = await this.trustCfg.checks(tree.dir);
+        return { ok: true, hash: tree.hash, rights: rightsOf(res), blocks: hardFlags(res).map((f) => `${f.rule} ${f.file}${f.line ? `:${f.line}` : ""}`) };
+      } finally {
+        await tree.cleanup().catch(() => undefined);
+      }
+    })().finally(() => {
+      // The slot is freed when the work ends, not when the budget does: a slow directory must not pile up readers.
       this.evalsRunning--;
     });
     try {
-      const res = await Promise.race([run, new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error("проверки не уложились во время")), this.trustCfg.budgetMs)))]);
-      return { ok: true, rights: rightsOf(res), blocks: hardFlags(res).map((f) => `${f.rule} ${f.file}${f.line ? `:${f.line}` : ""}`) };
+      return await Promise.race([work, new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error("проверки не уложились во время")), this.trustCfg.budgetMs)))]);
     } catch (err) {
-      run.catch(() => undefined);
+      work.catch(() => undefined);
       return { ok: false, reason: `проверки не выполнены: ${this.errText(err)}` };
     } finally {
       clearTimeout(timer);
@@ -783,6 +805,7 @@ export class Guard {
     if (level === "unknown") return no(ident === null ? "источник нельзя назвать своим (не github и не каталог на диске)" : "неизвестный источник");
     if (ev === null) return no("права версии не посчитаны");
     if (!ev.ok) return no(ev.reason);
+    if (ev.hash !== req.contentHash) return no("хеш каталога не совпал с хешем из запроса");
     const base = this.db
       .prepare(`SELECT * FROM approvals WHERE plugin_id = ? AND source_id = ? AND revoked_at IS NULL AND rights IS NOT NULL ORDER BY id DESC LIMIT 1`)
       .get(req.pluginId, ident!.id) as Raw | undefined;

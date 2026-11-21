@@ -229,3 +229,35 @@ export async function touchFor(g: TestGuard, auth: SoftAuthenticator, action: Re
   return { passkey: auth.get(c.challenge, o), challenge: c };
 }
 export { SoftAuthenticator };
+
+// ---- the core's hash of a plugin directory -------------------------------------------------------------------------------
+import { createHash } from "node:crypto";
+import { lstatSync, readdirSync, readFileSync, readlinkSync } from "node:fs";
+/**
+ * `hashInstallDir` of the core (apps/server/src/services/plugins/install-sources.ts), repeated here as the reference the guard's own
+ * hash is compared with: sha256, entries sorted by `localeCompare`, `d\0name\0` and descent, `l\0name\0target\0`, `f\0name\0mode&0o777\0` + bytes.
+ * Synchronous (the core's is async; the bytes fed to the hash are the same).
+ */
+export function coreHash(rootDir: string): string {
+  const hash = createHash("sha256");
+  const visit = (directory: string, prefix: string): void => {
+    const entries = readdirSync(directory, { withFileTypes: true });
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const path = join(directory, entry.name);
+      const name = prefix.length === 0 ? entry.name : `${prefix}/${entry.name}`;
+      const stats = lstatSync(path);
+      if (stats.isDirectory()) {
+        hash.update(`d\0${name}\0`);
+        visit(path, name);
+      } else if (stats.isSymbolicLink()) {
+        hash.update(`l\0${name}\0${readlinkSync(path)}\0`);
+      } else if (stats.isFile()) {
+        hash.update(`f\0${name}\0${stats.mode & 0o777}\0`);
+        hash.update(readFileSync(path));
+      }
+    }
+  };
+  visit(rootDir, "");
+  return `sha256:${hash.digest("hex")}`;
+}

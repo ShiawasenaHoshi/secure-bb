@@ -52,7 +52,7 @@ describe("guard mode: the mode and my sources on the page", () => {
 
 describe("guard mode: the core runs the hook before it asks the guard, and an own source still gets in", () => {
   it("a version of an own source with the same rights loads in both orders; a new right is held by the guard", { timeout: 30_000 }, async () => {
-    const { core, hookCtx, plugDir } = await import("./support.ts");
+    const { core, coreHash, hookCtx, plugDir } = await import("./support.ts");
     const { writeFileSync } = await import("node:fs");
     const { join } = await import("node:path");
     const { dirname } = await import("node:path");
@@ -60,17 +60,17 @@ describe("guard mode: the core runs the hook before it asks the guard, and an ow
     const h = await bootPlugin(g.paths.socket);
     const dir = plugDir("mine", "export default function plugin() {}\n");
     await h.rpc("trust.add", { entries: [`path:${dirname(dir)}`], code: fresh(g) });
-    const ctx1 = hookCtx("mine", dir, "sha256:mine:1");
+    const ctx1 = hookCtx("mine", dir, coreHash(dir));
     expect(await core(g, h, ctx1)).toBe("held"); // the first version: nobody approved anything from this source yet
     const first = (await h.rpc<any>("overview")).queue[0];
     expect(await h.rpc("queue.approve", { id: first.id, code: fresh(g) })).toMatchObject({ ok: true });
     for (const [i, order] of (["guard-first", "hooks-first"] as const).entries()) {
       writeFileSync(join(dir, "server.ts"), `export default function plugin() {}\n// v${i + 2}\n`);
-      expect(await core(g, h, hookCtx("mine", dir, `sha256:mine:${i + 2}`), order)).toBe("load");
+      expect(await core(g, h, hookCtx("mine", dir, coreHash(dir)), order)).toBe("load");
     }
     writeFileSync(join(dir, "server.ts"), "export default async function plugin() { await fetch('https://new.example/'); }\n");
-    expect(await core(g, h, hookCtx("mine", dir, "sha256:mine:9"), "hooks-first")).toBe("held");
-    const q = (await h.rpc<any>("overview")).queue.find((x: any) => x.contentHash === "sha256:mine:9");
+    expect(await core(g, h, hookCtx("mine", dir, coreHash(dir)), "hooks-first")).toBe("held");
+    const q = (await h.rpc<any>("overview")).queue.find((x: any) => x.contentHash === coreHash(dir));
     expect(q.reason).toMatch(/новое право/);
   });
 });

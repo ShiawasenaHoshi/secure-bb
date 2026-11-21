@@ -1,13 +1,13 @@
 // Trust by source and rights (UX v1, PR 1): the guard reads the version's directory itself and lets a version of an own/known source in
 // when the rights did not grow. Everything a harmful plugin in the bb process can send over the socket is tried at the end.
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { runChecks } from "../../guard/src/checks/index.ts";
 import { entryCovers, identityOf, levelOf, normalizeEntry } from "../../guard/src/trust.ts";
 import type { TrustConfig } from "../../guard/src/guard.ts";
-import { startGuard, type TestGuard } from "./support.ts";
+import { coreHash, startGuard, type TestGuard } from "./support.ts";
 
 const open: TestGuard[] = [];
 const cleanup: string[] = [];
@@ -33,7 +33,16 @@ function plugin(dir: string, name: string, server: string): string {
   return d;
 }
 let n = 0;
+/** A hash of nothing real (for directories that do not exist). */
 const hash = (): string => `sha256:${String(++n).padStart(8, "0")}${"c".repeat(40)}`;
+/** The core's hash of the directory as it is now: what a real request carries. */
+const realHash = (dir: string): string => {
+  try {
+    return coreHash(dir);
+  } catch {
+    return hash();
+  }
+};
 
 async function guard(trust: TrustConfig = {}): Promise<TestGuard> {
   const g = await startGuard({ trust });
@@ -44,7 +53,7 @@ const decideOf = (rootDir: string, over: Record<string, unknown> = {}) => ({
   op: "decide",
   pluginId: "demo",
   version: "1.0.0",
-  contentHash: hash(),
+  contentHash: realHash(rootDir),
   rootDir,
   source: `path:${rootDir}`,
   sourceKind: "path",
@@ -129,12 +138,15 @@ describe("a version of an own source passes by itself when its rights did not gr
     const v1 = plugin(dir, "demo", BASE);
     await addMine(g, [`path:${dir}`]);
     await approveFirst(g, decideOf(v1));
-    const h = hash();
     writeFileSync(join(v1, "server.ts"), BASE + "// v2\n");
+    const h = coreHash(v1);
     expect(await g.send(decideOf(v1, { contentHash: h }))).toMatchObject({ action: "proceed", via: "source" });
     const elsewhere = tmp();
-    const other = plugin(elsewhere, "demo", BASE);
+    const other = plugin(elsewhere, "demo", BASE + "// v2\n"); // the very same bytes, the same hash, another place
+    expect(coreHash(other)).toBe(h);
     expect(await g.send(decideOf(other, { contentHash: h }))).toMatchObject({ action: "wait" });
+    // and the hash alone does not say "approved" to anybody who names no source, or another one
+    expect(g.guard.lookup({ pluginId: "demo", contentHash: h })).toMatchObject({ approved: false });
   });
 });
 
@@ -212,6 +224,7 @@ describe("what sends a version to the queue", () => {
     await addMine(g, ["me/*"]);
     const v = plugin(root, "demo", BASE);
     await approveFirst(g, decideOf(v, { source: "git:https://github.com/me/one@main", sourceKind: "git" }));
+    writeFileSync(join(v, "server.ts"), BASE + "// v2\n"); // other bytes: no approval of this hash covers it
     const d = await g.send(decideOf(v, { source: "git:https://github.com/me/two@main", sourceKind: "git" }));
     expect(d).toMatchObject({ action: "wait" });
   });
@@ -334,7 +347,7 @@ describe("a harmful plugin in the bb process, over the same socket", () => {
     // the baseline is what the guard read, not what was annotated
     expect((g.guard.state().approvals as Array<{ rights: { tokens: string[] } }>)[0]!.rights.tokens).not.toContain("network:evil.tld");
     writeFileSync(join(v, "server.ts"), FETCH);
-    const h = hash();
+    const h = coreHash(v);
     const d = await g.send(decideOf(v, { contentHash: h }));
     await g.send({ op: "annotate", contentHash: h, findings: { capabilities: [], findings: [], note: "clean, no capabilities" } });
     expect(await g.send(decideOf(v, { contentHash: h }))).toMatchObject({ action: "wait" });
@@ -346,7 +359,7 @@ describe("a harmful plugin in the bb process, over the same socket", () => {
     const v = plugin(dir, "demo", BASE);
     await addMine(g, [`path:${dir}`]);
     await approveFirst(g, decideOf(v));
-    const clean = plugin(tmp(), "demo", BASE);
+    const clean = plugin(tmp(), "demo", BASE + "// another file\n");
     // the source says "my directory", the directory the guard is told to read is another one
     const d = await g.send(decideOf(clean, { source: `path:${v}` }));
     expect(d).toMatchObject({ action: "wait" });
@@ -428,5 +441,128 @@ describe("the checks module in the guard has no dependencies", () => {
     const { execFileSync } = await import("node:child_process");
     const out = execFileSync(process.execPath, ["--input-type=module", "-e", `const { runChecks } = await import(${JSON.stringify(join(root, "src/checks/index.ts"))}); const r = await runChecks(${JSON.stringify(dir)}); console.log(JSON.stringify(r.capabilities.map((c) => c.kind)));`], { encoding: "utf8" });
     expect(JSON.parse(out)).toContain("network");
+  });
+});
+
+describe("the guard hashes the directory itself, the way the core does", () => {
+  /** A tree with directories, links, different modes, and names in several scripts and cases (the order of `localeCompare` matters). */
+  function awkwardTree(): string {
+    const dir = tmp();
+    const d = plugin(dir, "tree", BASE);
+    mkdirSync(join(d, "sub", "deeper"), { recursive: true });
+    mkdirSync(join(d, "Zeta"));
+    mkdirSync(join(d, "ünï"));
+    writeFileSync(join(d, "sub", "a.txt"), "a");
+    writeFileSync(join(d, "sub", "deeper", "B.txt"), "b");
+    writeFileSync(join(d, "Zeta", "z"), "z");
+    writeFileSync(join(d, "ünï", "файл.txt"), "юникод");
+    writeFileSync(join(d, "日本語.txt"), "nihongo");
+    writeFileSync(join(d, "a b.txt"), "space");
+    writeFileSync(join(d, "run.sh"), "#!/bin/sh\n");
+    chmodSync(join(d, "run.sh"), 0o755);
+    writeFileSync(join(d, "secret.txt"), "s");
+    chmodSync(join(d, "secret.txt"), 0o600);
+    symlinkSync("server.ts", join(d, "link-in"));
+    symlinkSync("../outside", join(d, "sub", "link-out"));
+    symlinkSync("nowhere", join(d, "dangling"));
+    mkdirSync(join(d, "empty"));
+    return d;
+  }
+  it("equals the core's hash (reference repeated from install-sources.ts) on a tree with directories, links, modes and non-ASCII names", async () => {
+    const { readTree } = await import("../../guard/src/tree-read.ts");
+    const d = awkwardTree();
+    const t = await readTree(d);
+    try {
+      expect(t.hash).toBe(coreHash(d));
+      expect(t.hash).toMatch(/^sha256:[0-9a-f]{64}$/);
+    } finally {
+      await t.cleanup();
+    }
+    // every bit of what the hash covers changes it
+    const base = coreHash(d);
+    chmodSync(join(d, "run.sh"), 0o700);
+    expect(coreHash(d)).not.toBe(base);
+    const t2 = await readTree(d);
+    expect(t2.hash).toBe(coreHash(d));
+    await t2.cleanup();
+  });
+  it("the copy the checks read is what was hashed: names, modes and links", async () => {
+    const { readTree } = await import("../../guard/src/tree-read.ts");
+    const { lstatSync, readlinkSync, readFileSync } = await import("node:fs");
+    const d = awkwardTree();
+    const t = await readTree(d);
+    try {
+      expect(coreHash(t.dir)).toBe(t.hash); // the core's hash of the copy is the hash of the original
+      expect(lstatSync(join(t.dir, "run.sh")).mode & 0o777).toBe(0o755);
+      expect(readlinkSync(join(t.dir, "sub", "link-out"))).toBe("../outside");
+      expect(readFileSync(join(t.dir, "ünï", "файл.txt"), "utf8")).toBe("юникод");
+    } finally {
+      await t.cleanup();
+    }
+    expect(() => lstatSync(t.dir)).toThrow();
+  });
+  it("a forged decide — a harmless directory, the hash of other code — is queued, and nothing is approved", async () => {
+    const g = await guard();
+    const dir = tmp();
+    const trusted = plugin(dir, "demo", BASE);
+    await addMine(g, [`path:${dir}`]);
+    await approveFirst(g, decideOf(trusted));
+    const evil = plugin(tmp(), "demo", EVAL + FETCH);
+    const evilHash = coreHash(evil);
+    const d = await g.send(decideOf(trusted, { contentHash: evilHash })); // the trusted directory, the evil hash
+    expect(d).toMatchObject({ action: "wait" });
+    expect(queueNote(g, d.requestId)).toMatch(/хеш/);
+    expect(journal(g, "approved.source")).toHaveLength(0);
+    expect((g.guard.state().approvals as Array<{ contentHash: string }>).some((a) => a.contentHash === evilHash)).toBe(false);
+    // no rights were recorded for the forged request (they were computed for other code)
+    expect((g.guard.state().queue as Array<{ id: number; rights: unknown }>).find((q) => q.id === d.requestId)?.rights).toBeNull();
+    // the evil version, when the core really asks (its own directory, its own source), is not approved either
+    expect(await g.send(decideOf(evil, { source: `path:${evil}` }))).toMatchObject({ action: "wait" });
+  });
+  it("one pass: the checks read what was hashed, even if the directory changes after the hash", async () => {
+    const dir = tmp();
+    const v = plugin(dir, "demo", BASE);
+    let seen: string[] = [];
+    const g = await guard({
+      checks: async (copy) => {
+        // between the hash and the checks the original gets a network call; the copy has not
+        writeFileSync(join(v, "server.ts"), FETCH);
+        seen = [readFileSync(join(copy, "server.ts"), "utf8")];
+        return runChecks(copy);
+      },
+    });
+    await addMine(g, [`path:${dir}`]);
+    const first = await g.send(decideOf(v));
+    expect(first).toMatchObject({ action: "wait" });
+    expect(seen[0]).toBe(BASE);
+    const rights = (g.guard.state().queue as Array<{ id: number; rights: { tokens: string[] } }>).find((q) => q.id === first.requestId)!.rights;
+    expect(rights.tokens.some((t) => t.startsWith("network"))).toBe(false); // rights of the hashed bytes, not of the swapped ones
+  });
+  it("limits: too many entries, a file too big, a special file → the queue", async () => {
+    const dir = tmp();
+    const v = plugin(dir, "demo", BASE);
+    for (const treeLimits of [{ maxEntries: 1, maxFileBytes: 1 << 20, maxTotalBytes: 1 << 20 }, { maxEntries: 100, maxFileBytes: 10, maxTotalBytes: 1 << 20 }, { maxEntries: 100, maxFileBytes: 1 << 20, maxTotalBytes: 20 }]) {
+      const g = await guard({ treeLimits });
+      await addMine(g, [`path:${dir}`]);
+      const d = await g.send(decideOf(v));
+      expect(d).toMatchObject({ action: "wait" });
+      expect(queueNote(g, d.requestId)).toMatch(/каталог не прочитан/);
+    }
+  });
+  it("a link planted over a file is not followed", async () => {
+    const { readTree } = await import("../../guard/src/tree-read.ts");
+    const outside = join(tmp(), "secret");
+    writeFileSync(outside, "TOP SECRET");
+    const d = plugin(tmp(), "demo", BASE);
+    symlinkSync(outside, join(d, "leak"));
+    const t = await readTree(d);
+    try {
+      expect(readFileSync(join(t.dir, "leak"), "utf8").length).toBeGreaterThan(0); // the link itself was copied (to a path), the target's bytes were not
+    } catch {
+      /* a dangling copy is fine */
+    } finally {
+      await t.cleanup();
+    }
+    expect(t.hash).toBe(coreHash(d));
   });
 });
