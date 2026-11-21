@@ -159,7 +159,7 @@ export interface GuardState {
   /** Troubleshooting mode: the guard passes everything until this time and writes every decision down. Null or absent: off. */
   troubleshoot?: { until: number } | null;
   /** Absent in a guard that predates passkeys. */
-  passkeys?: { rpId: string; origin: string; blockedUntil?: number; keys: Array<{ id: number; label: string; createdAt: number; lastUsedAt: number | null; aaguid?: string }>; enrollmentOpen: boolean };
+  passkeys?: { rpId: string; origin: string; keys: Array<{ id: number; label: string; createdAt: number; lastUsedAt: number | null; aaguid?: string }>; enrollmentOpen: boolean };
   policy: GuardPolicy;
   /** Absent in a guard that predates trust by source. */
   trust?: GuardTrust;

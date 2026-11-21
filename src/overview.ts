@@ -81,8 +81,6 @@ export interface GuardView {
   trust: GuardTrust | null;
   /** Troubleshooting mode (the owner switched it on at the guard's console): until when the guard passes everything and writes each decision down; 0: off. */
   troubleshootUntil: number;
-  /** Signatures are paused (a flood of wrong ones) until this time; 0: not. Codes have their own block (`totp.blockedUntil`). */
-  passkeyBlockedUntil: number;
   passkey: { rpId: string; origin: string; keys: Array<{ id: number; label: string; createdAt: number; lastUsedAt: number | null; aaguid?: string }>; enrollmentOpen: boolean; totpOff: boolean } | null;
 }
 export interface Overview {
@@ -213,7 +211,7 @@ async function guardOverlay(d: OverviewDeps, port: GuardPort): Promise<{ view: G
   try {
     state = await port.state();
   } catch (err) {
-    return { view: { connected: false, error: err instanceof Error ? err.message : String(err), journal: null, recent: [], revoked: [], trust: null, troubleshootUntil: 0, passkeyBlockedUntil: 0, passkey: null }, state: null };
+    return { view: { connected: false, error: err instanceof Error ? err.message : String(err), journal: null, recent: [], revoked: [], trust: null, troubleshootUntil: 0, passkey: null }, state: null };
   }
   // A second factor exists if either kind does: a guard with passkeys only (codes switched off) is as registered as one with a TOTP secret.
   const keys = state.passkeys?.keys ?? [];
@@ -238,7 +236,6 @@ async function guardOverlay(d: OverviewDeps, port: GuardPort): Promise<{ view: G
       revoked: state.revoked,
       trust: state.trust ?? null,
       troubleshootUntil: state.troubleshoot?.until ?? 0,
-      passkeyBlockedUntil: state.passkeys?.blockedUntil ?? 0,
       passkey: state.passkeys ? { rpId: state.passkeys.rpId, origin: state.passkeys.origin, keys, enrollmentOpen: state.passkeys.enrollmentOpen, totpOff: state.totp.disabled === true } : null,
     },
     state,

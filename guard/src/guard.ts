@@ -66,13 +66,11 @@ export class GuardError extends Error {
 export const HOUR_MS = 3_600_000;
 export const MAX_FAILURES = 5;
 /**
- * Wrong signatures have their own counter and their own, looser limit. A signature cannot be guessed, so the owner's touch must not be
- * lost because a process spammed wrong codes (and wrong signatures do not take the owner's codes). The limit only slows a flood down:
- * more than this many wrong signatures within the window pause signatures for a few minutes, nothing longer.
+ * Wrong signatures are never a reason to refuse a touch: an ES256 signature cannot be guessed, so a limit would protect nothing and
+ * only let a process that reaches the socket lock the owner out. They are journaled, at most one summary record a minute (with the
+ * number of refusals since the last one), so the journal cannot be flooded either.
  */
-export const MAX_PASSKEY_FAILURES = 20;
-export const PASSKEY_FAIL_WINDOW_MS = 10 * 60_000;
-export const PASSKEY_BLOCK_MS = 2 * 60_000;
+export const PASSKEY_FAIL_LOG_EVERY_MS = 60_000;
 /** Approval sessions (the same numbers as without a guard): 15 minutes sliding, 1 hour ceiling. */
 export const SESSION_IDLE_MS = 15 * 60_000;
 export const SESSION_CAP_MS = 60 * 60_000;
@@ -369,6 +367,8 @@ export class Guard {
   private readonly agents: AgentsConfig | null;
   private lastAgentsScan = 0;
   private troubleshootPasses: number[] = [];
+  private passkeyFails = 0;
+  private passkeyFailLoggedAt = -Infinity;
   private readonly secretDir: string;
   private readonly headDir: string;
 
@@ -448,42 +448,43 @@ export class Guard {
     const until = Number(this.meta("blocked_until") ?? 0);
     return until > this.now() ? until : 0;
   }
-  /** Until when wrong SIGNATURES pause signatures (a separate counter and a looser limit, see MAX_PASSKEY_FAILURES); 0: not paused. */
-  passkeyBlockedUntil(): number {
-    const until = Number(this.meta("passkey_blocked_until") ?? 0);
-    return until > this.now() ? until : 0;
-  }
-
   /** Blocked after too many wrong codes (or session tokens): five in an hour block codes for an hour. Signatures are not touched by it. */
   private assertCodesNotBlocked(): void {
     const until = this.blockedUntil();
     if (until > 0) throw new GuardError("blocked", `too many wrong codes; codes are blocked until ${new Date(until).toISOString()} (a passkey touch still works)`);
   }
-  /** Paused after a flood of wrong signatures. Codes are not touched by it. */
-  private assertPasskeysNotBlocked(): void {
-    const until = this.passkeyBlockedUntil();
-    if (until > 0) throw new GuardError("blocked", `too many wrong signatures; signatures are paused until ${new Date(until).toISOString()} (a code still works)`);
-  }
-
   /**
-   * A wrong code or session token (`totp.fail`: the fifth within an hour blocks codes for an hour) or a wrong signature (`passkey.fail`: its own counter,
-   * `MAX_PASSKEY_FAILURES` within `PASSKEY_FAIL_WINDOW_MS` pause signatures for `PASSKEY_BLOCK_MS`). Always commits before the caller throws.
+   * A wrong code or session token (`totp.fail`: the fifth within an hour blocks codes for an hour), or a wrong signature (`passkey.fail`: counted
+   * and journaled as a summary at most once a minute, never blocks). Always commits before the caller throws.
    */
   private recordFailure(kind: "totp.fail" | "passkey.fail", purpose: string, extra: Record<string, unknown> = {}): void {
-    const passkey = kind === "passkey.fail";
+    if (kind === "passkey.fail") {
+      this.passkeyFails++;
+      this.flushPasskeyFails(purpose, extra);
+      return;
+    }
     this.tx(() => {
-      this.db.prepare(`INSERT INTO attempts (ts, ok, purpose, kind) VALUES (?, 0, ?, ?)`).run(this.now(), purpose, passkey ? "passkey" : "code");
-      const epochKey = passkey ? "passkey_fail_epoch" : "fail_epoch";
-      const since = Math.max(this.now() - (passkey ? PASSKEY_FAIL_WINDOW_MS : HOUR_MS), Number(this.meta(epochKey) ?? 0));
-      const n = (this.db.prepare(`SELECT COUNT(*) AS n FROM attempts WHERE ok = 0 AND kind = ? AND ts > ?`).get(passkey ? "passkey" : "code", since) as { n: number }).n;
+      this.db.prepare(`INSERT INTO attempts (ts, ok, purpose, kind) VALUES (?, 0, ?, 'code')`).run(this.now(), purpose);
+      const since = Math.max(this.now() - HOUR_MS, Number(this.meta("fail_epoch") ?? 0));
+      const n = (this.db.prepare(`SELECT COUNT(*) AS n FROM attempts WHERE ok = 0 AND kind = 'code' AND ts > ?`).get(since) as { n: number }).n;
       this.log(kind, null, null, { purpose, ...extra });
-      if (passkey ? n >= MAX_PASSKEY_FAILURES : n >= MAX_FAILURES) {
-        const until = this.now() + (passkey ? PASSKEY_BLOCK_MS : HOUR_MS);
-        this.setMeta(passkey ? "passkey_blocked_until" : "blocked_until", String(until));
-        this.setMeta(epochKey, String(this.now()));
-        this.log(passkey ? "passkey.paused" : "totp.blocked", null, null, { purpose, until });
+      if (n >= MAX_FAILURES) {
+        const until = this.now() + HOUR_MS;
+        this.setMeta("blocked_until", String(until));
+        this.setMeta("fail_epoch", String(this.now()));
+        this.log("totp.blocked", null, null, { purpose, until });
       }
     });
+  }
+  /** The summary of wrong signatures: when a minute has passed since the last one (or on the background pass). */
+  private flushPasskeyFails(purpose = "", extra: Record<string, unknown> = {}, inTx = false): void {
+    if (this.passkeyFails === 0 || this.now() - this.passkeyFailLoggedAt < PASSKEY_FAIL_LOG_EVERY_MS) return;
+    const failures = this.passkeyFails;
+    this.passkeyFails = 0;
+    this.passkeyFailLoggedAt = this.now();
+    const write = (): unknown => this.log("passkey.fail", null, null, { ...(purpose ? { purpose } : {}), ...extra, failures });
+    if (inTx) write();
+    else this.tx(write);
   }
 
   /**
@@ -1254,6 +1255,7 @@ export class Guard {
       this.closeSessionInner(Number(r.id), "expired");
       n++;
     }
+    this.flushPasskeyFails("", {}, true);
     // Troubleshooting mode returns by itself.
     const until = Number(this.meta("troubleshoot_until") ?? 0);
     if (until > 0 && until <= now) {
@@ -1627,7 +1629,6 @@ export class Guard {
    */
   private verifyPasskey(purpose: string, action: Record<string, unknown>, assertion: unknown): Factor {
     if (this.activePasskeys().length === 0) throw new GuardError("not_registered", "no passkey is registered; run `sbb-guard passkey-enroll` on the console");
-    this.assertPasskeysNotBlocked();
     if (typeof assertion !== "object" || assertion === null || Array.isArray(assertion)) throw new GuardError("invalid", "passkey is an object");
     const p = assertion as Record<string, unknown>;
     let credId: string;
@@ -1943,7 +1944,6 @@ export class Guard {
       passkeys: {
         rpId: this.rp.rpId,
         origin: this.rp.origin,
-        blockedUntil: this.passkeyBlockedUntil(),
         keys: this.listPasskeys()
           .filter((k) => k.state === "active")
           .map((k) => ({ id: k.id, label: k.label, createdAt: k.createdAt, lastUsedAt: k.lastUsedAt, aaguid: k.aaguid })),

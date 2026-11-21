@@ -2711,9 +2711,6 @@ function GatePage() {
             {ov.totp.blockedUntil > 0 ? (
               <p className="rounded-md border border-destructive p-2 text-destructive">Слишком много неверных кодов: коды заблокированы до {when(ov.totp.blockedUntil)}.{(ov.guard?.passkey?.keys.length ?? 0) > 0 ? " Касание ключом работает: подпись не подобрать, поэтому её это не касается." : ""}</p>
             ) : null}
-            {(ov.guard?.passkeyBlockedUntil ?? 0) > ov.now ? (
-              <p className="rounded-md border border-destructive p-2 text-destructive">Слишком много неверных подписей подряд: касания ключом на паузе до {when(ov.guard!.passkeyBlockedUntil)}. Код работает.</p>
-            ) : null}
             <div id="sbb-alarms" className="space-y-2">
               <JournalAlarm ov={ov} rpc={rpc} refetch={refetch} />
               <AliveAlarm ov={ov} />
