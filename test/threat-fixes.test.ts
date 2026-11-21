@@ -270,7 +270,7 @@ describe("4. F8: closing a window, revoking, switching a module off, rollback on
     const h = await registered({ thirdPartyRunning: async () => [] });
     const { token } = await h.gate.openSession(h.code());
     h.gate.closeSessions("locked");
-    expect(() => h.gate.touch("x", h.gate.proofFor("queue.dismiss", { session: token }))).toThrow(GateError);
+    expect(() => h.gate.touch("x", h.gate.proofFor("queue.approve", { session: token }))).toThrow(GateError);
   });
 
   it("over RPC: window.close, approval.revoke and watch.window.close take no code at all", async () => {
@@ -579,8 +579,8 @@ describe("10. an open session is closed when a third-party plugin starts running
     const running: string[] = [];
     const h = await registered({ thirdPartyRunning: async () => [...running] });
     const { token } = await h.gate.openSession(h.code());
-    expect(h.gate.proofFor("queue.dismiss", { session: token })).toBeInstanceOf(SessionProof);
-    expect(() => h.gate.touch("t", h.gate.proofFor("queue.dismiss", { session: token }))).not.toThrow();
+    expect(h.gate.proofFor("queue.approve", { session: token })).toBeInstanceOf(SessionProof);
+    expect(() => h.gate.touch("t", h.gate.proofFor("queue.approve", { session: token }))).not.toThrow();
 
     expect(await h.gate.closeSessionsForThirdParty()).toEqual([]); // nobody runs: nothing to do
     expect(h.store.unclosedSessions()).toHaveLength(1);
@@ -588,7 +588,7 @@ describe("10. an open session is closed when a third-party plugin starts running
     running.push("nosy");
     expect(await h.gate.closeSessionsForThirdParty()).toEqual(["nosy"]);
     expect(h.store.unclosedSessions()).toHaveLength(0);
-    expect(() => h.gate.touch("t", h.gate.proofFor("queue.dismiss", { session: token }))).toThrow(/invalid or expired session|invalid/);
+    expect(() => h.gate.touch("t", h.gate.proofFor("queue.approve", { session: token }))).toThrow(/invalid or expired session|invalid/);
     expect(h.store.listLog(10).find((l) => l.kind === "session.close")!.detail).toMatchObject({ reason: expect.stringContaining("nosy") });
   });
 

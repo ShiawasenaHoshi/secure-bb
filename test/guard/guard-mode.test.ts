@@ -153,7 +153,7 @@ describe("guard mode: what is approved is the guard's entry for the core's hash"
     const page = await ov(h);
     expect(page.queue).toHaveLength(1);
     expect(page.queue[0].id).toBeLessThan(0);
-    expect(page.queue[0].reason).toMatch(/ещё не установлен/);
+    expect(page.queue[0].reason).toMatch(/^не установлен: заблокирован проверками secure-bb: /);
     await expect(h.rpc("queue.approve", { id: page.queue[0].id, code: g.code() })).rejects.toThrow(); // block needs the risk acknowledged
     expect((await g.send({ op: "touch", purpose: "x", code: fresh(g) })).ok).toBe(true); // ...and that refusal did not spend a code
     await h.rpc("queue.approve", { id: page.queue[0].id, code: fresh(g), acknowledgeBlock: true });
@@ -162,6 +162,40 @@ describe("guard mode: what is approved is the guard's entry for the core's hash"
     expect(st.approvals).toHaveLength(1);
     expect(st.approvals[0].contentHash).toBe(coreHash(h.installs[0]!));
     expect((await ov(h)).queue.every((q: any) => q.id > 0)).toBe(true);
+  });
+});
+
+describe("guard mode: rejecting needs no code", () => {
+  it("a guard entry is dismissed at the guard without a code, also while wrong codes block approvals", { timeout: 30_000 }, async () => {
+    g = await startGuardOnDate();
+    let h!: Booted;
+    h = await bootPlugin(g.paths.socket);
+    const { ctx } = await proposed(h, "demo");
+    expect(await core(g, h, ctx)).toBe("held");
+    const page = await ov(h);
+    const id = page.queue[0].id;
+    expect(id).toBeGreaterThan(0);
+    for (let i = 0; i < 5; i++) await expect(h.rpc("queue.approve", { id, code: "000000" })).rejects.toThrow();
+    await expect(h.rpc("queue.approve", { id, code: fresh(g) })).rejects.toThrow(/blocked|too many/);
+    await h.rpc("queue.dismiss", { id }); // no code
+    expect((await g.send({ op: "state" })).approvals).toHaveLength(0);
+    expect((await g.send({ op: "state" })).queue.filter((q: any) => q.status === "held")).toHaveLength(0);
+    expect(((await g.send({ op: "state" })).journal.recent as any[]).some((j) => j.kind === "dismissed")).toBe(true);
+    expect(await core(g, h, ctx)).toBe("held"); // still not approved
+  });
+
+  it("a local proposal (negative id) is only marked dismissed, without a code and without touching the guard", { timeout: 30_000 }, async () => {
+    g = await startGuardOnDate();
+    let h!: Booted;
+    h = await bootPlugin(g.paths.socket, { onInstall: async (src) => void (await core(g!, h, hookCtx("evil", src, `sha256:core-${src.slice(-10)}`))) });
+    await proposed(h, "evil", "eval(atob('YWxlcnQoMSk='));\n");
+    const page = await ov(h);
+    expect(page.queue[0].id).toBeLessThan(0);
+    const before = await g.send({ op: "state" });
+    await h.rpc("queue.dismiss", { id: page.queue[0].id }); // no code
+    expect((await ov(h)).queue.filter((q: any) => q.status === "held")).toHaveLength(0);
+    expect((await g.send({ op: "state" })).journal.head).toEqual(before.journal.head); // the guard was not touched
+    expect(h.installs).toHaveLength(0);
   });
 });
 

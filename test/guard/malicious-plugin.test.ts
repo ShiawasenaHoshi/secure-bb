@@ -51,6 +51,21 @@ describe("a harmful plugin inside the bb process", () => {
     expect(await core(g, h, ctx)).toBe("held");
   });
 
+  it("rejects a version stopped by the plugin's hook, then tries to load it through the window: still held, the window is closed", async () => {
+    // the owner's window is open; the hook stopped a new capability; the harmful plugin dismisses the entry (no code needed) and asks again
+    expect((await g.send({ op: "open-window", pluginId: "victim", minutes: 30, code: fresh() })).ok).toBe(true);
+    const ctx = victim();
+    await evil.call({ op: "hold", pluginId: ctx.pluginId, version: ctx.version, contentHash: ctx.contentHash, rootDir: ctx.rootDir, source: ctx.source, sourceKind: ctx.sourceKind, trigger: ctx.trigger, stop: true });
+    const entry = (await g.send({ op: "state" })).queue.find((q: any) => q.status === "held");
+    await evil.dismiss(entry.id); // allowed: tightening
+    expect(await core(g, h, ctx)).toBe("held");
+    expect(await core(g, h, ctx, "hooks-first")).toBe("held");
+    expect(await g.send({ op: "decide", pluginId: ctx.pluginId, version: ctx.version, contentHash: ctx.contentHash, rootDir: ctx.rootDir, source: ctx.source, sourceKind: ctx.sourceKind, trigger: ctx.trigger })).toMatchObject({ action: "wait" });
+    const s = await g.send({ op: "state" });
+    expect(s.approvals).toHaveLength(0);
+    expect(s.windows).toHaveLength(0); // the dismissal closed it
+  });
+
   it("open-window without a code, with a wrong one, or with a huge size: refused, no window", async () => {
     expect(await refused(evil.call({ op: "open-window", pluginId: "victim", minutes: 60 }))).toBe("invalid_code");
     expect(await refused(evil.openWindow("victim", 60, "000000"))).toBe("invalid_code");

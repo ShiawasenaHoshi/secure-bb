@@ -213,6 +213,21 @@ describe("§5.3 inside a window", () => {
     expect(h.store.activeApproval("sha256:core2")!.via).toBe("window");
   });
 
+  it("rejecting a version stopped by a new capability does not let the window approve it (dismiss needs no code)", async () => {
+    const w = await open(NETWORKED);
+    h.next = async () => withCaps("network", "child_process");
+    const s1 = await h.snapshot(1);
+    expect((await h.gate.decide(s1.ctx)).action).toBe("wait");
+    h.gate.dismissQueue(h.store.listQueue()[0]!.id); // no code
+    for (let i = 0; i < 2; i++) expect((await h.gate.decide(s1.ctx)).action).toBe("wait"); // asked again: still stopped, window or not
+    expect(h.store.activeApproval("sha256:core1")).toBeNull();
+    expect(h.store.getWindow(w.id)!.closedAt).toBeNull();
+    // only a code lifts it
+    h.tick();
+    h.gate.approveQueue(h.store.listQueue().find((q) => q.status === "held")!.id, h.code());
+    expect((await h.gate.decide(s1.ctx)).action).toBe("proceed");
+  });
+
   it("a new detail of a known kind (another host) also counts as new", async () => {
     await open({ ...NETWORKED, capabilities: [{ kind: "network", detail: ["host:a.example"], sites: [] }] });
     h.next = async () => ({ ...NETWORKED, capabilities: [{ kind: "network", detail: ["host:evil.example"], sites: [] }] });

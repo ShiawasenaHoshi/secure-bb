@@ -528,7 +528,7 @@ export default async function plugin(bb: BbPluginApi) {
    * In guard mode a code that arrives with any RPC is checked by the guard first (it consumes the code there: the secret is not here),
    * and the handler then runs with the mark that says so. RPCs that need more than that (they act at the guard) do it themselves.
    */
-  const OWN_GUARD_PATH = new Set(["queue.approve", "queue.dismiss", "window.open", "policy.set", "session.open", "totp.begin", "totp.confirm"]);
+  const OWN_GUARD_PATH = new Set(["queue.approve", "window.open", "policy.set", "session.open", "totp.begin", "totp.confirm"]);
   const withGuardTouch = <T extends object>(handlers: T): T => {
     if (!guardLink) return handlers;
     const out: Record<string, unknown> = {};
@@ -606,23 +606,24 @@ export default async function plugin(bb: BbPluginApi) {
       const note = await approveQueueFull(id, proof, { acknowledgeBlock });
       return { ok: true as const, note };
     }),
-    "queue.dismiss": wrap(async ({ id, code, session }) => {
+    // Rejecting tightens: no code, in both modes, and no block after wrong codes.
+    "queue.dismiss": wrap(async ({ id }) => {
       if (guardLink) {
-        if (code === undefined) throw new GateError("invalid_code", "a code is needed: the guard checks it");
         if (id < 0) {
+          // A local proposal the core has not asked the guard about: only marked, the guard is not touched.
           const lq = store.getQueue(-id);
           if (!lq || lq.status !== "held") throw new GateError("not_found", `no pending proposal #${-id}`);
-          await guardLink.touch("dismiss", code);
           store.setQueueStatus(lq.id, "dismissed");
+          store.log("dismissed", lq.pluginId, lq.contentHash, { review: lq.id, proposal: true });
           changed();
           return { ok: true as const };
         }
         await guardEntry(id);
-        await guardLink.dismiss(id, code);
+        await guardLink.dismiss(id);
         changed();
         return { ok: true as const };
       }
-      gate.dismissQueue(id, gate.proofFor("queue.dismiss", { code, session }));
+      gate.dismissQueue(id);
       changed();
       return { ok: true as const };
     }),

@@ -31,7 +31,7 @@ export const rpcContract = defineRpcContract({
   },
   "totp.confirm": { input: s.object({ code }), output: s.json<{ ok: true }>() },
   "queue.approve": { input: s.object({ id: queueId, ...proof, acknowledgeBlock: s.optional(s.boolean()) }), output: s.json<{ ok: true; note: string }>() },
-  "queue.dismiss": { input: s.object({ id: queueId, ...proof }), output: s.json<{ ok: true }>() },
+  "queue.dismiss": { input: s.object({ id: queueId }), output: s.json<{ ok: true }>() },
   "window.open": {
     input: s.object({ queueId: id, ...proof, scope: s.optional(s.oneOf(["tree", "thread"] as const)) }),
     output: s.json<{ ok: true }>(),

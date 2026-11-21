@@ -4,7 +4,7 @@
 //
 // Two kinds of requests (design doc, "Сокет и протокол"):
 //  - without a secret (any process of the bb user can send them, including a harmful plugin, so they may
-//    decide nothing a human has not already decided): decide, state, lookup, annotate, close-window, revoke;
+//    decide nothing a human has not already decided): decide, state, lookup, annotate, close-window, revoke, dismiss (held entries only);
 //  - with a touch (a TOTP code): approve, open-window, policy, touch.
 // The TOTP secret is only ever written by `sbb-guard totp-register` on the console, and is never returned
 // by anything in this file.
@@ -366,6 +366,11 @@ export class Guard {
     };
   }
 
+  /** A version a window does not lift: some entry of it was kept with stop=1 and is held or was dismissed. Only a code (approve) lifts it. */
+  private isStopped(pluginId: string, contentHash: string): boolean {
+    return this.db.prepare(`SELECT 1 FROM queue WHERE content_hash = ? AND plugin_id = ? AND status IN ('held', 'dismissed') AND stop = 1`).get(contentHash, pluginId) !== undefined;
+  }
+
   /** The held entry of a version (made if there was none, unless too many were made this hour). `stop`: a window does not lift this hold. */
   private upsertHeld(req: DecideInput, stop: boolean): { id: number | null; created: boolean } {
     const held = this.db.prepare(`SELECT * FROM queue WHERE content_hash = ? AND plugin_id = ? AND status = 'held' ORDER BY id DESC LIMIT 1`).get(req.contentHash, req.pluginId) as Raw | undefined;
@@ -386,7 +391,7 @@ export class Guard {
       .prepare(`INSERT INTO queue (content_hash, plugin_id, version, source, source_kind, root_dir, trigger, status, first_seen, last_seen, stop) VALUES (?, ?, ?, ?, ?, ?, ?, 'held', ?, ?, ?)`)
       .run(req.contentHash, req.pluginId, req.version, req.source, req.sourceKind, req.rootDir, req.trigger, this.now(), this.now(), stop ? 1 : 0);
     const id = Number(info.lastInsertRowid);
-    this.db.prepare(`DELETE FROM queue WHERE status != 'held' AND id NOT IN (SELECT id FROM queue ORDER BY id DESC LIMIT ?)`).run(MAX_QUEUE_ROWS);
+    this.db.prepare(`DELETE FROM queue WHERE status != 'held' AND NOT (status = 'dismissed' AND stop = 1) AND id NOT IN (SELECT id FROM queue ORDER BY id DESC LIMIT ?)`).run(MAX_QUEUE_ROWS);
     this.log("hold", req.pluginId, req.contentHash, { review: id, version: req.version, trigger: req.trigger, source: req.source, sourceKind: req.sourceKind, ...(stop ? { stop: true } : {}) });
     return { id, created: true };
   }
@@ -413,7 +418,8 @@ export class Guard {
       this.sweepInner();
       if (this.activeApproval(req.pluginId, req.contentHash)) return { action: "proceed", via: "approval" } as const;
 
-      const stopped = this.db.prepare(`SELECT 1 FROM queue WHERE content_hash = ? AND plugin_id = ? AND status = 'held' AND stop = 1`).get(req.contentHash, req.pluginId) !== undefined;
+      // A stop survives a rejection: dismiss needs no code, so a process that can reach the guard could otherwise clear the stop and let the window in.
+      const stopped = this.isStopped(req.pluginId, req.contentHash);
       const w = stopped ? null : this.openWindowOf(req.pluginId);
       if (w) {
         const a = this.addApproval({ contentHash: req.contentHash, pluginId: req.pluginId, version: req.version, source: req.source, sourceKind: req.sourceKind, gitCommit: null, npmIntegrity: null, via: "window", windowId: w.id });
@@ -427,7 +433,7 @@ export class Guard {
         return { action: "proceed", via: "window" } as const;
       }
 
-      const h = this.upsertHeld(req, false);
+      const h = this.upsertHeld(req, stopped);
       return h.id === null ? ({ action: "wait", reason: "held by secure-bb guard: too many new holds", requestId: null } as const) : ({ action: "wait", reason: `held by secure-bb guard: review #${h.id}`, requestId: h.id } as const);
     });
   }
@@ -492,14 +498,17 @@ export class Guard {
     });
   }
 
-  /** Drops a held entry. Needs a code like an approval does: it decides what the human sees. */
+  /** Drops a held entry: tightening (the version stays unapproved), so no code and no block after wrong codes, like revoke. Held entries only; the journal gets a record. */
   dismiss(raw: Record<string, unknown>): { ok: true } {
     const id = intOf(raw.requestId, "requestId", 1, Number.MAX_SAFE_INTEGER);
     const q = this.heldRequest(id);
-    this.verifyCode(`dismiss:${q.pluginId}`, raw.code);
     return this.tx(() => {
+      const stop = (this.db.prepare(`SELECT stop FROM queue WHERE id = ?`).get(q.id) as { stop: number } | undefined)?.stop === 1;
       this.resolveQueue(q.pluginId, q.contentHash, "dismissed");
-      this.log("dismissed", q.pluginId, q.contentHash, { review: q.id, version: q.version });
+      this.log("dismissed", q.pluginId, q.contentHash, { review: q.id, version: q.version, ...(stop ? { stop: true } : {}) });
+      // A stop means the plugin's hook saw something the window must not wave through (a new capability, a tainted tree).
+      // Rejecting it does not lift the stop (see isStopped), and the plugin's window is closed too: tightening, journaled.
+      if (stop) for (const w of this.unclosedWindows()) if (w.pluginId === q.pluginId) this.closeWindowInner(w, "dismissed-stop");
       return { ok: true } as const;
     });
   }
