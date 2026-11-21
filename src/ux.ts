@@ -163,11 +163,15 @@ export function reasonKind(reason: string | null): ReasonKind {
   return "other";
 }
 
+/** «Всё равно разрешить…» exists on a red card only if the mode allows it AND the stop is not a mismatch (an approval would be written for the hash of a suspect request). */
+export const bypassAllowed = (mode: TrustMode | null, reason: string | null): boolean => detailLevel(mode).bypass && !isMismatch(reason);
+export const MISMATCH_HINT = "Переустановите плагин из его источника. Если код снова не совпадёт, сообщите об этом в разделе журнала.";
+
 /** A version whose code is not what the guard checked: red, with its own words. */
 export function mismatchText(pluginId: string, version: string): RedText {
   return {
     title: "Остановлено: код плагина не совпал с тем, что проверил сторож",
-    line: `Плагин «${pluginId}» ${version}: код не совпал с тем, что проверил сторож. Так бывает при подмене файлов. Не разрешайте, если не знаете причину. Плагин не запущен.`,
+    line: `Плагин «${pluginId}» ${version}: код не совпал с тем, что проверил сторож. Так бывает при подмене файлов. Не разрешайте, если не знаете причину. Плагин не запущен. ${MISMATCH_HINT}`,
     rule: null,
   };
 }

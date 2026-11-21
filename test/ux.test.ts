@@ -5,7 +5,7 @@ import {
   cleanWhy, deferKey, detailLevel, groupAway, isBlockedEntry, isPasswordManager, pageStatus, parseDeferred, plural, redText, sourceLabel, suggestSources, touchWithHint,
   wizardNeeded, yellowText, GUARD_DOWN_TEXT, SAVED_NARROWING,
 } from "../src/ux.ts";
-import { isMismatch, mismatchText, quarantineCount, reasonKind } from "../src/ux.ts";
+import { MISMATCH_HINT, bypassAllowed, isMismatch, mismatchText, quarantineCount, reasonKind } from "../src/ux.ts";
 import type { AwayEvent, StatusInput } from "../src/ux.ts";
 
 const none: StatusInput = { guardDown: false, red: [], yellow: [], alarms: [] };
@@ -354,5 +354,20 @@ describe("review fixes (PR 2, review)", () => {
     expect(pageStatus({ ...none, yellow: [ref("y")] }).level).toBe("attention");
     expect(pageStatus({ ...none, alarms: [ref("a")] }).level).toBe("attention");
     expect(pageStatus({ guardDown: true, red: [ref("r")], yellow: [], alarms: [] }).level).toBe("down");
+  });
+});
+
+describe("no bypass on a hash mismatch", () => {
+  const MIS = "хеш каталога, посчитанный сторожем, не совпал с хешем из запроса";
+  it("in no mode; other red cards keep it except in Strict", () => {
+    for (const m of ["simple", "detailed", "strict", null] as const) expect(bypassAllowed(m, MIS), String(m)).toBe(false);
+    expect(bypassAllowed("simple", "заблокировано проверками: decode-eval")).toBe(true);
+    expect(bypassAllowed("detailed", null)).toBe(true);
+    expect(bypassAllowed("strict", "заблокировано проверками: decode-eval")).toBe(false);
+  });
+  it("the card says what to do instead", () => {
+    expect(MISMATCH_HINT).toBe("Переустановите плагин из его источника. Если код снова не совпадёт, сообщите об этом в разделе журнала.");
+    expect(mismatchText("p", "1").line).toContain(MISMATCH_HINT);
+    expect(MISMATCH_HINT).not.toMatch(TECHNICAL_WORDS);
   });
 });

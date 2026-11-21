@@ -27,7 +27,7 @@ import type { TrustMode } from "./src/guardlink";
 import {
   AWAY_KEY, DEFERRED_KEY, MODE_DESCRIPTIONS, MODE_NAMES, SAVED_NARROWING, TOUCH_SLOW_MS, WIZARD_KEY,
   aaguidName, awaySince, capabilityPhrases, cardColor, deferKey, detailLevel, groupAway, isBlockedEntry, isPasswordManager, pageStatus,
-  mismatchText, parseDeferred, quarantineCount, redText, touchWithHint, wizardNeeded, yellowText, GUARD_DOWN_TEXT,
+  MISMATCH_HINT, bypassAllowed, mismatchText, parseDeferred, quarantineCount, redText, touchWithHint, wizardNeeded, yellowText, GUARD_DOWN_TEXT,
 } from "./src/ux";
 import { isMismatch } from "./src/ux";
 import type { AwayEvent, HeldNow, ProblemRef, TabId } from "./src/ux";
@@ -1020,7 +1020,7 @@ function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; rpc: Re
                 <span className={muted}>Без кода: отклонение только ужесточает.</span>
                 <ScanButton ov={ov} target={{ queueId: q.id }} rpc={rpc} refetch={refetch} />
               </div>
-              <details className="rounded-md border border-red-300 p-2 dark:border-red-900">
+              {isMismatch(q.reason) ? <p className={muted}>{MISMATCH_HINT}</p> : <details className="rounded-md border border-red-300 p-2 dark:border-red-900">
                 <summary className="cursor-pointer text-red-700 dark:text-red-400">Всё равно одобрить (опасно)…</summary>
                 <div className="mt-2 flex flex-wrap items-center gap-2">
                   {pk.keyOnly ? null : <RoutineCode value={code} onChange={setCode} dangerous />}
@@ -1038,7 +1038,7 @@ function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; rpc: Re
                     </button>
                   )}
                 </div>
-              </details>
+              </details>}
             </>
           ) : (
             <div className="flex flex-wrap items-center gap-2">
@@ -2277,7 +2277,7 @@ function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onTrustPending }: 
           <ChecksView result={found} />
           <ScanResultView scan={ov.ai.queueScans[q.id]} />
           <ScanButton ov={ov} target={{ queueId: q.id }} rpc={rpc} refetch={refetch} />
-          {red && detail.bypass ? (
+          {red && bypassAllowed(ov.guard?.trust?.mode ?? null, q.reason) ? (
             <details className="mt-2 rounded-md border border-red-300 p-2 dark:border-red-900">
               <summary className="cursor-pointer text-red-700 dark:text-red-400">Всё равно разрешить…</summary>
               <p className="mt-2">Так ведут себя вредоносные плагины. Разрешайте, только если вы сами написали этот плагин и знаете, почему проверки сработали. Для этого нужны касание и имя плагина.</p>
@@ -2290,7 +2290,8 @@ function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onTrustPending }: 
               </div>
             </details>
           ) : null}
-          {red && !detail.bypass ? <p className={`mt-2 ${muted}`}>В режиме «Строгий» обойти остановку нельзя. Чтобы разрешить, сначала ослабьте режим (касанием) на вкладке «Исключения и доверие».</p> : null}
+          {red && isMismatch(q.reason) ? <p className={`mt-2 ${muted}`}>{MISMATCH_HINT}</p> : null}
+          {red && !isMismatch(q.reason) && !detail.bypass ? <p className={`mt-2 ${muted}`}>В режиме «Строгий» обойти остановку нельзя. Чтобы разрешить, сначала ослабьте режим (касанием) на вкладке «Исключения и доверие».</p> : null}
         </div>
       </details>
       <ProofNotes proof={proof} />
