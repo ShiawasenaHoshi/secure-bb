@@ -140,12 +140,12 @@ export interface AgentDrift {
   rejected?: boolean;
   rejectedAt?: number | null;
   /** What «Вернуть как было» would do for an open difference, or why it cannot (the guard decides; the page shows the manual way then). */
-  restorable?: { ok: true; action: "write" | "delete" } | { ok: false; reason: string };
+  restorable?: { ok: true; action: "write" | "delete" | "json" } | { ok: false; reason: string };
 }
 /** The guard's answer to `agents-restore`. */
 export interface AgentsRestoreResult {
   restored: true;
-  action: "write" | "delete";
+  action: "write" | "delete" | "json";
   result: string;
   /** The file was looked at again at once and the difference is closed: the alarm is gone. */
   resolved: boolean;

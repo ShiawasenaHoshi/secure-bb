@@ -3,9 +3,13 @@
 import net from "node:net";
 
 export interface RestoreSend {
+  /** `restore` (default) or `restore-json-key` (one section of .claude.json: `key` and `value` | `delete`). */
+  op?: "restore" | "restore-json-key";
   path: string;
   sha256: string;
   content?: string;
+  key?: string[];
+  value?: Record<string, unknown>;
   delete?: true;
 }
 export type RestoreAnswer = { ok: true; result: "written" | "deleted" | "absent" } | { ok: false; code: string; message: string };

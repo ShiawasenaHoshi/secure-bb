@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import net from "node:net";
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { answer, listen as listenHelper, parseRequest, relUnderHome, restore, RestoreError, watchedRel } from "../../guard/src/restore.ts";
+import { answer, listen as listenHelper, parseJsonRequest, parseRequest, relUnderHome, restore, restoreJsonKey, RestoreError, watchedRel } from "../../guard/src/restore.ts";
 import { request } from "../../guard/src/cli.ts";
 import { SoftAuthenticator, enrollKey, startGuard, touchFor, type TestGuard } from "./support.ts";
 
@@ -172,10 +172,81 @@ describe("the helper: only the paths the watch looks at, never through a link", 
   });
 });
 
+describe("the helper: one section of .claude.json", () => {
+  const jreq = (home: string, key: unknown, value?: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
+    parseJsonRequest({ op: "restore-json-key", path: join(home, ".claude.json"), key, ...(value !== undefined ? { value, sha256: sha(JSON.stringify(value)) } : { delete: true, sha256: "0".repeat(64) }), ...extra });
+  const STATE = { numStartups: 7, oauthAccount: { email: "a@b" }, mcpServers: { good: { command: "good" }, exfil: { command: "curl", args: ["evil"] } }, projects: { "/p": { history: ["x"], mcpServers: { evil: { command: "e" } } }, "/q": { allowedTools: [] } } };
+  const write = (home: string, o: unknown, mode = 0o600): string => put(home, ".claude.json", `${JSON.stringify(o, null, 2)}\n`, mode);
+  const read = (home: string): any => JSON.parse(readFileSync(join(home, ".claude.json"), "utf8"));
+
+  it("replaces exactly the named section: the rest of the file is as it was, the mode is kept", () => {
+    const home = tmp("sbb-rj-");
+    const p = write(home, STATE, 0o640);
+    expect(restoreJsonKey(home, jreq(home, ["mcpServers"], { good: { command: "good" } }))).toBe("written");
+    expect(read(home)).toEqual({ ...STATE, mcpServers: { good: { command: "good" } } });
+    expect(statSync(p).mode & 0o777).toBe(0o640);
+    expect(readFileSync(p, "utf8").endsWith("\n")).toBe(true);
+    expect(leftovers(home)).toEqual([]);
+  });
+
+  it("a project's section: replaced, removed; a project that is not there is not made for a removal", () => {
+    const home = tmp("sbb-rj-");
+    write(home, STATE);
+    restoreJsonKey(home, jreq(home, ["projects", "/p", "mcpServers"], { fine: { command: "f" } }));
+    expect(read(home).projects["/p"]).toEqual({ history: ["x"], mcpServers: { fine: { command: "f" } } });
+    expect(restoreJsonKey(home, jreq(home, ["projects", "/p", "mcpServers"]))).toBe("deleted");
+    expect(read(home).projects["/p"]).toEqual({ history: ["x"] });
+    expect(restoreJsonKey(home, jreq(home, ["projects", "/nope", "mcpServers"]))).toBe("absent");
+    expect(read(home).projects["/nope"]).toBeUndefined();
+    expect(restoreJsonKey(home, jreq(home, ["mcpServers"]))).toBe("deleted");
+    expect(read(home).mcpServers).toBeUndefined();
+    expect(read(home).numStartups).toBe(7);
+  });
+
+  it("a key outside the watch's list is refused: nothing is written", () => {
+    const home = tmp("sbb-rj-");
+    const p = write(home, STATE);
+    const before = readFileSync(p, "utf8");
+    for (const key of [["oauthAccount"], ["numStartups"], ["projects"], ["projects", "/p", "history"], ["mcpServers", "good"], ["projects", "__proto__", "mcpServers"], ["projects", "", "mcpServers"], [], "mcpServers"]) {
+      expect(() => jreq(home, key as never, { a: {} }), JSON.stringify(key)).toThrow(RestoreError);
+    }
+    // and through the socket's entry point
+    const bad = JSON.parse(answer(home, JSON.stringify({ op: "restore-json-key", path: p, key: ["oauthAccount"], value: { x: 1 }, sha256: sha('{"x":1}') })));
+    expect(bad).toMatchObject({ ok: false, error: { code: "not_watched" } });
+    expect(readFileSync(p, "utf8")).toBe(before);
+  });
+
+  it("a file that is a link, is not JSON, or is not an object: refused; a file that is not .claude.json: refused", () => {
+    const home = tmp("sbb-rj-");
+    const elsewhere = join(tmp("sbb-rj-el-"), "state.json");
+    writeFileSync(elsewhere, JSON.stringify(STATE));
+    symlinkSync(elsewhere, join(home, ".claude.json"));
+    expect(() => restoreJsonKey(home, jreq(home, ["mcpServers"], { a: {} }))).toThrow(/link/);
+    expect(JSON.parse(readFileSync(elsewhere, "utf8"))).toEqual(STATE);
+    rmSync(join(home, ".claude.json"));
+    put(home, ".claude.json", "{ not json");
+    expect(() => restoreJsonKey(home, jreq(home, ["mcpServers"], { a: {} }))).toThrow(/not JSON/);
+    expect(readFileSync(join(home, ".claude.json"), "utf8")).toBe("{ not json");
+    put(home, ".claude.json", "[1,2]");
+    expect(() => restoreJsonKey(home, jreq(home, ["mcpServers"], { a: {} }))).toThrow(/not a JSON object/);
+    expect(() => restoreJsonKey(home, parseJsonRequest({ op: "restore-json-key", path: join(home, ".claude", "settings.json"), key: ["mcpServers"], delete: true, sha256: "0".repeat(64) }))).toThrow(/\.claude\.json only/);
+    expect(() => restoreJsonKey(home, parseJsonRequest({ op: "restore-json-key", path: "/etc/passwd", key: ["mcpServers"], delete: true, sha256: "0".repeat(64) }))).toThrow(/not inside/);
+  });
+
+  it("the hash must be of the value; the value is an object; nothing of the file comes back", () => {
+    const home = tmp("sbb-rj-");
+    write(home, STATE);
+    expect(() => parseJsonRequest({ op: "restore-json-key", path: join(home, ".claude.json"), key: ["mcpServers"], value: { a: {} }, sha256: sha("other") })).toThrow(/not the hash/);
+    expect(() => parseJsonRequest({ op: "restore-json-key", path: join(home, ".claude.json"), key: ["mcpServers"], value: [1], sha256: sha("[1]") })).toThrow(/object/);
+    const ok = JSON.parse(answer(home, JSON.stringify({ id: 3, op: "restore-json-key", path: join(home, ".claude.json"), key: ["mcpServers"], value: { g: {} }, sha256: sha('{"g":{}}') })));
+    expect(ok).toEqual({ id: 3, ok: true, result: "written" });
+  });
+});
+
 describe("the helper: what a request is", () => {
   it("one operation; exactly one of content and delete; the hash is of the content; a size limit", () => {
     const p = "/h/.claude/CLAUDE.md";
-    expect(() => parseRequest({ op: "ping" })).toThrow(/only operation/);
+    expect(() => parseRequest({ op: "ping" })).toThrow(/operations are/);
     expect(() => parseRequest({ op: "restore", path: p, sha256: sha("x"), content: "x", delete: true })).toThrow(/exactly one/);
     expect(() => parseRequest({ op: "restore", path: p, sha256: sha("x") })).toThrow(/exactly one/);
     expect(() => parseRequest({ op: "restore", path: p, sha256: sha("y"), content: "x" })).toThrow(/not the hash/);
@@ -411,22 +482,88 @@ describe("the guard puts back its own baseline", () => {
     expect(g!.guard.agentsAccept({ ids: [d.id], code })).toMatchObject({ accepted: 1 });
   });
 
-  it("the shared state file (.claude.json) and files outside the home are not put back by the helper: the manual way is the answer", async () => {
+  it("files outside the agents' home are not put back by the helper, and neither is a .claude.json that is created or removed whole: the manual way is the answer", async () => {
     const extra = tmp("sbb-rg-extra-");
     const h = await setup({ extraRoots: [extra] });
-    put(h.home, ".claude.json", JSON.stringify({ mcpServers: {} }));
     put(extra, "CLAUDE.md", "mine\n");
     scan();
     acceptAll();
-    writeFileSync(join(h.home, ".claude.json"), JSON.stringify({ mcpServers: { exfil: { command: "curl", args: ["evil"] } } }));
     writeFileSync(join(extra, "CLAUDE.md"), "evil\n");
+    put(h.home, ".claude.json", JSON.stringify({ mcpServers: { exfil: { command: "curl" } } }));
     scan();
-    for (const p of [join(h.home, ".claude.json"), join(extra, "CLAUDE.md")]) {
+    for (const p of [join(extra, "CLAUDE.md"), join(h.home, ".claude.json")]) {
       const d = drift(p);
       expect(d.restorable.ok, p).toBe(false);
       await expect(g!.guard.agentsRestore({ id: d.id, code: g!.nextCode() }), p).rejects.toThrow(/вручную/);
     }
     expect(readFileSync(join(extra, "CLAUDE.md"), "utf8")).toBe("evil\n");
+  });
+
+  describe(".claude.json: the MCP sections go back, the rest of the file stays", () => {
+    const CJ = ".claude.json";
+    const BASE = { numStartups: 1, mcpServers: { good: { command: "good" } }, projects: { "/p": { history: ["a"], mcpServers: { pmcp: { command: "p" } } }, "/q": { history: [] } } };
+    const rewrite = (home: string, o: unknown): void => void writeFileSync(join(home, CJ), `${JSON.stringify(o, null, 2)}\n`, { mode: 0o600 });
+    async function withState() {
+      const h = await setup();
+      rewrite(h.home, BASE);
+      scan();
+      acceptAll();
+      return h;
+    }
+
+    it("a swapped mcpServers is put back from the baseline; other keys (Claude Code's own changes included) are not touched; the view matches the baseline again", async () => {
+      const h = await withState();
+      // the agent adds an MCP server at the top and in a project; Claude Code itself bumps a counter and a history in the meantime
+      rewrite(h.home, { numStartups: 2, mcpServers: { good: { command: "good" }, exfil: { command: "curl", args: ["evil"] } }, projects: { "/p": { history: ["a", "b"], mcpServers: { pmcp: { command: "p" }, bad: { command: "b" } } }, "/q": { history: [], mcpServers: { x: { command: "x" } } } } });
+      scan();
+      const p = join(h.home, CJ);
+      const d = drift(p);
+      expect(d).toMatchObject({ class: "critical", restorable: { ok: true, action: "json" } });
+      const r = await g!.guard.agentsRestore({ id: d.id, code: g!.nextCode() });
+      expect(r).toMatchObject({ restored: true, action: "json", resolved: true });
+      const now = JSON.parse(readFileSync(p, "utf8"));
+      expect(now.mcpServers).toEqual(BASE.mcpServers);
+      expect(now.projects["/p"]).toEqual({ history: ["a", "b"], mcpServers: { pmcp: { command: "p" } } });
+      expect(now.projects["/q"]).toEqual({ history: [] });
+      expect(now.numStartups).toBe(2);
+      expect(open()).toEqual([]);
+      const j = (await journal()).find((e) => e.kind === "agents.restore");
+      expect(j?.detail).toMatchObject({ action: "json", resolved: true, sections: expect.any(Array) });
+    });
+
+    it("a removed section is written back; the content comes from the baseline, not from the request", async () => {
+      const h = await withState();
+      rewrite(h.home, { numStartups: 1, projects: { "/p": { history: ["a"] }, "/q": { history: [] } } });
+      scan();
+      const d = drift(join(h.home, CJ));
+      await g!.guard.agentsRestore({ id: d.id, code: g!.nextCode(), key: ["oauthAccount"], value: { evil: 1 }, content: "{}" } as never);
+      const now = JSON.parse(readFileSync(join(h.home, CJ), "utf8"));
+      expect(now.mcpServers).toEqual(BASE.mcpServers);
+      expect(now.projects["/p"].mcpServers).toEqual({ pmcp: { command: "p" } });
+      expect(now.oauthAccount).toBeUndefined();
+    });
+
+    it("a .claude.json that became a link: refused, what it points at is not touched", async () => {
+      const h = await withState();
+      const target = join(h.home, "elsewhere.json"); // inside the home: a link out of it is an alarm of the watch, not a difference
+      const evil = JSON.stringify({ mcpServers: { exfil: { command: "curl" } } });
+      writeFileSync(target, evil);
+      rmSync(join(h.home, CJ));
+      symlinkSync(target, join(h.home, CJ));
+      scan();
+      const d = drift(join(h.home, CJ));
+      expect(d.restorable.ok).toBe(false);
+      await expect(g!.guard.agentsRestore({ id: d.id, code: g!.nextCode() })).rejects.toThrow(/вручную/);
+      expect(readFileSync(target, "utf8")).toBe(evil);
+    });
+
+    it("a file that is no longer JSON: refused with a reason", async () => {
+      const h = await withState();
+      writeFileSync(join(h.home, CJ), "{ broken");
+      scan();
+      const d = drift(join(h.home, CJ));
+      expect(d.restorable).toMatchObject({ ok: false, reason: expect.stringMatching(/JSON/) });
+    });
   });
 
   it("a helper that is not running: nothing is written, the code is not spent, the reason is plain", async () => {

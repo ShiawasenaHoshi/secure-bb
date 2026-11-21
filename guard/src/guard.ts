@@ -58,7 +58,8 @@ import {
   type TrustMode,
 } from "./trust.ts";
 import { scan as scanAgents, type FileKind, type Limits, type ScanResult } from "./agents-scan.ts";
-import { watchedRel } from "./restore.ts";
+import { JSON_FILE, watchedRel, type JsonKey } from "./restore.ts";
+import { stable } from "./agents-scan.ts";
 import { helperUp, sendRestore } from "./restore-client.ts";
 
 export type GuardErrorCode = "invalid" | "not_found" | "conflict" | "not_registered" | "invalid_code" | "invalid_passkey" | "expired" | "blocked" | "unknown_op" | "no_restore" | "unavailable" | "restore_failed";
@@ -307,6 +308,14 @@ export type Evaluation = { ok: true; hash: string; rights: Rights; blocks: strin
 const MAX_CONCURRENT_EVALS = 2;
 const MAX_EVALS_PER_MINUTE = 30;
 const DEFAULT_BUDGET_MS = 3500;
+
+interface JsonOp {
+  key: JsonKey;
+  /** The baseline's value of the section; null: the section is not in the baseline, it is removed. */
+  value: Record<string, unknown> | null;
+  sha: string;
+}
+type RestorePlan = { ok: true; action: "write" | "delete" | "json"; content: string | null; sha: string; ops?: JsonOp[] } | { ok: false; reason: string };
 
 export interface AgentsConfig {
   home: string;
@@ -1687,7 +1696,7 @@ export class Guard {
         const [r] = this.openDrifts([Number(a.id)]);
         const plan = this.restorePlan(r!);
         if (!plan.ok) throw new GuardError("no_restore", plan.reason);
-        return `Вернуть настройки агента как было: ${String(r!.path)} — ${plan.action === "delete" ? "файл будет удалён (в одобренных настройках его нет)" : `файл будет записан ровно в том виде, в каком вы его одобряли (хеш ${plan.sha.slice(0, 16)}…)`}. Содержимое берёт сам сторож из своих одобренных настроек; сразу после отката он просмотрит файл заново`;
+        return `Вернуть настройки агента как было: ${String(r!.path)} — ${plan.action === "delete" ? "файл будет удалён (в одобренных настройках его нет)" : plan.action === "json" ? `в общем файле состояния будут возвращены только разделы MCP-серверов (${plan.ops!.length}) в том виде, в каком вы их одобряли; остальное в файле не трогается` : `файл будет записан ровно в том виде, в каком вы его одобряли (хеш ${plan.sha.slice(0, 16)}…)`}. Содержимое берёт сам сторож из своих одобренных настроек; сразу после отката он просмотрит файл заново`;
       }
       case "touch":
         if (a.purpose === SETUP_CHECK_PURPOSE) return "Проверка касания при настройке: ничего не одобряется и не меняется, в журнал сторожа ляжет запись «касание сработало»";
@@ -1991,12 +2000,51 @@ export class Guard {
   // roll the owner's lawful changes back again and again.
 
   /** What putting this difference back means, from the baseline; or why it cannot be done. */
-  private restorePlan(d: Raw): { ok: true; action: "write" | "delete"; content: string | null; sha: string } | { ok: false; reason: string } {
+  /**
+   * `.claude.json` is Claude Code's own state file, rewritten all the time: only the sections the watch looks at (the MCP servers, top-level and per
+   * project) are put back, each by its own key; the rest of the file is not touched. The values come from the baseline's view of the file.
+   */
+  private jsonPlan(d: Raw, path: string): RestorePlan {
+    if (String(d.change) !== "changed") return { ok: false, reason: "общий файл состояния агента (.claude.json) целиком не создаётся и не удаляется: вернуть можно только вручную" };
+    const b = this.db.prepare(`SELECT * FROM agent_baseline WHERE path = ?`).get(path) as Raw | undefined;
+    const base = (b?.content as string | null | undefined) ?? null;
+    if (!b || base === null || sha256hex(base) !== String(b.sha256)) return { ok: false, reason: "эталон разделов MCP этого файла не сохранён: вернуть можно только вручную" };
+    const view = (t: string | null): { mcp: unknown; projects: Record<string, unknown> } | null => {
+      try {
+        const o = t === null ? null : (JSON.parse(t) as { mcpServers?: unknown; projects?: Record<string, { mcpServers?: unknown }> });
+        if (typeof o !== "object" || o === null) return null;
+        const projects: Record<string, unknown> = {};
+        for (const [dir, p] of Object.entries(o.projects ?? {})) projects[dir] = p?.mcpServers;
+        return { mcp: o.mcpServers ?? {}, projects };
+      } catch {
+        return null;
+      }
+    };
+    const was = view(base);
+    const now = view((d.new_content as string | null) ?? null);
+    if (was === null || now === null) return { ok: false, reason: "файл не разобран как JSON: вернуть можно только вручную" };
+    const isEmpty = (v: unknown): boolean => v === undefined || (typeof v === "object" && v !== null && Object.keys(v).length === 0);
+    const ops: JsonOp[] = [];
+    const add = (key: JsonKey, want: unknown, have: unknown): void => {
+      if (stable(want ?? {}) === stable(have ?? {})) return;
+      if (isEmpty(want)) ops.push({ key, value: null, sha: "0".repeat(64) });
+      else ops.push({ key, value: want as Record<string, unknown>, sha: sha256hex(JSON.stringify(want)) });
+    };
+    add(["mcpServers"], was.mcp, now.mcp);
+    for (const dir of new Set([...Object.keys(was.projects), ...Object.keys(now.projects)])) add(["projects", dir, "mcpServers"], was.projects[dir], now.projects[dir]);
+    if (ops.length === 0) return { ok: false, reason: "в разделах MCP расхождения не видно (изменилась другая часть файла): вернуть можно только вручную" };
+    if (ops.length > 50) return { ok: false, reason: "слишком много разделов для отката (больше 50): вернуть можно только вручную" };
+    return { ok: true, action: "json", content: null, sha: String(b.sha256), ops };
+  }
+
+  private restorePlan(d: Raw): RestorePlan {
     if (this.agents === null || this.agents.restore === undefined) return { ok: false, reason: "помощник отката не настроен у сторожа: вернуть файл можно только вручную" };
     const home = this.agents.home.replace(/(.)\/+$/, "$1");
     const path = String(d.path);
     if (!path.startsWith(home + sep)) return { ok: false, reason: "файл лежит вне домашнего каталога агентов: помощник сюда не пишет, вернуть можно только вручную" };
-    if (!watchedRel(path.slice(home.length + 1).split(sep).join("/"))) return { ok: false, reason: "этот файл помощник не возвращает (это не отдельный файл настроек: например, общий файл состояния агента): вернуть можно только вручную" };
+    const rel = path.slice(home.length + 1).split(sep).join("/");
+    if (rel === JSON_FILE) return this.jsonPlan(d, path);
+    if (!watchedRel(rel)) return { ok: false, reason: "этот файл помощник не возвращает: вернуть можно только вручную" };
     if (String(d.change) === "added") return { ok: true, action: "delete", content: null, sha: String(d.new_sha ?? "0".repeat(64)) };
     const b = this.db.prepare(`SELECT * FROM agent_baseline WHERE path = ?`).get(path) as Raw | undefined;
     if (!b) return { ok: false, reason: "в одобренных настройках нет эталона этого файла: возвращать нечего" };
@@ -2010,7 +2058,7 @@ export class Guard {
    * «Вернуть как было»: a fresh touch, then the helper puts the baseline's file back (or removes a file the baseline does not have), then the file
    * is looked at again at once, so that the alarm goes by itself. Everything is in the journal: what was, what became, who touched.
    */
-  async agentsRestore(raw: Record<string, unknown>): Promise<{ restored: true; action: "write" | "delete"; result: string; resolved: boolean; path: string; rel: string }> {
+  async agentsRestore(raw: Record<string, unknown>): Promise<{ restored: true; action: "write" | "delete" | "json"; result: string; resolved: boolean; path: string; rel: string }> {
     if (this.agents === null) throw new GuardError("invalid", "the agent watch is not configured at this guard");
     const socket = this.agents.restore?.socket;
     const id = intOf(raw.id, "id", 1, Number.MAX_SAFE_INTEGER);
@@ -2025,8 +2073,18 @@ export class Guard {
     const plan = this.restorePlan(d!);
     if (!plan.ok) throw new GuardError("no_restore", plan.reason);
     const path = String(d!.path);
-    const ans = await sendRestore(socket!, plan.action === "delete" ? { path, sha256: plan.sha, delete: true } : { path, sha256: plan.sha, content: plan.content! }, this.agents.restore?.timeoutMs);
-    const detail = { drift: id, path, rel: String(d!.rel), kind: String(d!.kind), change: String(d!.change), class: String(d!.class), action: plan.action, was: d!.new_sha === null || d!.new_sha === undefined ? null : String(d!.new_sha).slice(0, 16), becomes: plan.action === "delete" ? null : plan.sha.slice(0, 16) };
+    const timeoutMs = this.agents.restore?.timeoutMs;
+    const detail: Record<string, unknown> = { drift: id, path, rel: String(d!.rel), kind: String(d!.kind), change: String(d!.change), class: String(d!.class), action: plan.action, was: d!.new_sha === null || d!.new_sha === undefined ? null : String(d!.new_sha).slice(0, 16), becomes: plan.action === "delete" ? null : plan.sha.slice(0, 16) };
+    let ans: Awaited<ReturnType<typeof sendRestore>>;
+    if (plan.action === "json") {
+      // One section at a time, each by its own key and each from the baseline's view; the first refusal stops the rest.
+      detail.sections = plan.ops!.map((o) => o.key.slice(1, -1).join("") || "mcpServers");
+      ans = { ok: true, result: "written" };
+      for (const o of plan.ops!) {
+        ans = await sendRestore(socket!, o.value === null ? { op: "restore-json-key", path, key: o.key, sha256: o.sha, delete: true } : { op: "restore-json-key", path, key: o.key, sha256: o.sha, value: o.value }, timeoutMs);
+        if (!ans.ok) break;
+      }
+    } else ans = await sendRestore(socket!, plan.action === "delete" ? { path, sha256: plan.sha, delete: true } : { path, sha256: plan.sha, content: plan.content! }, timeoutMs);
     if (!ans.ok) {
       this.tx(() => this.log("agents.restore.fail", null, null, { ...detail, error: ans.code, message: ans.message.slice(0, 200), ...factorDetail(factor) }));
       throw new GuardError(ans.code === "unavailable" ? "unavailable" : "restore_failed", ans.code === "unavailable" ? "помощник отката не ответил: файл не изменён" : `помощник отказал: ${ans.message}`);

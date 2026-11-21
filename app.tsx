@@ -1913,7 +1913,7 @@ function CriticalAccept({ d, ov, rpc, refetch, canCode, pk }: { d: AgentDrift; o
       {d.rejected ? <p className="mt-1 text-xs">Вы отклонили это изменение{d.rejectedAt ? ` (${clockText(d.rejectedAt, Date.now())}, кнопкой «Это не я»)` : ""}: в одобренные настройки оно не попало. Но в самом файле оно всё ещё есть, поэтому тревога и пометка «под подозрением» остаются.</p> : null}
       {restorable ? (
         <div className="mt-2" data-agent-restore={d.id}>
-          <p>Агент работает с этим изменением прямо сейчас. {restorable.action === "delete" ? "Этого файла в одобренных настройках не было — он будет удалён." : "Файл будет записан в том виде, в каком вы его одобряли."} После этого защита сама перечитает файл и снимет тревогу.</p>
+          <p>Агент работает с этим изменением прямо сейчас. {restorable.action === "delete" ? "Этого файла в одобренных настройках не было — он будет удалён." : restorable.action === "json" ? "В общем файле настроек агента будут возвращены только списки MCP-серверов, как вы их одобряли; всё остальное в файле останется как есть." : "Файл будет записан в том виде, в каком вы его одобряли."} После этого защита сама перечитает файл и снимет тревогу.</p>
           <div className="mt-2 flex flex-wrap items-center gap-2">
             {pk.has ? <button className={btnPrimary} disabled={act.busy || pk.problem !== null} onClick={() => restore("passkey")}>Вернуть как было — касанием</button> : null}
             {canCode ? (

@@ -6,14 +6,15 @@
 //
 //   {"op":"restore","path":ABS,"sha256":HEX,"content":TEXT}   write exactly TEXT (sha256 is the hash of TEXT)
 //   {"op":"restore","path":ABS,"sha256":HEX,"delete":true}    remove the file (sha256: the hash the guard saw, for the record)
+//   {"op":"restore-json-key","path":ABS/.claude.json,"key":[…],"sha256":HEX,"value":{…}|"delete":true}   replace or remove one section of .claude.json
 //
-// and only on a path that the guard's watch looks at (agents-scan.ts: the same lists), inside the agents' home. It reads nothing and returns
+// (plus `restore-json-key`, below, for one section of .claude.json) and only on a path that the guard's watch looks at (agents-scan.ts: the same lists), inside the agents' home. It reads nothing and returns
 // nothing but `ok` or an error: no content, no listing, no hash of what was there. Zero dependencies (node:*); the code is root-owned, in the same archive.
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, closeSync, constants, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, realpathSync, renameSync, statSync, unlinkSync, writeSync, chownSync } from "node:fs";
+import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, renameSync, statSync, unlinkSync, writeSync, chownSync } from "node:fs";
 import net from "node:net";
 import { basename, dirname, isAbsolute, join, normalize, sep } from "node:path";
-import { KEEP_BYTES, MAX_DEPTH, globalKind, workspaceKind } from "./agents-scan.ts";
+import { KEEP_BYTES, MAX_DEPTH, MAX_READ_BYTES, globalKind, workspaceKind } from "./agents-scan.ts";
 
 export const VERSION = "0.1.0";
 export const DEFAULT_SOCKET = "/var/sbb-restore-run/restore.sock";
@@ -75,7 +76,7 @@ export type RestoreResult = "written" | "deleted" | "absent";
 export function parseRequest(raw: unknown): RestoreRequest {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new RestoreError("invalid", "a request is a JSON object");
   const r = raw as Record<string, unknown>;
-  if (r.op !== "restore") throw new RestoreError("invalid", "the only operation is restore");
+  if (r.op !== "restore") throw new RestoreError("invalid", "the operations are restore and restore-json-key");
   if (typeof r.path !== "string") throw new RestoreError("invalid", "path is a string");
   if (typeof r.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(r.sha256)) throw new RestoreError("invalid", "sha256 is 64 hex digits");
   const hasContent = r.content !== undefined;
@@ -182,12 +183,19 @@ export function restore(home: string, req: RestoreRequest): RestoreResult {
     if (e instanceof RestoreError) throw e;
     if (errCode(e) !== "ENOENT") throw new RestoreError("io", `${errCode(e)} looking at the file`);
   }
-  const tmp = join(dir!, `.${basename(name)}.sbb-restore-${randomBytes(6).toString("hex")}.tmp`);
+  atomicReplace(dir!, target!, name, req.content!, mode);
+  return "written";
+}
+
+
+/** Temporary file (O_EXCL | O_NOFOLLOW) + fsync + chmod + rename. `beforeRename` runs last and may refuse (the file moved under us). */
+function atomicReplace(dir: string, target: string, name: string, text: string, mode: number, beforeRename?: () => void): void {
+  const tmp = join(dir, `.${basename(name)}.sbb-restore-${randomBytes(6).toString("hex")}.tmp`);
   let fd: number | null = null;
   try {
     // O_EXCL | O_NOFOLLOW: a fresh file of ours, never one that somebody laid there (a link included).
     fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, NEW_FILE_MODE);
-    const buf = Buffer.from(req.content!, "utf8");
+    const buf = Buffer.from(text, "utf8");
     let off = 0;
     while (off < buf.length) off += writeSync(fd, buf, off, buf.length - off);
     fsyncSync(fd);
@@ -195,8 +203,9 @@ export function restore(home: string, req: RestoreRequest): RestoreResult {
     fd = null;
     chmodSync(tmp, mode);
     // The path may have been swapped for a link while we wrote: looked at again right before the rename (a rename replaces a link, it does not follow it).
-    if (realpathSync(dir!) !== dir) throw new RestoreError("link", "the directory of the file changed under the helper: refused");
-    renameSync(tmp, target!);
+    if (realpathSync(dir) !== dir) throw new RestoreError("link", "the directory of the file changed under the helper: refused");
+    beforeRename?.();
+    renameSync(tmp, target);
   } catch (e) {
     if (fd !== null) {
       try {
@@ -213,7 +222,143 @@ export function restore(home: string, req: RestoreRequest): RestoreResult {
     if (e instanceof RestoreError) throw e;
     throw new RestoreError("io", `${errCode(e)} writing the file`);
   }
-  return "written";
+}
+
+// ---- restore-json-key: one section of ~/.claude.json ---------------------------------------------------------------------------
+// Claude Code keeps its MCP servers in the state file `.claude.json`, which it also rewrites all the time, so the file cannot be put back whole:
+// only the section the watch looks at is replaced (or removed), the rest of the file is left as it is. This is the one operation that READS a file
+// (that very one, to a size limit, never through a link); it returns nothing of what it read.
+export const JSON_FILE = ".claude.json";
+export type JsonKey = ["mcpServers"] | ["projects", string, "mcpServers"];
+export interface RestoreJsonRequest {
+  path: string;
+  key: JsonKey;
+  sha256: string;
+  /** The section's new value (an object). */
+  value?: Record<string, unknown>;
+  /** Remove the section. */
+  delete?: boolean;
+}
+
+const MAX_JSON_BYTES = MAX_READ_BYTES;
+const STALE = "changed meanwhile";
+const isPlain = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+const has = (o: Record<string, unknown>, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k);
+
+export function parseJsonRequest(r: Record<string, unknown>): RestoreJsonRequest {
+  if (typeof r.path !== "string") throw new RestoreError("invalid", "path is a string");
+  if (typeof r.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(r.sha256)) throw new RestoreError("invalid", "sha256 is 64 hex digits");
+  const k = r.key;
+  const okKey = Array.isArray(k) && ((k.length === 1 && k[0] === "mcpServers") || (k.length === 3 && k[0] === "projects" && typeof k[1] === "string" && k[1] !== "" && k[1].length <= 4096 && k[1] !== "__proto__" && k[2] === "mcpServers"));
+  if (!okKey) throw new RestoreError("not_watched", "this key is not one the watch looks at (mcpServers, projects.<dir>.mcpServers)");
+  const hasValue = r.value !== undefined;
+  const hasDelete = r.delete !== undefined;
+  if (hasValue === hasDelete) throw new RestoreError("invalid", "exactly one of value and delete");
+  const key = k as JsonKey;
+  if (hasDelete) {
+    if (r.delete !== true) throw new RestoreError("invalid", "delete is true");
+    return { path: r.path, key, sha256: r.sha256, delete: true };
+  }
+  if (!isPlain(r.value)) throw new RestoreError("invalid", "value is an object");
+  const text = JSON.stringify(r.value);
+  if (Buffer.byteLength(text, "utf8") > KEEP_BYTES) throw new RestoreError("invalid", `value is at most ${KEEP_BYTES} bytes`);
+  if (sha256hex(text) !== r.sha256) throw new RestoreError("invalid", "sha256 is not the hash of JSON.stringify(value)");
+  return { path: r.path, key, sha256: r.sha256, value: r.value };
+}
+
+/** Replaces or removes exactly one section of `.claude.json`; the rest of the file is as it was. Throws RestoreError. */
+export function restoreJsonKey(home: string, req: RestoreJsonRequest): RestoreResult {
+  let realHome: string;
+  try {
+    realHome = realpathSync(home);
+  } catch {
+    throw new RestoreError("io", "the agents' home is not there");
+  }
+  const rel = ((): string => {
+    try {
+      return relUnderHome(home, req.path);
+    } catch (e) {
+      if (realHome !== home) return relUnderHome(realHome, req.path);
+      throw e;
+    }
+  })();
+  if (rel !== JSON_FILE) throw new RestoreError("not_watched", "this operation is for .claude.json only");
+  const target = join(realHome, JSON_FILE);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    // One descriptor: no link is followed at the last step, and what is read is the very file that was looked at.
+    let fd: number;
+    try {
+      fd = openSync(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    } catch (e) {
+      if (errCode(e) === "ELOOP") throw new RestoreError("link", ".claude.json is a link: refused");
+      if (errCode(e) === "ENOENT") throw new RestoreError("io", ".claude.json is not there");
+      throw new RestoreError("io", `${errCode(e)} opening the file`);
+    }
+    let raw: string;
+    let before;
+    try {
+      before = fstatSync(fd);
+      if (!before.isFile()) throw new RestoreError("io", ".claude.json is not a regular file");
+      if (before.size > MAX_JSON_BYTES) throw new RestoreError("invalid", "the file is larger than the limit");
+      const buf = Buffer.alloc(before.size);
+      let off = 0;
+      while (off < buf.length) {
+        const n = readSync(fd, buf, off, buf.length - off, off);
+        if (n === 0) break;
+        off += n;
+      }
+      raw = buf.subarray(0, off).toString("utf8");
+    } finally {
+      closeSync(fd);
+    }
+    let doc: unknown;
+    try {
+      doc = JSON.parse(raw);
+    } catch {
+      throw new RestoreError("invalid", "the file is not JSON: refused");
+    }
+    if (!isPlain(doc)) throw new RestoreError("invalid", "the file is not a JSON object: refused");
+    let holder: Record<string, unknown>;
+    let name: string;
+    let result: RestoreResult;
+    if (req.key.length === 1) {
+      holder = doc;
+      name = "mcpServers";
+    } else {
+      const projects = has(doc, "projects") ? doc.projects : undefined;
+      if (projects !== undefined && !isPlain(projects)) throw new RestoreError("invalid", "projects is not an object: refused");
+      let proj = projects === undefined ? undefined : has(projects, req.key[1]) ? projects[req.key[1]] : undefined;
+      if (proj !== undefined && !isPlain(proj)) throw new RestoreError("invalid", "the project's entry is not an object: refused");
+      if (proj === undefined) {
+        if (req.delete === true) return "absent";
+        const all = projects ?? ((doc.projects = {}) as Record<string, unknown>);
+        proj = all[req.key[1]] = {};
+      }
+      holder = proj as Record<string, unknown>;
+      name = "mcpServers";
+    }
+    if (req.delete === true) {
+      if (!has(holder, name)) return "absent";
+      delete holder[name];
+      result = "deleted";
+    } else {
+      holder[name] = req.value;
+      result = "written";
+    }
+    const text = `${JSON.stringify(doc, null, 2)}${raw.endsWith("\n") ? "\n" : ""}`;
+    try {
+      atomicReplace(realHome, target, JSON_FILE, text, before.mode & 0o7777, () => {
+        // Claude Code rewrites this file itself: if it did so while we worked, our copy is stale, and is thrown away (then read again).
+        const now = lstatSync(target);
+        if (!now.isFile() || now.ino !== before.ino || now.dev !== before.dev || now.size !== before.size || now.mtimeMs !== before.mtimeMs) throw new RestoreError("io", STALE);
+      });
+    } catch (e) {
+      if (e instanceof RestoreError && e.message === STALE) continue;
+      throw e;
+    }
+    return result;
+  }
+  throw new RestoreError("io", ".claude.json keeps changing under the helper: nothing written, try again");
 }
 
 // ---- the socket ------------------------------------------------------------------------------------------------------------
@@ -233,9 +378,19 @@ export function answer(home: string, line: string, log: (l: string) => void = ()
   try {
     const raw = JSON.parse(line) as unknown;
     if (typeof raw === "object" && raw !== null && "id" in raw) id = (raw as { id: unknown }).id;
-    const req = parseRequest(raw);
-    const result = restore(home, req);
-    log(`restore ${result} ${req.path} ${req.sha256.slice(0, 16)}`);
+    let result: RestoreResult;
+    let req: { path: string; sha256: string };
+    if (typeof raw === "object" && raw !== null && (raw as { op?: unknown }).op === "restore-json-key") {
+      const jr = parseJsonRequest(raw as Record<string, unknown>);
+      result = restoreJsonKey(home, jr);
+      req = jr;
+      log(`restore-json-key ${result} ${jr.path} ${jr.key.slice(1, 2).join("")}.${jr.key[jr.key.length - 1]}`);
+    } else {
+      const r = parseRequest(raw);
+      result = restore(home, r);
+      req = r;
+      log(`restore ${result} ${r.path} ${r.sha256.slice(0, 16)}`);
+    }
     return JSON.stringify({ ...(id !== undefined ? { id } : {}), ok: true, result });
   } catch (err) {
     if (err instanceof RestoreError) {
