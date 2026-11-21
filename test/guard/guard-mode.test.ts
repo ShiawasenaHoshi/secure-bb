@@ -112,12 +112,11 @@ describe("guard mode: approvals are the guard's, the hook only holds", () => {
     expect(await h.rpc("totp.begin")).toHaveProperty("secret");
   });
 
-  it("registration, sessions and the safe-class auto-pass do not exist here", async () => {
+  it("registration and the safe-class auto-pass do not exist here (sessions do: the guard issues them)", async () => {
     g = await startGuardOnDate();
     const h = await bootPlugin(g.paths.socket);
     await expect(h.rpc("totp.begin")).rejects.toThrow(/консол|console/i);
     await expect(h.rpc("totp.confirm", { code: "123456" })).rejects.toThrow(/консол|console/i);
-    await expect(h.rpc("session.open", { code: fresh(g) })).rejects.toThrow();
     await expect(h.rpc("policy.set", { autoSafe: true, code: fresh(g) })).rejects.toThrow();
     // the same code was not wasted on the refusals above
     expect((await g.send({ op: "touch", purpose: "t", code: g.code() })).ok).toBe(true);

@@ -27,7 +27,7 @@ export interface RpcAuth {
 /** Every RPC of the contract, exactly once. A test fails if one is missing, extra, or in a different group than the spec says. */
 export const RPC_AUTH = {
   // ---- routine: one session covers them -----------------------------------------------------------------------
-  "queue.approve": { group: "routine", note: "одобрить удержанную версию; со снятием блока проверок — dangerous (нужен свежий код)" },
+  "queue.approve": { group: "routine", note: "одобрить удержанную версию; со снятием блока проверок — dangerous (нужен свежий код; в режиме «Строгий» и при несовпадении хеша сторож отклоняет в любом случае)" },
   "queue.dismiss": { group: "free", note: "отклонить удержанную версию: ужесточение, кода не требует и не зависит от блокировки после неверных кодов" },
   "window.open": { group: "routine", note: "открыть/продлить окно доверия; «на всё дерево», когда политика «только тред», — dangerous" },
   "window.close": { group: "free", note: "закрыть окно доверия: ужесточение, кода не требует и не зависит от блокировки после неверных кодов" },
@@ -41,7 +41,8 @@ export const RPC_AUTH = {
   "batch.approve": { group: "routine", note: "одобрить выбранный список (пакет): версии, скиллы, расхождения; блоки в пакет не входят" },
 
   // ---- dangerous: always a fresh code -------------------------------------------------------------------------
-  "session.open": { group: "dangerous", note: "открыть сессию подтверждения (сама сессия её открыть не может)" },
+  "session.open": { group: "dangerous", note: "открыть сессию подтверждения (сама сессия её открыть не может); в режиме сторожа её выдаёт сторож по касанию (код или passkey), у него остаётся только хеш токена" },
+  "queue.approveTrust": { group: "dangerous", note: "«Вернуть и доверять источнику» (режим сторожа): одна операция сторожа — одобрить версию и добавить источник в «мои источники»; одно касание, одна запись в журнале; сессия не годится" },
   "totp.confirm": { group: "dangerous", note: "регистрация второго фактора; повторная невозможна (секрет заперт)" },
   "trusted.set": { group: "dangerous", note: "изменить доверенные репозитории" },
   "skills.trusted": { group: "dangerous", note: "изменить доверенные источники скиллов" },

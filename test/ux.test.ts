@@ -111,7 +111,7 @@ describe("plain words: the main line has no technical words", () => {
   it("where a version came from, in words", () => {
     expect(sourceLabel("git", "git:https://github.com/acme/figma-sync.git@main#sub")).toBe("github.com/acme/figma-sync");
     expect(sourceLabel("git", "git:git@github.com:acme/x")).toBe("github.com/acme/x");
-    expect(sourceLabel("path", "path:/Users/me/plugins/p")).toBe("папки /Users/me/plugins/p");
+    expect(sourceLabel("path", "path:/Users/me/plugins/p")).toBe("из папки /Users/me/plugins/p");
     expect(sourceLabel("npm", "npm:left-pad")).toBe("npm: left-pad");
   });
 });
@@ -142,6 +142,23 @@ describe("«Пока вас не было»", () => {
     expect(groups).toHaveLength(1);
     expect(groups[0]!.text).toBe("4 версии figma-sync прошли сами, 1 остановлена");
     expect(groups[0]!.counts).toMatchObject({ auto: 4, stopped: 1 });
+  });
+  it("«1 остановлена» is said once: not again on a line of its own, whatever threads the records came from and whether the record has a plugin", () => {
+    const events = [
+      g("approved.source", "figma-sync", 1, {}, "T1"),
+      g("approved.source", "figma-sync", 2, {}, "T1"),
+      g("hold", "figma-sync", 3, { stop: true }, "T2"),
+      g("hold", "figma-sync", 4, { stop: true }, null),
+      g("hold", null, 5, { stop: true }, null),
+    ];
+    for (const held of [{ "figma-sync": { yellow: 0, red: 1 } }, undefined]) {
+      const lines = groupAway(events, T0, true, held).map((x) => x.text);
+      expect(lines.join("\n").match(/остановлен/g) ?? []).toHaveLength(1);
+      expect(lines.some((l) => /^\d+ остановлен/.test(l) && lines.length > 1 && lines.some((o) => o !== l && /остановлен/.test(o)))).toBe(false);
+    }
+    // the same plugin, one thread: still one line with both parts
+    const one = groupAway([g("approved.source", "p", 1, {}, "T1"), g("approved.source", "p", 2, {}, "T1"), g("hold", "p", 3, { stop: true }, "T1")], T0, true, { p: { yellow: 0, red: 1 } });
+    expect(one.map((x) => x.text)).toEqual(["2 версии p прошли сами, 1 остановлена"]);
   });
   it("counts agree in number: 1 версия прошла, 5 версий прошли", () => {
     expect(awayText({ pluginId: "p", counts: { auto: 1, window: 0, approved: 0, held: 0, stopped: 0, rejected: 0, alarm: 0 } })).toBe("1 версия p прошла сама");

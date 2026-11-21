@@ -11,7 +11,7 @@
 // that action (see "Passkeys" below); passkeys are registered only through the console (`sbb-guard passkey-enroll`).
 import { readFileSync, renameSync, unlinkSync, writeFileSync, openSync, closeSync, writeSync, constants, lstatSync, realpathSync } from "node:fs";
 import { basename, dirname, sep } from "node:path";
-import { timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { DEFAULT_ORIGIN, DEFAULT_RP_ID, type RelyingParty } from "./config.ts";
 import { append, HeadFile, readHead, verify, type JournalHead, type JournalReport } from "./journal.ts";
@@ -65,6 +65,33 @@ export class GuardError extends Error {
 
 export const HOUR_MS = 3_600_000;
 export const MAX_FAILURES = 5;
+/**
+ * Wrong signatures have their own counter and their own, looser limit. A signature cannot be guessed, so the owner's touch must not be
+ * lost because a process spammed wrong codes (and wrong signatures do not take the owner's codes). The limit only slows a flood down:
+ * more than this many wrong signatures within the window pause signatures for a few minutes, nothing longer.
+ */
+export const MAX_PASSKEY_FAILURES = 20;
+export const PASSKEY_FAIL_WINDOW_MS = 10 * 60_000;
+export const PASSKEY_BLOCK_MS = 2 * 60_000;
+/** Approval sessions (the same numbers as without a guard): 15 minutes sliding, 1 hour ceiling. */
+export const SESSION_IDLE_MS = 15 * 60_000;
+export const SESSION_CAP_MS = 60 * 60_000;
+/** A list for one touch lives this long; a few may wait at once. */
+export const BATCH_TTL_MS = 10 * 60_000;
+const MAX_PENDING_BATCHES = 20;
+const MAX_BATCH_ITEMS = 50;
+/** Troubleshooting mode: at most this long, and every decision is a journal record, so at most this many a minute (past it the guard holds again). */
+export const MAX_TROUBLESHOOT_MIN = 240;
+const MAX_TROUBLESHOOT_PASSES_PER_MIN = 1000;
+/**
+ * What a session covers besides `approve` (without acknowledgeBlock), `open-window` and `batch-approve`: the plugin's own routine touches.
+ * Everything else (policy, trust mode, sources, agents, the session itself) needs a fresh touch; the plugin's table (src/approval.ts) says the same.
+ */
+export const ROUTINE_TOUCH_PURPOSES: ReadonlySet<string> = new Set(["watch.accept", "watch.acceptAll", "watch.rollback", "watch.window.open", "skills.approve"]);
+/** The reasons the guard itself wrote into a queue entry (see `sourceVerdict`, `evaluate`). */
+const isMismatchNote = (n: string | null): boolean => /не совпал с хешем/.test(n ?? "");
+const isHardFlagNote = (n: string | null): boolean => /жёсткий флаг/.test(n ?? "");
+const sha256hex = (t: string): string => createHash("sha256").update(t, "utf8").digest("hex");
 /** The window the console opens for registering a passkey, and how long a challenge lives. */
 export const ENROLL_WINDOW_MS = 5 * 60_000;
 export const CHALLENGE_TTL_MS = 2 * 60_000;
@@ -108,7 +135,7 @@ export interface DecideInput {
   sourceKind: string;
   trigger: string;
 }
-export type Decision = { action: "proceed"; via: "approval" | "window" | "source" } | { action: "wait"; reason: string; requestId: number | null };
+export type Decision = { action: "proceed"; via: "approval" | "window" | "source" | "troubleshoot" } | { action: "wait"; reason: string; requestId: number | null };
 
 export interface ApprovalRow {
   id: number;
@@ -278,14 +305,32 @@ export interface AgentsConfig {
 export interface Proof {
   code?: unknown;
   passkey?: unknown;
+  /** The token of an approval session: covers routine actions only, and only when neither a code nor a passkey came with it. */
+  session?: unknown;
 }
 /** Who touched: how, with which key, and for what exactly (written into the journal). */
 export interface Factor {
-  via: "totp" | "passkey";
+  via: "totp" | "passkey" | "session";
   key?: string;
   action?: Record<string, unknown>;
+  sessionId?: number;
 }
-const factorDetail = (f: Factor): Record<string, unknown> => ({ via: f.via, ...(f.key !== undefined ? { key: f.key } : {}), ...(f.action !== undefined ? { action: f.action } : {}) });
+const factorDetail = (f: Factor): Record<string, unknown> => ({ via: f.via, ...(f.key !== undefined ? { key: f.key } : {}), ...(f.sessionId !== undefined ? { session: f.sessionId } : {}), ...(f.action !== undefined ? { action: f.action } : {}) });
+
+/** Does a session cover this action? Routine ones only: lifting a block, widening, trusting a source, the session itself — never. */
+export function isRoutineAction(a: Record<string, unknown>): boolean {
+  switch (a.op) {
+    case "approve":
+      return a.acknowledgeBlock !== true;
+    case "open-window":
+    case "batch-approve":
+      return true;
+    case "touch":
+      return typeof a.purpose === "string" && ROUTINE_TOUCH_PURPOSES.has(a.purpose);
+    default:
+      return false;
+  }
+}
 
 export interface PasskeyRow {
   id: number;
@@ -323,6 +368,7 @@ export class Guard {
   private readonly rp: RelyingParty;
   private readonly agents: AgentsConfig | null;
   private lastAgentsScan = 0;
+  private troubleshootPasses: number[] = [];
   private readonly secretDir: string;
   private readonly headDir: string;
 
@@ -397,28 +443,45 @@ export class Guard {
   totpRegistered(): boolean {
     return this.secret() !== null;
   }
+  /** Until when wrong CODES block codes (and sessions: a token is a secret like a code); 0: not blocked. */
   blockedUntil(): number {
     const until = Number(this.meta("blocked_until") ?? 0);
     return until > this.now() ? until : 0;
   }
-
-  /** Blocked after too many wrong codes or signatures (one counter for both: a guess is a guess). */
-  private assertNotBlocked(): void {
-    const until = this.blockedUntil();
-    if (until > 0) throw new GuardError("blocked", `too many wrong codes or signatures; approvals are blocked until ${new Date(until).toISOString()}`);
+  /** Until when wrong SIGNATURES pause signatures (a separate counter and a looser limit, see MAX_PASSKEY_FAILURES); 0: not paused. */
+  passkeyBlockedUntil(): number {
+    const until = Number(this.meta("passkey_blocked_until") ?? 0);
+    return until > this.now() ? until : 0;
   }
 
-  /** A wrong code or signature: recorded, counted, and the fifth within an hour blocks every touch for an hour. Always commits before the caller throws. */
+  /** Blocked after too many wrong codes (or session tokens): five in an hour block codes for an hour. Signatures are not touched by it. */
+  private assertCodesNotBlocked(): void {
+    const until = this.blockedUntil();
+    if (until > 0) throw new GuardError("blocked", `too many wrong codes; codes are blocked until ${new Date(until).toISOString()} (a passkey touch still works)`);
+  }
+  /** Paused after a flood of wrong signatures. Codes are not touched by it. */
+  private assertPasskeysNotBlocked(): void {
+    const until = this.passkeyBlockedUntil();
+    if (until > 0) throw new GuardError("blocked", `too many wrong signatures; signatures are paused until ${new Date(until).toISOString()} (a code still works)`);
+  }
+
+  /**
+   * A wrong code or session token (`totp.fail`: the fifth within an hour blocks codes for an hour) or a wrong signature (`passkey.fail`: its own counter,
+   * `MAX_PASSKEY_FAILURES` within `PASSKEY_FAIL_WINDOW_MS` pause signatures for `PASSKEY_BLOCK_MS`). Always commits before the caller throws.
+   */
   private recordFailure(kind: "totp.fail" | "passkey.fail", purpose: string, extra: Record<string, unknown> = {}): void {
+    const passkey = kind === "passkey.fail";
     this.tx(() => {
-      this.db.prepare(`INSERT INTO attempts (ts, ok, purpose) VALUES (?, 0, ?)`).run(this.now(), purpose);
-      const since = Math.max(this.now() - HOUR_MS, Number(this.meta("fail_epoch") ?? 0));
-      const n = (this.db.prepare(`SELECT COUNT(*) AS n FROM attempts WHERE ok = 0 AND ts > ?`).get(since) as { n: number }).n;
+      this.db.prepare(`INSERT INTO attempts (ts, ok, purpose, kind) VALUES (?, 0, ?, ?)`).run(this.now(), purpose, passkey ? "passkey" : "code");
+      const epochKey = passkey ? "passkey_fail_epoch" : "fail_epoch";
+      const since = Math.max(this.now() - (passkey ? PASSKEY_FAIL_WINDOW_MS : HOUR_MS), Number(this.meta(epochKey) ?? 0));
+      const n = (this.db.prepare(`SELECT COUNT(*) AS n FROM attempts WHERE ok = 0 AND kind = ? AND ts > ?`).get(passkey ? "passkey" : "code", since) as { n: number }).n;
       this.log(kind, null, null, { purpose, ...extra });
-      if (n >= MAX_FAILURES) {
-        this.setMeta("blocked_until", String(this.now() + HOUR_MS));
-        this.setMeta("fail_epoch", String(this.now()));
-        this.log("totp.blocked", null, null, { purpose, until: this.now() + HOUR_MS });
+      if (passkey ? n >= MAX_PASSKEY_FAILURES : n >= MAX_FAILURES) {
+        const until = this.now() + (passkey ? PASSKEY_BLOCK_MS : HOUR_MS);
+        this.setMeta(passkey ? "passkey_blocked_until" : "blocked_until", String(until));
+        this.setMeta(epochKey, String(this.now()));
+        this.log(passkey ? "passkey.paused" : "totp.blocked", null, null, { purpose, until });
       }
     });
   }
@@ -433,7 +496,7 @@ export class Guard {
       if (this.totpDisabled()) throw new GuardError("not_registered", "codes are switched off at this guard: touch with a passkey (`sbb-guard totp-register` on the console switches them on again)");
       throw new GuardError("not_registered", "no second factor is registered; run `sbb-guard totp-register` on the console");
     }
-    this.assertNotBlocked();
+    this.assertCodesNotBlocked();
     const given = typeof code === "string" ? code : "";
     const res = verifyTotp(secret, given, this.now(), Number(this.meta("last_step") ?? 0));
     if (!res.ok) {
@@ -443,16 +506,76 @@ export class Guard {
     // The step is spent before the action runs, in a transaction of its own (a failure above also commits its record).
     // Callers check everything that can be checked without a code first, so a spent code is not wasted on a refusal.
     this.tx(() => {
-      this.db.prepare(`INSERT INTO attempts (ts, ok, purpose) VALUES (?, 1, ?)`).run(this.now(), purpose);
+      this.db.prepare(`INSERT INTO attempts (ts, ok, purpose, kind) VALUES (?, 1, ?, 'code')`).run(this.now(), purpose);
       this.setMeta("last_step", String(res.step));
     });
   }
 
-  /** One touch for one action: a passkey assertion when one is given (and then only that), else a TOTP code. */
+  /**
+   * One touch for one action: a passkey assertion when one is given (and then only that), else a TOTP code, else — for a routine action only —
+   * the token of an approval session. A session offered for anything else is refused outright (not counted as a wrong code): it is the page asking
+   * for something it must ask a human for.
+   */
   private verifyFactor(purpose: string, action: Record<string, unknown>, proof: Proof): Factor {
     if (proof.passkey !== undefined) return this.verifyPasskey(purpose, action, proof.passkey);
+    if (proof.code === undefined && proof.session !== undefined) {
+      if (!isRoutineAction(action)) throw new GuardError("invalid_code", "this needs a fresh touch (a code or a passkey): a session does not cover it");
+      return this.verifySession(purpose, proof.session);
+    }
     this.verifyCode(purpose, proof.code);
     return { via: "totp" };
+  }
+
+  // ---- approval sessions ---------------------------------------------------------------------------------------------------
+  // The token is made here, goes back once to the page that touched, and lives in that page's memory. Only its SHA-256 is kept (and it is never in
+  // the journal or the state). A session covers routine actions (isRoutineAction); each use slides the end 15 minutes ahead, never past the ceiling.
+  private verifySession(purpose: string, token: unknown): Factor {
+    this.assertCodesNotBlocked();
+    const row = typeof token === "string" && token.length >= 16 && token.length <= 256 ? (this.db.prepare(`SELECT * FROM sessions WHERE token_hash = ? AND closed_at IS NULL`).get(sha256hex(token)) as Raw | undefined) : undefined;
+    const now = this.now();
+    if (!row || now >= Number(row.expires_at) || now >= Number(row.hard_expires_at)) {
+      if (row) this.tx(() => this.closeSessionInner(Number(row.id), "expired"));
+      // A wrong, unknown, closed or expired token is a wrong code: the same counter.
+      this.recordFailure("totp.fail", `session:${purpose}`, { via: "session" });
+      throw new GuardError("invalid_code", "invalid or expired session");
+    }
+    this.tx(() => {
+      this.db.prepare(`UPDATE sessions SET expires_at = ?, uses = uses + 1 WHERE id = ?`).run(Math.min(now + SESSION_IDLE_MS, Number(row.hard_expires_at)), Number(row.id));
+    });
+    return { via: "session", sessionId: Number(row.id) };
+  }
+  private closeSessionInner(id: number, reason: string): void {
+    const done = this.db.prepare(`UPDATE sessions SET closed_at = ?, closed_reason = ? WHERE id = ? AND closed_at IS NULL`).run(this.now(), reason, id);
+    if (Number(done.changes) === 1) this.log(reason === "expired" ? "session.expire" : "session.close", null, null, { session: id, reason });
+  }
+  private openSessions(): Raw[] {
+    const now = this.now();
+    return (this.db.prepare(`SELECT * FROM sessions WHERE closed_at IS NULL ORDER BY id`).all() as Raw[]).filter((r) => now < Number(r.expires_at) && now < Number(r.hard_expires_at));
+  }
+
+  /** `session-open`: a fresh touch (a session cannot open another). The old session, if any, is closed: there is one. */
+  sessionOpen(raw: Record<string, unknown>): { token: string; idleMs: number; capMs: number; sessionId: number } {
+    const factor = this.verifyFactor("session.open", this.normalizeAction({ op: "session-open" }), raw);
+    const token = randomBytes(32).toString("base64url");
+    return this.tx(() => {
+      for (const r of this.db.prepare(`SELECT id FROM sessions WHERE closed_at IS NULL`).all() as Array<{ id: number }>) this.closeSessionInner(Number(r.id), "replaced");
+      const now = this.now();
+      const info = this.db.prepare(`INSERT INTO sessions (token_hash, opened_at, expires_at, hard_expires_at) VALUES (?, ?, ?, ?)`).run(sha256hex(token), now, now + SESSION_IDLE_MS, now + SESSION_CAP_MS);
+      const id = Number(info.lastInsertRowid);
+      this.log("session.open", null, null, { session: id, idleMs: SESSION_IDLE_MS, capMs: SESSION_CAP_MS, ...factorDetail(factor) });
+      return { token, idleMs: SESSION_IDLE_MS, capMs: SESSION_CAP_MS, sessionId: id };
+    });
+  }
+  /** "Lock": tightening, no touch. Closes every session. */
+  sessionClose(reason = "locked"): { closed: number } {
+    return this.tx(() => {
+      let n = 0;
+      for (const r of this.db.prepare(`SELECT id FROM sessions WHERE closed_at IS NULL`).all() as Array<{ id: number }>) {
+        this.closeSessionInner(Number(r.id), reason);
+        n++;
+      }
+      return { closed: n };
+    });
   }
 
   totpDisabled(): boolean {
@@ -620,6 +743,17 @@ export class Guard {
     const req = this.parseDecide(raw);
     return this.tx(() => {
       this.sweepInner();
+      // Troubleshooting mode: everything passes, and every decision is a record (what it would have been is in it). Nothing is approved and nothing is queued.
+      if (this.troubleshootUntil() > 0) {
+        const wouldHave = this.coveringApproval(req) ? "approval" : this.openWindowOf(req.pluginId) ? "window" : "wait";
+        const now = this.now();
+        this.troubleshootPasses = this.troubleshootPasses.filter((t) => t > now - 60_000);
+        // Every pass is journaled: past the limit the guard holds instead of passing without a record.
+        if (this.troubleshootPasses.length >= MAX_TROUBLESHOOT_PASSES_PER_MIN) return { action: "wait", reason: "held by secure-bb guard: troubleshooting mode records too many decisions", requestId: null } as const;
+        this.troubleshootPasses.push(now);
+        this.log("troubleshoot.pass", req.pluginId, req.contentHash, { version: req.version, source: req.source, sourceKind: req.sourceKind, rootDir: req.rootDir, trigger: req.trigger, wouldHave });
+        return { action: "proceed", via: "troubleshoot" } as const;
+      }
       if (this.coveringApproval(req)) return { action: "proceed", via: "approval" } as const;
 
       // A stop survives a rejection: dismiss needs no code, so a process that can reach the guard could otherwise clear the stop and let the window in.
@@ -653,7 +787,7 @@ export class Guard {
   /** `decide` with the guard's own reading of the version first (the checks run outside the transaction, within a time budget). */
   async decideChecked(raw: Record<string, unknown>): Promise<Decision> {
     const req = this.parseDecide(raw);
-    if (this.coveringApproval(req)) return this.decide(raw);
+    if (this.coveringApproval(req) || this.troubleshootUntil() > 0) return this.decide(raw);
     return this.decide(raw, await this.evaluate(req));
   }
 
@@ -826,6 +960,8 @@ export class Guard {
     approval: { id: number; via: string; windowId: number | null } | null;
     window: { id: number; expiresAt: number; hardExpiresAt: number; mode: string; sizeSec: number } | null;
     requestId: number | null;
+    /** Troubleshooting mode is on until this time (the plugin's hook passes too, and says so); 0: off. */
+    troubleshootUntil: number;
   } {
     const pluginId = pluginIdOf(raw.pluginId);
     const contentHash = hashOf(raw.contentHash);
@@ -837,6 +973,7 @@ export class Guard {
       approval: a ? { id: a.id, via: a.via, windowId: a.windowId } : null,
       window: w ? { id: w.id, expiresAt: w.expiresAt, hardExpiresAt: w.hardExpiresAt, mode: w.mode, sizeSec: w.sizeSec } : null,
       requestId: q ? Number(q.id) : null,
+      troubleshootUntil: this.troubleshootUntil(),
     };
   }
 
@@ -865,17 +1002,188 @@ export class Guard {
     return q;
   }
 
-  /** Approves a held version with a touch. The code is checked first, in the same transaction as the approval. */
+  /**
+   * What the guard itself refuses about lifting a stop, before any touch is spent: a hash that did not match is never approved (the request may be about
+   * other code than the directory shows), and in Strict mode nothing is lifted. `acknowledgeBlock` is the page's word for "I accept the risk".
+   */
+  private assertLiftable(q: QueueRow, acknowledgeBlock: boolean): void {
+    if (isMismatchNote(q.note)) throw new GuardError("invalid", "the directory's hash did not match the request's: this version is never approved, with or without acknowledgeBlock (reinstall the plugin from its source)");
+    if (acknowledgeBlock && this.trustMode() === "strict") throw new GuardError("invalid", "режим «Строгий»: остановку обойти нельзя (acknowledgeBlock отклонён сторожем); сначала ослабьте режим касанием");
+    if (isHardFlagNote(q.note) && !acknowledgeBlock) throw new GuardError("invalid", "this version has a hard flag: it is approved only with acknowledgeBlock and a fresh touch (a session does not cover it)");
+  }
+
+  /**
+   * Approves a held version with a touch (a session also covers it, unless `acknowledgeBlock` lifts a stop: that is always a fresh touch, and
+   * never in Strict mode). The code is checked first, in the same transaction as the approval.
+   */
   approve(raw: Record<string, unknown>): { approval: ApprovalRow } {
     const id = intOf(raw.requestId, "requestId", 1, Number.MAX_SAFE_INTEGER);
+    if (raw.acknowledgeBlock !== undefined && typeof raw.acknowledgeBlock !== "boolean") throw new GuardError("invalid", "acknowledgeBlock is true or false");
+    const ack = raw.acknowledgeBlock === true;
     const q = this.heldRequest(id);
-    const factor = this.verifyFactor(`approve:${q.pluginId}`, this.normalizeAction({ op: "approve", requestId: id }), raw);
+    this.assertLiftable(q, ack);
+    const factor = this.verifyFactor(`approve:${q.pluginId}`, this.normalizeAction({ op: "approve", requestId: id, ...(ack ? { acknowledgeBlock: true } : {}) }), raw);
     return this.tx(() => {
       const a = this.addApproval({ contentHash: q.contentHash, pluginId: q.pluginId, version: q.version, source: q.source, sourceKind: q.sourceKind, gitCommit: null, npmIntegrity: null, via: "touch", windowId: null, rights: q.rights });
       this.resolveQueue(q.pluginId, q.contentHash, "approved");
       // The record says what exactly was approved: after the fact, this is what the owner reads.
-      this.log("approved.touch", q.pluginId, q.contentHash, { approval: a.id, review: q.id, version: q.version, source: q.source, sourceKind: q.sourceKind, rootDir: q.rootDir, ...factorDetail(factor) });
+      this.log("approved.touch", q.pluginId, q.contentHash, { approval: a.id, review: q.id, version: q.version, source: q.source, sourceKind: q.sourceKind, rootDir: q.rootDir, ...(ack ? { acknowledgeBlock: true } : {}), ...factorDetail(factor) });
       return { approval: a };
+    });
+  }
+
+  /**
+   * «Вернуть и доверять источнику»: ONE operation, ONE touch, ONE journal record — the version is approved and its source (as the guard names it
+   * from the queue entry, not from the request) goes into "my sources". Never a session (adding a source is always a fresh touch), never a stop.
+   */
+  approveAndTrust(raw: Record<string, unknown>): { approval: ApprovalRow; entry: string; mySources: string[] } {
+    const id = intOf(raw.requestId, "requestId", 1, Number.MAX_SAFE_INTEGER);
+    const q = this.heldRequest(id);
+    this.assertLiftable(q, false);
+    if (isHardFlagNote(q.note)) throw new GuardError("invalid", "a version with a hard flag cannot be returned together with trusting its source");
+    const action = this.normalizeAction({ op: "approve-trust", requestId: id });
+    const entry = action.entry as string;
+    const cur = this.mySources();
+    if (!cur.includes(entry) && cur.length + 1 > MAX_SOURCES) throw new GuardError("invalid", `at most ${MAX_SOURCES} sources`);
+    const factor = this.verifyFactor(`approve-trust:${q.pluginId}`, action, raw);
+    return this.tx(() => {
+      const a = this.addApproval({ contentHash: q.contentHash, pluginId: q.pluginId, version: q.version, source: q.source, sourceKind: q.sourceKind, gitCommit: null, npmIntegrity: null, via: "touch", windowId: null, rights: q.rights });
+      this.resolveQueue(q.pluginId, q.contentHash, "approved");
+      const next = cur.includes(entry) ? cur : [...cur, entry].sort();
+      this.setMeta("my_sources", JSON.stringify(next));
+      this.log("approved.trust", q.pluginId, q.contentHash, { approval: a.id, review: q.id, version: q.version, source: q.source, sourceKind: q.sourceKind, rootDir: q.rootDir, trustedSource: entry, sourceWasTrusted: cur.includes(entry), ...factorDetail(factor) });
+      return { approval: a, entry, mySources: next };
+    });
+  }
+
+  // ---- batch: the list is fixed here before the touch ---------------------------------------------------------------------
+  private batchHash(items: Array<{ kind: string; id: number; fingerprint: string }>): string {
+    const canon = items.map((i) => [i.kind, i.id, i.fingerprint] as const).sort((a, b) => (a[0] === b[0] ? a[1] - b[1] : a[0] < b[0] ? -1 : 1));
+    return sha256hex(JSON.stringify(canon));
+  }
+  /** What a held version is right now, as the guard sees it: if any part differs when the touch arrives, the version is not approved. */
+  private queueFingerprint(q: QueueRow): string {
+    const stop = (this.db.prepare(`SELECT stop FROM queue WHERE id = ?`).get(q.id) as { stop: number } | undefined)?.stop ?? 0;
+    return sha256hex(JSON.stringify([q.pluginId, q.version, q.contentHash, q.source, q.sourceKind, q.rootDir, stop]));
+  }
+
+  /**
+   * `batch-prepare {items: [{kind, id, fingerprint?, label?}]}`: fixes the list. `queue` items are the guard's own held versions: the guard computes
+   * their fingerprint and label itself (what the caller says about them is ignored), and leaves out the ones that cannot go into a list (a hash that did
+   * not match, a hard flag: blocks are lifted one by one). `skill` and `drift` items belong to the plugin: the guard keeps what the plugin said about
+   * them, only to bind the touch to them. Nothing is approved here.
+   */
+  batchPrepare(raw: Record<string, unknown>): { batchId: string; setHash: string; expiresAt: number; items: Array<{ kind: string; id: number; label: string; fingerprint: string }>; skipped: Array<{ kind: string; id: number; reason: string }> } {
+    if (!Array.isArray(raw.items) || raw.items.length === 0 || raw.items.length > MAX_BATCH_ITEMS) throw new GuardError("invalid", `items is a list of 1..${MAX_BATCH_ITEMS} entries`);
+    const seen = new Set<string>();
+    const items: Array<{ kind: string; id: number; label: string; fingerprint: string }> = [];
+    const skipped: Array<{ kind: string; id: number; reason: string }> = [];
+    for (const r of raw.items as unknown[]) {
+      if (typeof r !== "object" || r === null || Array.isArray(r)) throw new GuardError("invalid", "an item is an object");
+      const it = r as Record<string, unknown>;
+      if (it.kind !== "queue" && it.kind !== "skill" && it.kind !== "drift") throw new GuardError("invalid", "kind is queue, skill or drift");
+      const id = intOf(it.id, "id", 1, Number.MAX_SAFE_INTEGER);
+      if (seen.has(`${it.kind}:${id}`)) continue;
+      seen.add(`${it.kind}:${id}`);
+      if (it.kind === "queue") {
+        const row = this.db.prepare(`SELECT * FROM queue WHERE id = ?`).get(id) as Raw | undefined;
+        const q = row ? queueOf(row) : null;
+        if (!q || q.status !== "held") skipped.push({ kind: "queue", id, reason: "уже не ждёт решения" });
+        else if (isMismatchNote(q.note)) skipped.push({ kind: "queue", id, reason: "хеш не совпал: одобрить нельзя" });
+        else if (isHardFlagNote(q.note)) skipped.push({ kind: "queue", id, reason: "жёсткий флаг: снимается отдельно, свежим касанием" });
+        else items.push({ kind: "queue", id, label: `${q.pluginId}@${q.version}`, fingerprint: this.queueFingerprint(q) });
+      } else {
+        items.push({ kind: it.kind, id, label: str(it.label ?? `${it.kind} #${id}`, "label", 200), fingerprint: str(it.fingerprint, "fingerprint", 128, 1) });
+      }
+    }
+    if (items.length === 0) throw new GuardError("invalid", `nothing in the list can be approved together${skipped.length > 0 ? `: ${skipped.map((s) => `${s.kind} #${s.id} — ${s.reason}`).join("; ")}` : ""}`);
+    const setHash = this.batchHash(items);
+    return this.tx(() => {
+      const now = this.now();
+      this.db.prepare(`DELETE FROM batches WHERE expires_at < ? OR used_at IS NOT NULL AND used_at < ?`).run(now, now - HOUR_MS);
+      if ((this.db.prepare(`SELECT COUNT(*) AS n FROM batches WHERE used_at IS NULL`).get() as { n: number }).n >= MAX_PENDING_BATCHES) throw new GuardError("conflict", "too many lists are waiting; use or let them expire first");
+      const batchId = randomBytes(12).toString("hex");
+      const expiresAt = now + BATCH_TTL_MS;
+      this.db.prepare(`INSERT INTO batches (id, set_hash, items, created_at, expires_at) VALUES (?, ?, ?, ?, ?)`).run(batchId, setHash, JSON.stringify(items), now, expiresAt);
+      this.log("batch.prepare", null, null, { batch: batchId, setHash, items: items.map((i) => `${i.kind}#${i.id}`) });
+      return { batchId, setHash, expiresAt, items, skipped };
+    });
+  }
+
+  private loadBatch(raw: Record<string, unknown>): { id: string; setHash: string; items: Array<{ kind: string; id: number; label: string; fingerprint: string }> } {
+    const id = str(raw.batchId, "batchId", 64, 1);
+    const shown = str(raw.setHash, "setHash", 64, 64);
+    const row = this.db.prepare(`SELECT * FROM batches WHERE id = ?`).get(id) as Raw | undefined;
+    if (!row) throw new GuardError("not_found", "no such list; prepare it again");
+    if (row.used_at !== null) throw new GuardError("conflict", "this list was already approved");
+    if (this.now() >= Number(row.expires_at)) throw new GuardError("conflict", "the list expired; prepare it again");
+    const items = JSON.parse(String(row.items)) as Array<{ kind: string; id: number; label: string; fingerprint: string }>;
+    // What the person saw (the hash they confirm), what is stored, and what the stored items add up to: all the same, or nothing.
+    if (shown !== String(row.set_hash) || this.batchHash(items) !== String(row.set_hash)) throw new GuardError("conflict", "the list does not match the one that was shown; prepare it again");
+    return { id, setHash: String(row.set_hash), items };
+  }
+
+  /**
+   * `batch-approve {batchId, setHash, code | passkey | session}`: ONE touch for the whole stored list (the touch names the list's id and hash, never items;
+   * a passkey signature is bound to that pair). Each `queue` item is approved only if it is still what it was when the list was shown. `skill` and
+   * `drift` items are returned as `local`: the plugin approves its own, now that the touch was accepted.
+   */
+  batchApprove(raw: Record<string, unknown>): { results: Array<{ kind: string; id: number; label: string; ok: boolean; local: boolean; note: string }> } {
+    const b = this.loadBatch(raw);
+    const factor = this.verifyFactor("batch.approve", this.normalizeAction({ op: "batch-approve", batchId: b.id, setHash: b.setHash }), raw);
+    return this.tx(() => {
+      const spent = this.db.prepare(`UPDATE batches SET used_at = ? WHERE id = ? AND used_at IS NULL`).run(this.now(), b.id);
+      if (Number(spent.changes) !== 1) throw new GuardError("conflict", "this list was already approved");
+      this.log("batch.approve", null, null, { batch: b.id, setHash: b.setHash, items: b.items.map((i) => `${i.kind}#${i.id}`), ...factorDetail(factor) });
+      const results: Array<{ kind: string; id: number; label: string; ok: boolean; local: boolean; note: string }> = [];
+      for (const it of b.items) {
+        if (it.kind !== "queue") {
+          results.push({ kind: it.kind, id: it.id, label: it.label, ok: true, local: true, note: "касание принято; одобряет плагин" });
+          continue;
+        }
+        const row = this.db.prepare(`SELECT * FROM queue WHERE id = ?`).get(it.id) as Raw | undefined;
+        const q = row ? queueOf(row) : null;
+        if (!q || q.status !== "held" || this.queueFingerprint(q) !== it.fingerprint || isMismatchNote(q.note) || isHardFlagNote(q.note)) {
+          results.push({ kind: "queue", id: it.id, label: it.label, ok: false, local: false, note: "изменилось после показа списка: не одобрено, посмотрите заново" });
+          continue;
+        }
+        const a = this.addApproval({ contentHash: q.contentHash, pluginId: q.pluginId, version: q.version, source: q.source, sourceKind: q.sourceKind, gitCommit: null, npmIntegrity: null, via: "touch", windowId: null, rights: q.rights });
+        this.resolveQueue(q.pluginId, q.contentHash, "approved");
+        this.log("approved.touch", q.pluginId, q.contentHash, { approval: a.id, review: q.id, version: q.version, source: q.source, sourceKind: q.sourceKind, rootDir: q.rootDir, batch: b.id, ...factorDetail(factor) });
+        results.push({ kind: "queue", id: it.id, label: it.label, ok: true, local: false, note: "одобрено" });
+      }
+      return { results };
+    });
+  }
+
+  // ---- troubleshooting mode (console + a code; the guard has no off switch) ----------------------------------------------------
+  /** Until when the guard passes everything and writes every decision down; 0: off. */
+  troubleshootUntil(): number {
+    const until = Number(this.meta("troubleshoot_until") ?? 0);
+    return until > this.now() ? until : 0;
+  }
+  /**
+   * Console only (there is no op for it on the socket): a code is spent, the guard passes everything for `minutes`, writes each decision into the
+   * journal and returns by itself. It does not switch the guard off: approvals, windows, touches and the journal work as always.
+   */
+  troubleshootStart(minutes: unknown, code: unknown): { until: number; minutes: number } {
+    const m = intOf(minutes, "minutes", 1, MAX_TROUBLESHOOT_MIN);
+    this.verifyCode("troubleshoot", code);
+    return this.tx(() => {
+      const until = this.now() + m * 60_000;
+      this.setMeta("troubleshoot_until", String(until));
+      this.troubleshootPasses = [];
+      this.log("troubleshoot.start", null, null, { minutes: m, until, via: "console" });
+      return { until, minutes: m };
+    });
+  }
+  /** Console only: back to normal now. Tightening: no code. */
+  troubleshootStop(): boolean {
+    return this.tx(() => {
+      if (this.troubleshootUntil() === 0) return false;
+      this.setMeta("troubleshoot_until", "0");
+      this.log("troubleshoot.end", null, null, { reason: "stopped", via: "console" });
+      return true;
     });
   }
 
@@ -939,6 +1247,18 @@ export class Guard {
     for (const w of this.unclosedWindows()) {
       if (now < w.expiresAt && now < w.hardExpiresAt) continue;
       this.closeWindowInner(w, w.expiresAt >= w.hardExpiresAt ? "ceiling" : "expired", Math.min(w.expiresAt, w.hardExpiresAt));
+      n++;
+    }
+    for (const r of this.db.prepare(`SELECT id, expires_at, hard_expires_at FROM sessions WHERE closed_at IS NULL`).all() as Array<{ id: number; expires_at: number; hard_expires_at: number }>) {
+      if (now < Number(r.expires_at) && now < Number(r.hard_expires_at)) continue;
+      this.closeSessionInner(Number(r.id), "expired");
+      n++;
+    }
+    // Troubleshooting mode returns by itself.
+    const until = Number(this.meta("troubleshoot_until") ?? 0);
+    if (until > 0 && until <= now) {
+      this.setMeta("troubleshoot_until", "0");
+      this.log("troubleshoot.end", null, null, { reason: "expired", at: until });
       n++;
     }
     return n;
@@ -1187,7 +1507,21 @@ export class Guard {
     const a = raw as Record<string, unknown>;
     switch (a.op) {
       case "approve":
-        return { op: "approve", requestId: intOf(a.requestId, "requestId", 1, Number.MAX_SAFE_INTEGER) };
+        if (a.acknowledgeBlock !== undefined && typeof a.acknowledgeBlock !== "boolean") throw new GuardError("invalid", "acknowledgeBlock is true or false");
+        return { op: "approve", requestId: intOf(a.requestId, "requestId", 1, Number.MAX_SAFE_INTEGER), ...(a.acknowledgeBlock === true ? { acknowledgeBlock: true } : {}) };
+      case "approve-trust": {
+        // The source comes from the queue entry, never from the caller: a touch for "trust THIS" is for what the guard names.
+        const id = intOf(a.requestId, "requestId", 1, Number.MAX_SAFE_INTEGER);
+        const q = this.heldRequest(id);
+        const ident = identityOf(q.sourceKind, q.source);
+        const entry = ident === null ? null : normalizeEntry(ident.id);
+        if (entry === null) throw new GuardError("invalid", "this version's source cannot be put into \"my sources\" (not github and not a directory on disk)");
+        return { op: "approve-trust", requestId: id, entry };
+      }
+      case "session-open":
+        return { op: "session-open" };
+      case "batch-approve":
+        return { op: "batch-approve", batchId: str(a.batchId, "batchId", 64, 1), setHash: str(a.setHash, "setHash", 64, 64) };
       case "open-window": {
         const scope = a.scope;
         if (scope !== undefined && scope !== "tree" && scope !== "thread") throw new GuardError("invalid", "scope is tree or thread");
@@ -1215,7 +1549,7 @@ export class Guard {
       case "agents-accept":
         return { op: "agents-accept", ids: this.agentIds(a.ids) };
       default:
-        throw new GuardError("invalid", "an action is approve, open-window, policy, touch, trust-mode, sources-add or agents-accept");
+        throw new GuardError("invalid", "an action is approve, approve-trust, session-open, batch-approve, open-window, policy, touch, trust-mode, sources-add or agents-accept");
     }
   }
 
@@ -1226,7 +1560,20 @@ export class Guard {
         const q = this.db.prepare(`SELECT * FROM queue WHERE id = ?`).get(Number(a.requestId)) as Raw | undefined;
         if (!q) throw new GuardError("not_found", `no request #${String(a.requestId)}`);
         if (q.status !== "held") throw new GuardError("conflict", `request #${String(a.requestId)} is already ${String(q.status)}`);
-        return `Одобрить загрузку плагина «${String(q.plugin_id)}» версии ${String(q.version)} (запись #${String(q.id)}, источник ${String(q.source)}, хеш ${String(q.content_hash).slice(0, 16)}…)`;
+        return `${a.acknowledgeBlock === true ? "СНЯТЬ ОСТАНОВКУ и одобрить" : "Одобрить"} загрузку плагина «${String(q.plugin_id)}» версии ${String(q.version)} (запись #${String(q.id)}, источник ${String(q.source)}, хеш ${String(q.content_hash).slice(0, 16)}…)${a.acknowledgeBlock === true ? ": версию остановили проверки, вы берёте риск на себя" : ""}`;
+      }
+      case "approve-trust": {
+        const q = this.db.prepare(`SELECT * FROM queue WHERE id = ?`).get(Number(a.requestId)) as Raw | undefined;
+        if (!q) throw new GuardError("not_found", `no request #${String(a.requestId)}`);
+        return `Одобрить версию ${String(q.version)} плагина «${String(q.plugin_id)}» (запись #${String(q.id)}, хеш ${String(q.content_hash).slice(0, 16)}…) И добавить источник ${String(a.entry)} в «мои источники»: новые версии оттуда будут проходить без вопросов, пока плагин не попросит новых прав`;
+      }
+      case "session-open":
+        return `Открыть сессию подтверждения: ${SESSION_IDLE_MS / 60_000} мин скользящие, потолок ${SESSION_CAP_MS / 60_000} мин. Рутину (одобрить версию, открыть окно, принять расхождение, одобрить скилл, пакет) она покрывает без касания; опасное — всегда со свежим касанием`;
+      case "batch-approve": {
+        const row = this.db.prepare(`SELECT * FROM batches WHERE id = ? AND used_at IS NULL`).get(String(a.batchId)) as Raw | undefined;
+        if (!row || String(row.set_hash) !== String(a.setHash)) throw new GuardError("not_found", "no such list (or it does not match the hash)");
+        const items = JSON.parse(String(row.items)) as Array<{ kind: string; label: string }>;
+        return `Одобрить пакетом ${items.length} ${items.length === 1 ? "элемент" : "элементов"} одним касанием (список зафиксирован у сторожа, хеш ${String(a.setHash).slice(0, 12)}…): ${items.slice(0, 8).map((i) => i.label).join("; ")}${items.length > 8 ? ` и ещё ${items.length - 8}` : ""}`;
       }
       case "open-window":
         return `Открыть окно доверия для плагина «${String(a.pluginId)}» на ${String(a.minutes)} мин${a.scope === "tree" ? " (охват: весь тред со всеми сабтредами)" : a.scope === "thread" ? " (охват: только этот тред)" : ""}: любые версии этого плагина будут загружаться без касания`;
@@ -1276,11 +1623,11 @@ export class Guard {
 
   /**
    * Checks an assertion for `action` (the normalized command that just arrived). Order: shape → the challenge (unknown, used, expired: plain refusals,
-   * not counted) → everything the signature covers (counted as a wrong code is: one counter) → the challenge is spent in one transaction with the key's counter.
+   * not counted) → everything the signature covers (counted, on the counter of signatures: not the one of codes) → the challenge is spent in one transaction with the key's counter.
    */
   private verifyPasskey(purpose: string, action: Record<string, unknown>, assertion: unknown): Factor {
     if (this.activePasskeys().length === 0) throw new GuardError("not_registered", "no passkey is registered; run `sbb-guard passkey-enroll` on the console");
-    this.assertNotBlocked();
+    this.assertPasskeysNotBlocked();
     if (typeof assertion !== "object" || assertion === null || Array.isArray(assertion)) throw new GuardError("invalid", "passkey is an object");
     const p = assertion as Record<string, unknown>;
     let credId: string;
@@ -1332,7 +1679,7 @@ export class Guard {
       const spent = this.db.prepare(`UPDATE challenges SET used = 1 WHERE nonce = ? AND used = 0`).run(clientChallenge);
       if (Number(spent.changes) !== 1) throw new GuardError("invalid_passkey", "this challenge was already used");
       this.db.prepare(`UPDATE passkeys SET sign_count = ?, last_used_at = ? WHERE id = ?`).run(auth.signCount, this.now(), key.id);
-      this.db.prepare(`INSERT INTO attempts (ts, ok, purpose) VALUES (?, 1, ?)`).run(this.now(), purpose);
+      this.db.prepare(`INSERT INTO attempts (ts, ok, purpose, kind) VALUES (?, 1, ?, 'passkey')`).run(this.now(), purpose);
     });
     return { via: "passkey", key: String(key.label), action };
   }
@@ -1591,9 +1938,12 @@ export class Guard {
     return {
       now,
       totp: { registered: this.totpRegistered(), disabled: this.totpDisabled(), blockedUntil },
+      sessions: this.openSessions().map((r) => ({ id: Number(r.id), openedAt: Number(r.opened_at), expiresAt: Number(r.expires_at), hardExpiresAt: Number(r.hard_expires_at), uses: Number(r.uses) })),
+      troubleshoot: this.troubleshootUntil() > 0 ? { until: this.troubleshootUntil() } : null,
       passkeys: {
         rpId: this.rp.rpId,
         origin: this.rp.origin,
+        blockedUntil: this.passkeyBlockedUntil(),
         keys: this.listPasskeys()
           .filter((k) => k.state === "active")
           .map((k) => ({ id: k.id, label: k.label, createdAt: k.createdAt, lastUsedAt: k.lastUsedAt, aaguid: k.aaguid })),

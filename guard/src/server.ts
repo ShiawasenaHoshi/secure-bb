@@ -33,7 +33,7 @@ export function dispatch(guard: Guard, req: unknown, version: string): Record<st
     case "trust":
       return guard.trustState();
     case "trust-mode":
-      return { mode: guard.setTrustMode(r.mode, { code: r.code, passkey: r.passkey }) };
+      return { mode: guard.setTrustMode(r.mode, { code: r.code, passkey: r.passkey, session: r.session }) };
     case "sources-add":
       return guard.addSources(r);
     case "sources-remove":
@@ -56,12 +56,25 @@ export function dispatch(guard: Guard, req: unknown, version: string): Record<st
     }
     case "dismiss":
       return guard.dismiss(r);
+    // «Вернуть и доверять источнику»: one touch, one operation, one journal record.
+    case "approve-trust":
+      return guard.approveAndTrust(r);
+    // Approval sessions: opening takes a fresh touch; the token is in this one answer and nowhere else. Locking tightens: no touch.
+    case "session-open":
+      return guard.sessionOpen(r);
+    case "session-close":
+      return guard.sessionClose();
+    // A list for one touch: fixed here first, then one touch names only its id and hash.
+    case "batch-prepare":
+      return guard.batchPrepare(r);
+    case "batch-approve":
+      return guard.batchApprove(r);
     case "open-window":
       return { window: guard.openWindow(r) };
     case "policy": {
       if (r.patch === undefined) return { policy: guard.policy() };
       if (typeof r.patch !== "object" || r.patch === null) throw new GuardError("invalid", "patch is an object");
-      return { policy: guard.setPolicy(r.patch as Record<string, never>, { code: r.code, passkey: r.passkey }) };
+      return { policy: guard.setPolicy(r.patch as Record<string, never>, { code: r.code, passkey: r.passkey, session: r.session }) };
     }
     // Passkeys: the page asks for a challenge bound to an action, and registers a key with the console's one-time token. Listing, confirming and
     // removing keys, and switching codes off, are console commands and have no op here.

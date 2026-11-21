@@ -21,7 +21,7 @@ import { buildExport, writeExport } from "./src/export.js";
 import { localCheckKey } from "./src/decision.js";
 import { mintListProof } from "./src/approval.js";
 import { realpath } from "node:fs/promises";
-import { BatchService, type BatchSource } from "./src/batch.js";
+import { BatchService, type BatchSource, type GuardBatch } from "./src/batch.js";
 import type { Proof } from "./src/approval.js";
 import { AfterFactScanner } from "./src/afterfact.js";
 import { bbSkillSource } from "./src/skills/bb-source.js";
@@ -420,8 +420,8 @@ export default async function plugin(bb: BbPluginApi) {
   const batchSources: Record<"queue" | "skill" | "drift", BatchSource> = {
     queue: {
       describe(id) {
-        // Guard mode: one code approves one version at the guard (a code is never accepted twice), so versions are not batched.
-        if (guardLink) return { skip: "в режиме сторожа версии плагинов одобряются по одной: у сторожа один код — одно одобрение" };
+        // Guard mode: the list is fixed at the guard and one touch is spent there on it; the versions are the guard's own entries.
+        if (guardLink) return describeGuardEntry(id);
         const q = store.getQueue(id);
         if (!q || q.status !== "held") return null;
         if (q.reason?.startsWith(UNSAFE_DIR_REASON)) return { skip: "каталог доступен на запись другим: одобрить нельзя, пока его не исправят" };
@@ -436,6 +436,12 @@ export default async function plugin(bb: BbPluginApi) {
         };
       },
       approve: (id, mark) => approveQueueFull(id, mark),
+      // The guard approved the version; the rest is the same as after a single approval at the guard.
+      afterGuard: async (id) => {
+        const seen = guardBatchSeen.get(id);
+        guardBatchSeen.delete(id);
+        if (seen) await afterGuardApproval(seen.q, seen.facts);
+      },
     },
     skill: {
       describe(id) {
@@ -464,7 +470,10 @@ export default async function plugin(bb: BbPluginApi) {
       },
     },
   };
-  const batches = new BatchService({ store, now, sources: batchSources, approveList: (purpose, proof) => gate.approveList(purpose, proof) });
+  const guardBatch: GuardBatch | undefined = guardLink
+    ? { prepare: (items) => guardLink.batchPrepare(items), approve: (id, hash, proof) => guardLink.batchApprove(id, hash, proof), mark: () => mintListProof() }
+    : undefined;
+  const batches = new BatchService({ store, now, sources: batchSources, approveList: (purpose, proof) => gate.approveList(purpose, proof), ...(guardBatch ? { guard: guardBatch } : {}) });
 
   // ---- RPC ---------------------------------------------------------------
   let lastPagePing = 0;
@@ -519,6 +528,32 @@ export default async function plugin(bb: BbPluginApi) {
   /** What a touch is spent on at the guard: a passkey assertion if the page sent one, else the code. */
   const proofOf = (code: string | undefined, passkey: PasskeyAssertion | undefined): GuardProof | undefined => (passkey !== undefined ? { passkey } : code);
   /**
+   * What a routine RPC of the page may use at the guard: a passkey, else a code, else the token of an approval session (the guard checks which of them
+   * covers the action: a session covers routine actions only, and lifting a block never). `fresh`: this call is the dangerous kind — a session is no good.
+   */
+  const proofOrSession = (input: { code?: string; passkey?: PasskeyAssertion; session?: string }, fresh = false): GuardProof | undefined => {
+    const p = proofOf(input.code, input.passkey);
+    if (p !== undefined) return p;
+    if (input.session === undefined) return undefined;
+    if (fresh) throw new GateError("invalid_code", "this action needs a fresh code or a touch: a session does not cover it");
+    return { session: input.session };
+  };
+  /** Guard mode, lists: what the guard's own entry is, in the words of the list (and what to do after the guard approved it). */
+  const guardBatchSeen = new Map<number, { q: GuardQueueEntry; facts: Awaited<ReturnType<typeof entryFacts>> }>();
+  const describeGuardEntry = async (id: number) => {
+    const q = await guardEntry(id).catch(() => null);
+    if (!q) return null;
+    const f = await entryFacts(q);
+    if (f.unsafeDir) return { skip: "каталог доступен на запись другим: одобрить нельзя, пока его не исправят" };
+    if (f.blocked) return { skip: "заблокировано проверками: снимается отдельно, с подтверждением риска и свежим касанием" };
+    guardBatchSeen.set(id, { q, facts: f });
+    return {
+      fingerprint: fingerprint(q.pluginId, q.version, q.contentHash, q.source, q.rootDir),
+      label: `${q.pluginId}@${q.version}`,
+      detail: [q.note, f.result ? `возможности: ${f.result.capabilities.map((c) => c.kind).join(", ") || "нет"}` : "проверки не завершены"].filter(Boolean).join(" · "),
+    };
+  };
+  /**
    * A proposal the core has not asked the guard about yet (nothing installed: the checks stopped it before install). What a human approves
    * is always the guard's entry for the hash the CORE computes, never a key of ours: so the snapshot is installed first, the guard's entry
    * (made when the core asks) is waited for, and that entry is what a touch is spent on. Nothing is spent before the entry exists.
@@ -565,23 +600,29 @@ export default async function plugin(bb: BbPluginApi) {
     const f = await entryFacts(q);
     if (f.unsafeDir) throw new GateError("invalid", "this version lies in a directory that others can write to; it cannot be approved from there (see the page)", { unsafeDir: true });
     if (f.blocked && !acknowledgeBlock) throw new GateError("invalid", "this version was blocked by the checks; confirm that you accept the risk to approve it anyway", { blocked: true });
-    await link.approve(id, proof);
-    if (f.blocked) store.log("block.lifted", q.pluginId, q.contentHash, { review: id, version: q.version, rules: f.result ? bySeverity(f.result, "block").map((x) => x.rule) : [] });
+    // Lifting a stop is always a fresh touch: the guard also refuses a session for it, in Strict mode, and on a hash mismatch (here only the way is shortened).
+    if (acknowledgeBlock === true && typeof proof === "object" && "session" in proof) throw new GateError("invalid_code", "lifting a block needs a fresh code or a touch: a session does not cover it");
+    await link.approve(id, proof, { acknowledgeBlock: acknowledgeBlock === true });
+    await afterGuardApproval(q, f);
+    return { ok: true as const, note: "approved at the guard" };
+  };
+  /** What follows an approval the guard made (one by one or in a list): the plugin's own records, the window's set, the publisher, the page. */
+  const afterGuardApproval = async (q: GuardQueueEntry, f: Awaited<ReturnType<typeof entryFacts>>): Promise<void> => {
+    if (f.blocked) store.log("block.lifted", q.pluginId, q.contentHash, { review: q.id, version: q.version, rules: f.result ? bySeverity(f.result, "block").map((x) => x.rule) : [] });
     // A capability accepted with a code inside an open window becomes part of the window's set; the window stays open.
     const w = store.unclosedWindows().find((x) => x.pluginId === q.pluginId && x.guardWindowId !== null);
     if (w && f.result) store.setWindowCaps(w.id, [...new Set([...w.caps, ...capabilityTokens(f.result)])].sort());
-    store.log("approved.guard", q.pluginId, q.contentHash, { review: id, version: q.version });
+    store.log("approved.guard", q.pluginId, q.contentHash, { review: q.id, version: q.version });
     if (f.proposal) publisher.onApproved(f.proposal.id);
     recheck();
     changed();
-    return { ok: true as const, note: "approved at the guard" };
   };
 
   /**
    * In guard mode a code that arrives with any RPC is checked by the guard first (it consumes the code there: the secret is not here),
    * and the handler then runs with the mark that says so. RPCs that need more than that (they act at the guard) do it themselves.
    */
-  const OWN_GUARD_PATH = new Set(["queue.approve", "window.open", "policy.set", "session.open", "totp.begin", "totp.confirm", "agents.accept", "trust.mode", "trust.add", "trust.migrate"]);
+  const OWN_GUARD_PATH = new Set(["queue.approve", "queue.approveTrust", "batch.approve", "window.open", "policy.set", "session.open", "totp.begin", "totp.confirm", "agents.accept", "trust.mode", "trust.add", "trust.migrate"]);
   const withGuardTouch = <T extends object>(handlers: T): T => {
     const out: Record<string, unknown> = {};
     if (!guardLink) {
@@ -598,14 +639,17 @@ export default async function plugin(bb: BbPluginApi) {
         ? fn
         : async (input: any) => {
             // A passkey touch is checked at the guard for the action "touch <this RPC>" and wins over a code that came with it.
-            const proof = input && typeof input === "object" ? (input.passkey !== undefined ? { passkey: input.passkey as PasskeyAssertion } : typeof input.code === "string" ? input.code : undefined) : undefined;
+            let proof: GuardProof | undefined = input && typeof input === "object" ? (input.passkey !== undefined ? { passkey: input.passkey as PasskeyAssertion } : typeof input.code === "string" ? input.code : undefined) : undefined;
+            // A routine RPC of the plugin (accept a difference, approve a skill…) may use the approval session instead: the guard checks the token and that the action is
+            // routine. The dangerous kind of it (lifting a block) never does. The schema already refuses a token on the RPCs that are not routine.
+            if (proof === undefined && input && typeof input === "object" && typeof input.session === "string" && input.acknowledgeBlock !== true) proof = { session: input.session };
             if (proof !== undefined) {
               try {
                 await guardLink.touch(name, proof);
               } catch (err) {
                 return refusal(err);
               }
-              const { passkey: _p, ...rest } = input;
+              const { passkey: _p, session: _s, ...rest } = input;
               return fn({ ...rest, code: VERIFIED });
             }
             return fn(input);
@@ -723,11 +767,29 @@ export default async function plugin(bb: BbPluginApi) {
       return { ok: true as const, accepted: r.accepted, note: `принято в эталон: ${r.accepted}` };
     }),
     "queue.approve": wrap(async ({ id, code, passkey, session, acknowledgeBlock }) => {
-      if (guardLink) return id < 0 ? approvePendingProposal(-id, proofOf(code, passkey), acknowledgeBlock) : approveAtGuard(id, proofOf(code, passkey), acknowledgeBlock);
+      if (guardLink) {
+        const proof = proofOrSession({ code, passkey, session }, acknowledgeBlock === true);
+        return id < 0 ? approvePendingProposal(-id, proof, acknowledgeBlock) : approveAtGuard(id, proof, acknowledgeBlock);
+      }
       // Lifting a block is the dangerous kind of this RPC: a fresh code, never a session.
       const proof = gate.proofFor("queue.approve", { code, session }, { escalate: acknowledgeBlock === true });
       const note = await approveQueueFull(id, proof, { acknowledgeBlock });
       return { ok: true as const, note };
+    }),
+    // «Вернуть и доверять источнику»: one operation at the guard — the version AND its source, one touch, one record. Never a session.
+    "queue.approveTrust": wrap(async ({ id, code, passkey }) => {
+      const link = needGuard();
+      const proof = proofOf(code, passkey);
+      if (proof === undefined) throw new GateError("invalid_code", "a code or a touch is needed: the guard checks it");
+      if (id < 0) throw new GateError("invalid", "this proposal is not installed yet: approve it first (the source can be trusted from its entry then)");
+      const q = await guardEntry(id);
+      const f = await entryFacts(q);
+      if (f.unsafeDir) throw new GateError("invalid", "this version lies in a directory that others can write to; it cannot be approved from there (see the page)", { unsafeDir: true });
+      if (f.blocked) throw new GateError("invalid", "this version was stopped by the checks: it is returned on its own card, never together with trusting its source", { blocked: true });
+      const r = await link.approveTrust(id, proof);
+      await afterGuardApproval(q, f);
+      store.log("trust.add", null, null, { entries: [r.entry], with: "approval", review: id, at: "guard" });
+      return { ok: true as const, note: `версия одобрена, источник ${r.entry} добавлен в «мои источники»`, entry: r.entry };
     }),
     // Rejecting tightens: no code, in both modes, and no block after wrong codes.
     "queue.dismiss": wrap(async ({ id }) => {
@@ -752,7 +814,8 @@ export default async function plugin(bb: BbPluginApi) {
     }),
     "window.open": wrap(async ({ queueId, code, passkey, session, scope }) => {
       if (guardLink) {
-        const proof = proofOf(code, passkey);
+        // "The whole tree" while the policy says "this thread only" widens the policy: a fresh touch, never a session.
+        const proof = proofOrSession({ code, passkey, session }, scope === "tree" && store.policy().scope === "thread");
         if (proof === undefined) throw new GateError("invalid_code", "a code or a touch is needed: the guard checks it");
         if (queueId < 0) throw new GateError("invalid", "this proposal is not installed yet: approve it (or install it) first, then open a window from the guard's entry");
         await gate.openGuardWindow(await guardEntry(queueId), proof, scope);
@@ -852,19 +915,36 @@ export default async function plugin(bb: BbPluginApi) {
       changed();
       return { ok: true as const, sources };
     }),
-    "session.open": wrap(async ({ code }) => {
-      if (guardLink) throw new GateError("conflict", "в режиме сторожа сессий нет: сторож проверяет свежий код для каждого одобрения");
+    "session.open": wrap(async ({ code, passkey }) => {
+      if (guardLink) {
+        // The guard issues it for a fresh touch (a code, or a signature bound to "open a session") and keeps only the hash of the token.
+        const proof = proofOf(code, passkey);
+        if (proof === undefined) throw new GateError("invalid_code", "a code or a touch is needed: the guard checks it");
+        const opened = await gate.openGuardSession(proof);
+        changed();
+        return opened;
+      }
+      if (code === undefined) throw new GateError("invalid_code", "a code is needed");
       const opened = await gate.openSession(code);
       changed();
       return opened;
     }),
-    "session.close": () => {
+    "session.close": async () => {
+      if (guardLink) await gate.closeGuardSessions("locked").catch(() => undefined);
       gate.closeSessions("locked");
       changed();
       return { ok: true as const };
     },
     "batch.prepare": wrap(({ items }) => batches.prepare(items)),
-    "batch.approve": wrap(async ({ batchId, setHash, code, session }) => {
+    "batch.approve": wrap(async ({ batchId, setHash, code, session, passkey }) => {
+      if (guardLink) {
+        const proof = proofOrSession({ code, passkey, session });
+        if (proof === undefined) throw new GateError("invalid_code", "a code or a touch is needed: the guard checks it");
+        const results = await batches.approveGuarded(batchId, setHash, proof);
+        recheck();
+        changed();
+        return { ok: true as const, results };
+      }
       const results = await batches.approve(batchId, setHash, gate.proofFor("batch.approve", { code, session }));
       recheck();
       changed();
@@ -952,7 +1032,17 @@ export default async function plugin(bb: BbPluginApi) {
           if (q.queueId === undefined) throw new GateError("invalid", "queueId is needed");
           // A proposal the core has not asked the guard about yet is installed first (as approving it would): the touch is for the guard's entry.
           const entry = q.queueId < 0 ? (await pendingEntry(-q.queueId, q.acknowledgeBlock)).entry : await guardEntry(q.queueId);
-          return out({ op: "approve", requestId: entry.id });
+          return out({ op: "approve", requestId: entry.id, ...(q.acknowledgeBlock === true ? { acknowledgeBlock: true as const } : {}) });
+        }
+        case "approve.trust": {
+          if (q.queueId === undefined || q.queueId < 0) throw new GateError("invalid", "an installed entry of the guard's queue is needed");
+          return out({ op: "approve-trust", requestId: (await guardEntry(q.queueId)).id });
+        }
+        case "session.open":
+          return out({ op: "session-open" });
+        case "batch.approve": {
+          if (q.batchId === undefined || q.setHash === undefined) throw new GateError("invalid", "batchId and setHash are needed");
+          return out({ op: "batch-approve", batchId: q.batchId, setHash: q.setHash });
         }
         case "window.open": {
           if (q.queueId === undefined || q.queueId < 0) throw new GateError("invalid", "a window is opened from an installed entry of the guard's queue");

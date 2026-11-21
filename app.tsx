@@ -208,7 +208,7 @@ function RoutineCode({ value, onChange, dangerous }: { value: string; onChange: 
   return <CodeField value={value} onChange={onChange} />;
 }
 
-function useApprovalSession(rpc: Rpc, refetch: () => void): { approval: Approval; open: (code: string) => Promise<void>; lock: () => Promise<void> } {
+function useApprovalSession(rpc: Rpc, refetch: () => void): { approval: Approval; open: (proof: { code?: string; passkey?: PasskeyAssertion }) => Promise<void>; lock: () => Promise<void> } {
   const [session, setSession] = useState<SessionLocal | null>(null);
   const ref = useRef<SessionLocal | null>(null);
   ref.current = session;
@@ -246,9 +246,9 @@ function useApprovalSession(rpc: Rpc, refetch: () => void): { approval: Approval
       }
     },
   };
-  const open = async (code: string) => {
+  const open = async (proof: { code?: string; passkey?: PasskeyAssertion }) => {
     const started = Date.now();
-    const r = await rpc.call("session.open", { code });
+    const r = await rpc.call("session.open", proof as never);
     setSession({ token: r.token, idleUntil: started + r.idleMs - MARGIN_MS, hardUntil: started + r.capMs - MARGIN_MS });
     refetch();
   };
@@ -260,37 +260,38 @@ function useApprovalSession(rpc: Rpc, refetch: () => void): { approval: Approval
   return { approval, open, lock };
 }
 
-/** The strip at the top: open a session with one code, or see how long it lasts and lock it. */
-function SessionBar({ ov, session, open, lock }: { ov: Overview; session: SessionLocal | null; open: (code: string) => Promise<void>; lock: () => Promise<void> }) {
+/** The strip at the top: open a session with one touch (a code, or a key at the guard), or see how long it lasts and lock it. */
+function SessionBar({ ov, rpc, session, open, lock }: { ov: Overview; rpc: Rpc; session: SessionLocal | null; open: (proof: { code?: string; passkey?: PasskeyAssertion }) => Promise<void>; lock: () => Promise<void> }) {
   const now = useNow();
-  const [code, setCode] = useState("");
+  const proof = useProof(ov, rpc);
   const act = useCodeAction(() => undefined);
-  const registered = ov.totp.state === "locked" || ov.totp.state === "external";
-  if (!registered || ov.guard) return null; // with a guard there are no sessions: it checks a fresh code for every approval
+  if (!proof.registered) return null;
   if (session) {
     const left = Math.max(0, Math.ceil((Math.min(session.idleUntil, session.hardUntil) - now) / 60_000));
     const ceiling = Math.max(0, Math.ceil((session.hardUntil - now) / 60_000));
     return (
       <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted px-3 py-2 text-sm" role="status">
-        <span className="min-w-0 flex-1">Сессия открыта, осталось {left} мин (скользящие 15 мин от каждого действия; потолок — через {ceiling} мин). Опасное всё равно требует свежего кода.</span>
+        <span className="min-w-0 flex-1">Сессия открыта, осталось {left} мин (скользящие 15 мин от каждого действия; потолок — через {ceiling} мин). Опасное всё равно требует свежего {ov.guard ? "касания" : "кода"}.</span>
         <button className={btnPrimary} onClick={() => void act.run(() => lock())}>Заблокировать</button>
       </div>
     );
   }
   const blockers = ov.thirdPartyRunning;
+  const blocked = ov.guard && proof.pk.has ? false : ov.totp.blockedUntil > 0;
   return (
     <div className={card}>
       <h3 className="font-semibold">Сессия подтверждения</h3>
-      <p className={muted}>Один код открывает сессию на этой странице: 15 минут, скользящие, потолок 1 час. Рутину (одобрить версию, открыть окно, принять расхождение, одобрить скилл, принять эталон) она покрывает без кода; опасное — всегда со свежим кодом. Перезагрузка страницы закрывает сессию.</p>
+      <p className={muted}>Одно {ov.guard ? "касание (или код)" : "подтверждение кодом"} открывает сессию на этой странице: 15 минут, скользящие, потолок 1 час. Рутину (одобрить версию, пакет, открыть окно, принять расхождение, одобрить скилл) она покрывает без {ov.guard ? "касания" : "кода"}; опасное — снятие блока, ослабление режима, добавление источника, расширение политики — всегда со свежим {ov.guard ? "касанием" : "кодом"}. {ov.guard ? "Токен живёт только в памяти этой страницы, у сторожа остаётся его хеш. " : ""}Перезагрузка страницы закрывает сессию.</p>
       {blockers.length > 0 ? (
         <p className="mt-2 text-red-600">Сессию нельзя открыть, пока работают сторонние плагины: их код интерфейса в той же странице мог бы перехватить токен. Выключите: {blockers.join(", ")}.</p>
       ) : null}
       <div className="mt-2 flex flex-wrap items-center gap-2">
-        <CodeField value={code} onChange={setCode} />
-        <button className={btn} disabled={act.busy || code.length !== 6 || blockers.length > 0 || ov.totp.blockedUntil > 0} onClick={() => void act.run(async () => { await open(code); setCode(""); })}>
+        <ProofField proof={proof} />
+        <button className={btn} disabled={act.busy || !proof.ready() || blockers.length > 0 || blocked} onClick={() => void act.run(async () => { await proof.run({ kind: "session.open" }, (p) => open(p as { code?: string; passkey?: PasskeyAssertion })); })}>
           Открыть сессию
         </button>
       </div>
+      <ProofNotes proof={proof} />
       <Msg error={act.error} />
     </div>
   );
@@ -299,11 +300,10 @@ function SessionBar({ ov, session, open, lock }: { ov: Overview; session: Sessio
 /** "Approve the selected": the list is fixed on the server and shown with its hash BEFORE the code; one code approves the whole list. */
 type BatchKindUi = "queue" | "skill" | "drift";
 function BatchCard({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; refetch: () => void }) {
-  const ap = useApproval();
   const [picked, setPicked] = useState<string[]>([]);
   const [prepared, setPrepared] = useState<Awaited<ReturnType<Rpc["call"]>> | null>(null);
   const [results, setResults] = useState<Array<{ kind: string; id: number; label: string; ok: boolean; note: string }> | null>(null);
-  const [code, setCode] = useState("");
+  const proof = useProof(ov, rpc);
   const act = useCodeAction(refetch);
   const registered = ov.totp.state === "locked" || ov.totp.state === "external";
   const candidates: Array<{ key: string; kind: BatchKindUi; id: number; label: string }> = [
@@ -314,13 +314,13 @@ function BatchCard({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; refetch: () =
   const prep = prepared as null | { batchId: string; setHash: string; expiresAt: number; items: Array<{ kind: string; id: number; label: string; detail: string }>; skipped: Array<{ kind: string; id: number; reason: string }> };
   if (candidates.length < 2 && !prep && !results) return null;
   const toggle = (k: string) => setPicked((cur) => (cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k]));
-  const reset = () => { setPrepared(null); setCode(""); };
+  const reset = () => { setPrepared(null); proof.setCode(""); };
   return (
     <div className={card}>
       <h3 className="font-semibold">Пакетное одобрение</h3>
       {!prep ? (
         <>
-          <p className={muted}>Отметьте, что одобрить разом: один код на весь список. Список фиксируется на сервере до ввода кода; элементы с блоком проверок в пакет не входят.</p>
+          <p className={muted}>Отметьте, что одобрить разом: одно {ov.guard ? "касание" : "подтверждение"} на весь список. Список фиксируется {ov.guard ? "у сторожа" : "на сервере"} до касания; элементы с блоком проверок в пакет не входят.</p>
           <ul className="mt-2 space-y-1">
             {candidates.map((c) => (
               <li key={c.key}><label className="flex items-center gap-2"><input type="checkbox" checked={picked.includes(c.key)} onChange={() => toggle(c.key)} /> {c.label} <span className={`text-xs ${muted}`}>#{c.id}</span></label></li>
@@ -349,11 +349,12 @@ function BatchCard({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; refetch: () =
               <ul className="list-disc pl-5 text-xs">{prep.skipped.map((i) => <li key={`${i.kind}${i.id}`}>{i.kind} #{i.id}: {i.reason}</li>)}</ul>
             </div>
           ) : null}
-          <p className={`mt-1 text-xs ${muted}`}>Список действует 10 минут и одобряется один раз. Если что-то изменится до ввода кода, это не будет одобрено.</p>
+          <p className={`mt-1 text-xs ${muted}`}>Список действует 10 минут и одобряется один раз. Если что-то изменится до касания, это не будет одобрено.</p>
           <div className="mt-2 flex flex-wrap items-center gap-2">
-            <RoutineCode value={code} onChange={setCode} />
-            <button className={btnPrimary} disabled={act.busy || !ap.ready(code)} onClick={() => void act.run(async () => {
-              const r = await ap.routine(code, (proof) => rpc.call("batch.approve", { batchId: prep.batchId, setHash: prep.setHash, ...proof }));
+            <ProofField proof={proof} routine />
+            <button className={btnPrimary} disabled={act.busy || !proof.ready({ routine: true })} onClick={() => void act.run(async () => {
+              // One touch for the whole list: the touch is for this list's id and hash (the guard holds the list), never for items.
+              const r = await proof.run({ kind: "batch.approve", batchId: prep.batchId, setHash: prep.setHash }, (p) => rpc.call("batch.approve", { batchId: prep.batchId, setHash: prep.setHash, ...p } as never), { routine: true });
               setResults(r.results);
               setPicked([]);
               reset();
@@ -363,6 +364,7 @@ function BatchCard({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; refetch: () =
             </button>
             <button className={btn} onClick={reset}>Отмена</button>
           </div>
+          <ProofNotes proof={proof} />
         </>
       )}
       {results ? <ul className="mt-2 list-disc pl-5 text-xs">{results.map((r) => <li key={`${r.kind}${r.id}`} className={r.ok ? muted : "text-red-600"}>{r.label}: {r.ok ? "одобрено" : "не одобрено"} — {r.note}</li>)}</ul> : null}
@@ -2081,9 +2083,12 @@ function useProof(ov: Overview, rpc: Rpc): ProofHook {
   const [code, setCode] = useState("");
   const [touching, setTouching] = useState<string | null>(null);
   const registered = ov.totp.state === "locked" || ov.totp.state === "external";
-  const ready: ProofHook["ready"] = (o = {}) => registered && (pk.has ? pk.problem === null || code.length === 6 : o.routine ? ap.ready(code, o.dangerous) : code.length === 6);
+  // An open session covers a routine action: no touch and no code (with a key too). The dangerous kind of an action never uses it.
+  const viaSession = (o: { routine?: boolean; dangerous?: boolean }): boolean => o.routine === true && o.dangerous !== true && ap.session !== null && code.length !== 6;
+  const ready: ProofHook["ready"] = (o = {}) => registered && (viaSession(o) ? true : pk.has ? pk.problem === null || code.length === 6 : o.routine ? ap.ready(code, o.dangerous) : code.length === 6);
   const run: ProofHook["run"] = async (query, call, o = {}) => {
     try {
+      if (viaSession(o)) return await ap.routine(code, (p) => call(p as AnyProof), o.dangerous);
       if (pk.has && code.length !== 6) {
         setTouching(null);
         const t = await touchFor(rpc, query, setTouching);
@@ -2103,8 +2108,9 @@ function ProofField({ proof, routine, dangerous }: { proof: ProofHook; routine?:
   const ap = useApproval();
   return (
     <>
-      {proof.pk.has ? <span className={muted}>касание или код:</span> : null}
-      {proof.pk.keyOnly ? null : routine && !proof.pk.has ? <RoutineCode value={proof.code} onChange={proof.setCode} dangerous={dangerous} /> : ap.session && routine && !dangerous && !proof.pk.has ? null : <CodeField value={proof.code} onChange={proof.setCode} />}
+      {ap.session && routine && !dangerous ? <span className={`text-xs ${muted}`}>сессия открыта: {proof.pk.has ? "касание и код" : "код"} не нужен</span> : null}
+      {ap.session && routine && !dangerous ? null : proof.pk.has ? <span className={muted}>касание или код:</span> : null}
+      {ap.session && routine && !dangerous ? null : proof.pk.keyOnly ? null : routine && !proof.pk.has ? <RoutineCode value={proof.code} onChange={proof.setCode} dangerous={dangerous} /> : <CodeField value={proof.code} onChange={proof.setCode} />}
       {!proof.registered ? <span className={muted}>сначала зарегистрируйте второй фактор</span> : null}
     </>
   );
@@ -2125,6 +2131,20 @@ const statusStyle = {
   down: "border-red-600 bg-red-50 text-red-950 dark:border-red-500 dark:bg-red-950/40 dark:text-red-100",
 } as const;
 const cardYellow = "rounded-lg border-2 border-yellow-500 bg-yellow-50 p-4 text-sm text-yellow-950 dark:border-yellow-500 dark:bg-yellow-950/30 dark:text-yellow-50";
+
+/** Troubleshooting mode of the guard (switched on at its console): everything passes, every decision is written down; red, with the time left. */
+function TroubleshootBar({ until }: { until: number }) {
+  const now = useNow();
+  if (until <= 0 || until <= now) return null;
+  const left = Math.max(0, Math.ceil((until - now) / 1000));
+  const mmss = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
+  return (
+    <div className="rounded-lg border-2 border-red-600 bg-red-600 p-4 text-white" role="alert" data-secure-bb-troubleshoot>
+      <p className="text-lg font-semibold">Режим отладки сторожа: защита снята, осталось {mmss}</p>
+      <p className="text-sm">Сторож пропускает всё и пишет каждое решение в журнал. Он вернётся сам; раньше — командой «sbb-guard troubleshoot off» на этой машине. Не ставьте и не обновляйте ничего лишнего, пока плашка видна.</p>
+    </div>
+  );
+}
 
 function StatusBar({ level, label, text, onShow }: { level: keyof typeof statusStyle; label: string; text: string | null; onShow: (() => void) | null }) {
   return (
@@ -2246,17 +2266,12 @@ function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onTrustPending }: 
               {trustEntry ? (
                 <button
                   className={btn}
-                  disabled={act.busy || blockedApprove}
+                  disabled={act.busy || blockedApprove || q.id < 0}
+                  title="Одна операция сторожа: одобрить версию и добавить источник. Одно касание."
                   onClick={() =>
                     void act.run(async () => {
-                      const r = await approve(false);
-                      try {
-                        await proof.run({ kind: "trust.add", entries: [trustEntry] }, (p) => rpc.call("trust.add", { entries: [trustEntry], ...p } as never));
-                      } catch {
-                        onTrustPending(trustEntry, ux?.sourceLabel ?? trustEntry);
-                        return { note: `${r.note}. Источник пока не добавлен: подтвердите это отдельно вверху страницы.` };
-                      }
-                      return { note: `${r.note}. Источник добавлен в «мои источники»: новые версии из него идут без вопросов, пока плагин не попросит новых прав.` };
+                      const r = (await proof.run({ kind: "approve.trust", queueId: q.id }, (p) => rpc.call("queue.approveTrust", { id: q.id, ...p } as never))) as { note: string };
+                      return { note: `${r.note}. Новые версии из этого источника идут без вопросов, пока плагин не попросит новых прав.` };
                     })
                   }
                 >
@@ -2377,6 +2392,11 @@ function QuarantineRow({ q, ov, rpc, refetch, onTrustPending, onShowCard }: { q:
   const unsafeDir = q.reason?.startsWith("каталог доступен на запись другим") ?? false;
   const approve = () => proof.run({ kind: "approve", queueId: q.id, acknowledgeBlock: false }, (p) => rpc.call("queue.approve", { id: q.id, ...p, acknowledgeBlock: false } as never), { routine: true });
   const entry = ux?.entry ?? null;
+  // «Вернуть и доверять»: ONE operation at the guard (the version and its source), so ONE touch — never a session (adding a source is always a fresh touch).
+  const approveAndTrust = async () => {
+    const r = (await proof.run({ kind: "approve.trust", queueId: q.id }, (p) => rpc.call("queue.approveTrust", { id: q.id, ...p } as never))) as { note: string };
+    return { note: r.note };
+  };
   return (
     <div className={red ? cardBlocked : card} id={`sbb-quarantine-${q.id}`}>
       <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -2400,25 +2420,15 @@ function QuarantineRow({ q, ov, rpc, refetch, onTrustPending, onShowCard }: { q:
             {entry ? (
               <button
                 className={btn}
-                disabled={act.busy || unsafeDir || !proof.ready({ routine: true })}
-                onClick={() =>
-                  void act.run(async () => {
-                    const r = await approve();
-                    try {
-                      await proof.run({ kind: "trust.add", entries: [entry] }, (p) => rpc.call("trust.add", { entries: [entry], ...p } as never));
-                    } catch {
-                      onTrustPending(entry, ux?.sourceLabel ?? entry);
-                      return { note: `${r.note}. Источник пока не добавлен: подтвердите это отдельно вверху страницы.` };
-                    }
-                    return { note: `${r.note}. Источник добавлен в «мои источники».` };
-                  })
-                }
+                disabled={act.busy || unsafeDir || !proof.ready()}
+                title="Одна операция сторожа: одобрить версию и добавить источник. Одно касание."
+                onClick={() => void act.run(() => approveAndTrust())}
               >
                 Вернуть и доверять этому источнику
               </button>
             ) : null}
           </div>
-          <p className={`mt-1 text-xs ${muted}`}>{entry ? "«Доверять этому источнику»: новые версии — без вопросов, пока плагин не попросит новых прав. Нужно второе касание." : "Источник нельзя занести в «мои источники» (не github и не папка на диске), поэтому вернуть можно только эту версию."}</p>
+          <p className={`mt-1 text-xs ${muted}`}>{entry ? "«Вернуть и доверять этому источнику»: версия возвращается и источник попадает в «мои источники» одним касанием; новые версии — без вопросов, пока плагин не попросит новых прав." : "Источник нельзя занести в «мои источники» (не github и не папка на диске), поэтому вернуть можно только эту версию."}</p>
         </>
       )}
       <ProofNotes proof={proof} />
@@ -2654,6 +2664,7 @@ function GatePage() {
   if (ov.agents && ((ov.agents.state?.alarms ?? []).length > 0 || (ov.agents.state?.drifts ?? []).some((d) => d.class === "critical" && !d.initial))) alarms.push({ anchor: "sbb-agents", tab: "more", text: "Тревога наблюдателя за агентами" });
   if (ov.watch.drifts.some((d) => d.status === "open" || d.status === "rollback-failed")) alarms.push({ anchor: "sbb-watch", tab: "more", text: "Настройки bb изменились" });
   if (!registered) alarms.push({ anchor: "sbb-registration", tab: "more", text: "Второй фактор не настроен" });
+  if ((ov.guard?.troubleshootUntil ?? 0) > ov.now) alarms.push({ anchor: "sbb-guard-alarm", tab: "status", text: "Включён режим отладки сторожа: он пропускает всё" });
   const guardDown = ov.guard !== undefined && !ov.guard.connected;
   const status = pageStatus({ guardDown, red: reds.map(refOf), yellow: yellows.map(refOf), alarms });
   const showProblem = (p: ProblemRef) => {
@@ -2682,6 +2693,7 @@ function GatePage() {
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-3xl space-y-6 p-4 sm:p-6">
         <h1 className="text-xl font-semibold">secure-bb</h1>
+        <TroubleshootBar until={ov.guard?.troubleshootUntil ?? 0} />
         <StatusBar level={status.level} label={status.label} text={guardDown ? GUARD_DOWN_TEXT : status.first ? `Сначала: ${status.first.text}.` : "Всё, что нужно решить, решено."} onShow={status.first ? () => showProblem(status.first!) : null} />
         <div role="tablist" className="flex flex-wrap gap-1 border-b border-border">
           {(["status", "quarantine", "trust", "more"] as const).map((t) => (
@@ -2695,9 +2707,12 @@ function GatePage() {
             {!wizardDone && wizardNeeded({ hasTrust: ov.guard?.trust != null, mySources: ov.guard?.trust?.mySources.length ?? 0, done: false }) ? <Wizard ov={ov} rpc={rpc} refetch={refetch} onClose={closeWizard} /> : null}
             <PendingTrust entries={pending} ov={ov} rpc={rpc} refetch={refetch} onDone={(e) => setPending((p) => p.filter((x) => x.entry !== e))} />
             <AwayCard ov={ov} since={since} onSeen={seen} canReview={status.first !== null} onReview={() => status.first && showProblem(status.first)} />
-            <SessionBar ov={ov} session={approval.session} open={open} lock={lock} />
+            <SessionBar ov={ov} rpc={rpc} session={approval.session} open={open} lock={lock} />
             {ov.totp.blockedUntil > 0 ? (
-              <p className="rounded-md border border-destructive p-2 text-destructive">Слишком много неверных кодов: одобрения заблокированы до {when(ov.totp.blockedUntil)}.</p>
+              <p className="rounded-md border border-destructive p-2 text-destructive">Слишком много неверных кодов: коды заблокированы до {when(ov.totp.blockedUntil)}.{(ov.guard?.passkey?.keys.length ?? 0) > 0 ? " Касание ключом работает: подпись не подобрать, поэтому её это не касается." : ""}</p>
+            ) : null}
+            {(ov.guard?.passkeyBlockedUntil ?? 0) > ov.now ? (
+              <p className="rounded-md border border-destructive p-2 text-destructive">Слишком много неверных подписей подряд: касания ключом на паузе до {when(ov.guard!.passkeyBlockedUntil)}. Код работает.</p>
             ) : null}
             <div id="sbb-alarms" className="space-y-2">
               <JournalAlarm ov={ov} rpc={rpc} refetch={refetch} />

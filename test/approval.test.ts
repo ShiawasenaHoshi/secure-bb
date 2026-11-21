@@ -33,6 +33,7 @@ const EXPECTED: Record<string, RpcGroup> = {
   "batch.approve": "routine",
   // dangerous (doc §1: политика, снять блок, выключить защиту/откат, доверенные репозитории/источники, провайдер/адрес, регистрация)
   "session.open": "dangerous",
+  "queue.approveTrust": "dangerous",
   "totp.confirm": "dangerous",
   "trusted.set": "dangerous",
   "skills.trusted": "dangerous",

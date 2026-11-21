@@ -145,6 +145,27 @@ export const MIGRATIONS: string[] = [
   `ALTER TABLE queue ADD COLUMN rights TEXT`,
   `ALTER TABLE queue ADD COLUMN note TEXT`,
   `CREATE INDEX approvals_baseline ON approvals (plugin_id, source_id)`,
+  // UX v1, PR 3. Wrong codes and wrong signatures are counted apart (a signature cannot be guessed, so a process that spams wrong ones must not
+  // be able to take the owner's codes, and the other way round): `kind` is 'code' (codes and session tokens) or 'passkey'.
+  `ALTER TABLE attempts ADD COLUMN kind TEXT NOT NULL DEFAULT 'code'`,
+  // Approval sessions: one touch opens one; only the SHA-256 of its token is kept here (the token lives in the memory of the page).
+  `CREATE TABLE sessions (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     token_hash TEXT NOT NULL UNIQUE,
+     opened_at INTEGER NOT NULL,
+     expires_at INTEGER NOT NULL,
+     hard_expires_at INTEGER NOT NULL,
+     closed_at INTEGER,
+     closed_reason TEXT,
+     uses INTEGER NOT NULL DEFAULT 0)`,
+  // A list for one touch, fixed here BEFORE the touch: the touch names only the list's id and hash, never its items.
+  `CREATE TABLE batches (
+     id TEXT PRIMARY KEY,
+     set_hash TEXT NOT NULL,
+     items TEXT NOT NULL,
+     created_at INTEGER NOT NULL,
+     expires_at INTEGER NOT NULL,
+     used_at INTEGER)`,
 ];
 
 export function openDb(path: string): DatabaseSync {

@@ -243,7 +243,7 @@ describe("policy and other RPCs with a touch", () => {
     expect((await h.rpc<any>("overview")).trusted ?? null).not.toBeUndefined();
   });
 
-  it("a wrong signature through the plugin is the guard's wrong code: the same counter", { timeout: 30_000 }, async () => {
+  it("wrong signatures through the plugin and wrong codes are counted apart: neither blocks the other", { timeout: 30_000 }, async () => {
     g = await startGuardOnDate();
     const h = await bootPlugin(g.paths.socket);
     const auth = new SoftAuthenticator();
@@ -253,9 +253,15 @@ describe("policy and other RPCs with a touch", () => {
       await expect(h.rpc("trusted.set", { add: "octo/x", passkey: auth.get(c.challenge, { corrupt: true }) })).rejects.toThrow();
     }
     await expect(h.rpc("trusted.set", { add: "octo/x", code: "000000" })).rejects.toThrow();
+    // five failures in all, but on two counters: the genuine touch goes through
     const c = await h.rpc<any>("passkey.challenge", { kind: "touch", purpose: "trusted.set" });
-    await expect(h.rpc("trusted.set", { add: "octo/x", passkey: auth.get(c.challenge) })).rejects.toThrow(/blocked|too many/i);
+    await h.rpc("trusted.set", { add: "octo/x", passkey: auth.get(c.challenge) });
+    expect((await ov(h)).totp.blockedUntil).toBe(0);
+    // four more wrong codes block codes — and the passkey still works
+    for (let i = 0; i < 4; i++) await expect(h.rpc("trusted.set", { add: "octo/y", code: "000000" })).rejects.toThrow();
     expect((await ov(h)).totp.blockedUntil).toBeGreaterThan(Date.now());
+    const c2 = await h.rpc<any>("passkey.challenge", { kind: "touch", purpose: "trusted.set" });
+    await h.rpc("trusted.set", { add: "octo/z", passkey: auth.get(c2.challenge) });
   });
 });
 
