@@ -299,6 +299,8 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
         lastSeen: g.lastSeen,
       });
     }
+    // Versions that loaded without the core's hash: kept here (the guard cannot be asked about them), yellow, with their own plain reason.
+    for (const lq of d.store.listQueue(50)) if (lq.kind === "afterfact" && lq.status === "held" && lq.contentHash === null) queue.push({ ...lq, id: -lq.id });
     for (const lq of d.store.listQueue(50)) {
       if (lq.kind !== "proposal" || lq.status !== "held" || lq.contentHash !== null || lq.proposalId === null) continue;
       const p = d.store.getProposal(lq.proposalId);

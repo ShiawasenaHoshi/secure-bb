@@ -24,7 +24,7 @@ import { mintListProof } from "./src/approval.js";
 import { realpath } from "node:fs/promises";
 import { BatchService, type BatchSource, type GuardBatch } from "./src/batch.js";
 import type { Proof } from "./src/approval.js";
-import { AfterFactScanner } from "./src/afterfact.js";
+import { AfterFactScanner, NO_CORE_HASH_REASON } from "./src/afterfact.js";
 import { bbSkillSource } from "./src/skills/bb-source.js";
 import { SkillError, SkillGuard } from "./src/skills/guard.js";
 import { SkillReader } from "./src/skills/reader.js";
@@ -236,8 +236,15 @@ export default async function plugin(bb: BbPluginApi) {
   const hookSeen = new Set<string>();
   try {
     bb.experimental_hooks.on("plugin.activate", (ctx) => {
-      hookSeen.add((ctx as HookCtx).pluginId);
-      return gate.decide(ctx as HookCtx);
+      const c = ctx as HookCtx;
+      hookSeen.add(c.pluginId);
+      // The core's own hash of what it loads: kept (it survives a restart) so that «after the fact» can ask the guard about THIS hash.
+      try {
+        store.setMeta(`corehash:${c.pluginId}`, JSON.stringify({ version: c.version, hash: c.contentHash }));
+      } catch {
+        /* a convenience for the scanner; the decision below does not depend on it */
+      }
+      return gate.decide(c);
     });
     hookRegistered = true;
     bb.log.info("plugin.activate hook registered: gating before load (confirmed per plugin when the core asks about it)");
@@ -397,6 +404,25 @@ export default async function plugin(bb: BbPluginApi) {
     // asked about by the hook since this start, or approved earlier (the plugin was reloaded and the in-memory set is empty)
     vetted: (id) => hookRegistered && (hookSeen.has(id) || store.latestApproval(id) !== null),
     onUnvetted: (ids) => declareHookDead(ids),
+    ...(guardLink
+      ? {
+          guard: {
+            coreHash: (id: string, version: string) => {
+              try {
+                const j = JSON.parse(store.getMeta(`corehash:${id}`) ?? "null") as { version?: unknown; hash?: unknown } | null;
+                return j && j.version === version && typeof j.hash === "string" && j.hash.startsWith("sha256:") ? j.hash : null;
+              } catch {
+                return null;
+              }
+            },
+            guardApproved: async (id: string, hash: string) => (await guardLink.lookup(id, hash)).approved,
+            noCoreHash: (p: InstalledPluginLite) => {
+              store.upsertQueue({ kind: "afterfact", contentHash: null, pluginId: p.id, version: p.version, source: p.source, sourceKind: p.source.split(":")[0] ?? "path", rootDir: p.rootDir, gitCommit: null, npmIntegrity: null, trigger: "afterfact", threadId: null, proposalId: null, reason: NO_CORE_HASH_REASON });
+              store.log("afterfact.nohash", p.id, null, { version: p.version, note: "the core's hash is unknown; nothing was sent to the guard" });
+            },
+          },
+        }
+      : {}),
   });
 
   // ---- approving a held version (one code, a session, or one code for a whole list) ----------------------------------
