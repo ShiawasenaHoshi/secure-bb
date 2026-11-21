@@ -18,6 +18,8 @@ export interface PolicyForm {
   cfgWindowMin: string;
   cfgCapMin: string;
   cfgMode: "sliding" | "fixed";
+  /** `flow.downgrade`: «никуда не отправляет» lowers the level of a card. */
+  flowDowngrade?: boolean;
 }
 
 /** The policy change from the form: no `autoSafe` key when it is undefined (guard mode). */
@@ -31,6 +33,7 @@ export function buildPolicyChange(f: PolicyForm) {
     cfgWindowMin: Number(f.cfgWindowMin),
     cfgCapMin: Number(f.cfgCapMin),
     cfgMode: f.cfgMode,
+    flowDowngrade: f.flowDowngrade,
   });
 }
 

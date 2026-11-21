@@ -1330,12 +1330,14 @@ function PolicyCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof
   const [cfgCapMin, setCfgCapMin] = useState(String(p.cfgCapMin));
   const [cfgMode, setCfgMode] = useState<"sliding" | "fixed">(p.cfgMode);
   const [autoSafe, setAutoSafe] = useState(p.autoSafe);
+  const [flowDowngrade, setFlowDowngrade] = useState(p.flowDowngrade);
   const [code, setCode] = useState("");
   const act = useCodeAction(refetch);
   const pk = usePasskey(ov);
   const [touching, setTouching] = useState<string | null>(null);
   useEffect(() => {
     setAutoSafe(p.autoSafe);
+    setFlowDowngrade(p.flowDowngrade);
     setWindowMin(String(p.windowMin));
     setCapMin(String(p.capMin));
     setMode(p.mode);
@@ -1343,7 +1345,7 @@ function PolicyCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof
     setCfgWindowMin(String(p.cfgWindowMin));
     setCfgCapMin(String(p.cfgCapMin));
     setCfgMode(p.cfgMode);
-  }, [p.windowMin, p.capMin, p.mode, p.scope, p.cfgWindowMin, p.cfgCapMin, p.cfgMode, p.autoSafe]);
+  }, [p.windowMin, p.capMin, p.mode, p.scope, p.cfgWindowMin, p.cfgCapMin, p.cfgMode, p.autoSafe, p.flowDowngrade]);
   return (
     <div className={card}>
       <h3 className="font-semibold">Окна доверия: настройки</h3>
@@ -1380,6 +1382,11 @@ function PolicyCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof
           </select>
         </label>
       </div>
+      <label className="mt-3 flex items-start gap-2">
+        <input type="checkbox" className="mt-1" checked={flowDowngrade} onChange={(e) => setFlowDowngrade(e.target.checked)} />
+        <span>Снижать уровень карточки, если проверки не нашли, куда уходит прочитанное (<span className="font-mono">flow.downgrade</span>)</span>
+      </label>
+      <p className={`mt-1 ${muted}`}>Выключено: «по коду никуда не отправляет» говорится, но карточка плагина с сетью остаётся красной, как раньше. Включение ослабляет защиту — с кодом или касанием.</p>
       {ov.guard ? (
         <p className={`mt-3 ${muted}`}>Размер, потолок и режим окна хранит сторож (расширять — с кодом, он проверит его сам). Окно доверия нужно для плагинов не из «моих источников». Версия плагина из «моих источников» проходит и без окна, пока не просит новых прав; новое право и всё остальное ждёт вашего касания.</p>
       ) : (
@@ -1400,7 +1407,7 @@ function PolicyCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof
           onClick={() =>
             void act.run(async () => {
               // Guard mode has no "safe class passes": autoSafe is not sent there (bb rejects undefined fields in an RPC input).
-              const change = buildPolicyChange({ autoSafe: ov.guard ? undefined : autoSafe, windowMin, capMin, mode, scope, cfgWindowMin, cfgCapMin, cfgMode });
+              const change = buildPolicyChange({ autoSafe: ov.guard ? undefined : autoSafe, windowMin, capMin, mode, scope, cfgWindowMin, cfgCapMin, cfgMode, flowDowngrade });
               // With a key and no code typed: the touch (if the change widens anything; a narrowing needs none).
               const t = pk.has && code.length !== 6 ? await touchFor(rpc, buildPolicyTouchQuery(change), (d) => setTouching(`Подтвердите касанием. Сторож: «${d}»`)) : null;
               await rpc.call("policy.set", buildPolicySetInput(change, t ? { passkey: t.passkey } : code.length === 6 ? { code } : {}) as never);
@@ -2576,7 +2583,7 @@ function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onKeep, onTrustPen
     proof.run({ kind: "approve", queueId: q.id, acknowledgeBlock }, (p) => rpc.call("queue.approve", { id: q.id, ...p, acknowledgeBlock } as never), { routine: true, dangerous: acknowledgeBlock });
   // A version the guard has no record of (it loaded without the guard's check): nothing here can approve it, and a green «можно включить» would be a lie.
   const noRecord = hasNoGuardRecord(q);
-  const risk = noRecord ? { level: "caution" as const, text: NO_RECORD_HEADLINE } : riskHeadline(caps, (found?.findings ?? []).filter((f) => f.severity === "review").map((f) => f.rule));
+  const risk = noRecord ? { level: "caution" as const, text: NO_RECORD_HEADLINE } : riskHeadline(caps, (found?.findings ?? []).filter((f) => f.severity === "review").map((f) => f.rule), { downgrade: ov.policy.flowDowngrade });
   const allowedWhat = enabledWhat(q.pluginId, q.version);
   const verb = approveVerb(risk);
   const configNote = agentConfigNote(found?.findings ?? []);

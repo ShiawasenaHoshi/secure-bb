@@ -119,7 +119,7 @@ const TIMERS = new Set(["setTimeout", "setInterval", "setImmediate", "queueMicro
 const EMIT_METHODS = new Set(["emit", "dispatchEvent", "postMessage", "publish", "broadcast"]);
 const LISTEN_METHODS = new Set(["on", "once", "addListener", "addEventListener", "prependListener", "prependOnceListener", "subscribe", "onmessage"]);
 /** Calls the analysis does not resolve that cannot carry a choice out: a sound player, a timer's handle, a clock. A list, not a guess: anything else under a branch on what was read is «не видно». */
-const BENIGN_UNRESOLVED = /^(Audio|play|pause|load|unref|ref|timeout|now|hasOwnProperty|(Object\.prototype\.)?hasOwnProperty\.call|getTime|performance\.now|AbortSignal\.timeout|AbortSignal\.any|onDispose|bb\.onDispose)$/;
+const BENIGN_UNRESOLVED = /(^|\.)(Audio|play|pause|load|unref|ref|timeout|now|hasOwnProperty|(Object\.prototype\.)?hasOwnProperty\.call|getTime|performance\.now|AbortSignal\.timeout|AbortSignal\.any|onDispose|bb\.onDispose|close|focus|blur|hasFocus|Notification|locks\.request|settings\.(define|get|onChange)|onChange)$/;
 const TIMER_CLEARS = new Set(["clearTimeout", "clearInterval", "clearImmediate", "cancelAnimationFrame", "cancelIdleCallback"]);
 /** Methods of strings, arrays, maps and promises: the result is made of the receiver and the arguments. */
 const PURE_METHODS = new Set(["toString", "toJSON", "toLowerCase", "toUpperCase", "toLocaleLowerCase", "toLocaleUpperCase", "trim", "trimStart", "trimEnd", "padStart", "padEnd", "slice", "substring", "substr", "split", "join", "concat", "replace", "replaceAll", "match", "matchAll", "normalize", "repeat", "charAt", "charCodeAt", "codePointAt", "indexOf", "lastIndexOf", "includes", "startsWith", "endsWith", "localeCompare", "at", "flat", "reverse", "toSorted", "toReversed", "toSpliced", "with", "test", "exec", "toFixed", "toISOString", "toLocaleString", "toLocaleDateString", "toLocaleTimeString", "getTime", "valueOf", "has", "hasOwnProperty", "isArray", "keys", "entries", "values", "get", "set", "add", "delete", "clear", "push", "pop", "shift", "unshift", "splice", "fill", "copyWithin", "next", "return", "bind", "encode", "decode", "toBase64", "readUInt8", "writeUInt8", "subarray", "update", "digest", "format", "resolve", "reject", "all", "allSettled", "race", "any", "from", "of", "assign", "freeze", "create", "entries", "fromEntries", "stringify", "parse", "defineProperty", "getPrototypeOf", "isFrozen", "min", "max", "floor", "ceil", "round", "abs", "random", "pow", "sqrt", "now", "UTC", "parseISO", "dirname", "basename", "extname", "join", "normalize", "relative", "isAbsolute", "sep", "fileURLToPath", "pathToFileURL", "homedir", "tmpdir", "hostname", "platform", "arch", "cwd", "uptime", "randomUUID", "randomBytes", "createHash", "createHmac", "timingSafeEqual", "on", "once", "off", "addEventListener", "removeEventListener", "json", "text", "blob", "arrayBuffer", "formData", "clone", "abort"]);
@@ -264,6 +264,9 @@ class Engine {
     } finally {
       this.ctl = saved;
     }
+  }
+  private excChoice(): string[] {
+    return [...this.cell(EXC_CELL)].filter((x) => x.startsWith("k:"));
   }
   private ctlV(v: Set<string>): Set<string> {
     return this.ctl.size > 0 ? new Set([...v, ...this.ctl]) : v;
@@ -566,7 +569,7 @@ class Engine {
     visit(root);
     return out;
   }
-  private foldPrefix(n0: N, file: FileCtx): { text: string; complete: boolean } {
+  private foldPrefix(n0: N, file: FileCtx, depth = 0): { text: string; complete: boolean } {
     const n = unwrap(n0);
     const whole = n ? fold(n, file.consts) : null;
     if (whole !== null) return { text: whole, complete: true };
@@ -588,10 +591,33 @@ class Engine {
       return { text, complete: true };
     }
     if (n.type === "BinaryExpression" && n.operator === "+") {
-      const l = this.foldPrefix(n.left, file);
+      const l = this.foldPrefix(n.left, file, depth);
       if (!l.complete) return l;
-      const r = this.foldPrefix(n.right, file);
+      const r = this.foldPrefix(n.right, file, depth);
       return { text: l.text + r.text, complete: r.complete };
+    }
+    // `rendererHttpUrl(id, path)`: the text a function of this file builds is what its single `return` says (its parameters are not known)
+    if (n.type === "CallExpression" && unwrap(n.callee).type === "Identifier" && depth < 3) {
+      const name = unwrap(n.callee).name as string;
+      let fnNode = this.fnDeclByName(file, name) ?? (isFnNode(file.inits.get(name)) ? file.inits.get(name) : null);
+      // imported: the only function of that name among the plugin's own files
+      if (!fnNode) {
+        const same = this.fns.filter((f) => f.node.type === "FunctionDeclaration" && f.node.id?.name === name);
+        if (same.length === 1) fnNode = same[0]!.node;
+      }
+      const fn = fnNode ? this.fnByNode.get(fnNode) : undefined;
+      if (fn) file = fn.file;
+      if (fn && fnNode.body.type !== "BlockStatement") return this.foldPrefix(fnNode.body, file, depth + 1);
+      if (fn) {
+        const rets: N[] = [];
+        const find = (x: N): void => {
+          if (!x || typeof x.type !== "string" || isFnNode(x)) return;
+          if (x.type === "ReturnStatement" && x.argument) rets.push(x.argument);
+          this.children(x, find);
+        };
+        find(fnNode.body);
+        if (rets.length === 1) return this.foldPrefix(rets[0], file, depth + 1);
+      }
     }
     if (n.type === "NewExpression" && n.callee.type === "Identifier" && n.callee.name === "URL" && n.arguments[0]) {
       const u = this.foldPrefix(n.arguments[0], file);
@@ -964,6 +990,8 @@ class Engine {
       case "AwaitExpression": {
         const v = n.argument || n.expression ? this.ev(n.argument ?? n.expression, sc) : new Set<string>();
         for (const x of v) if (x.startsWith("k:")) this.pendingK.add(x);
+        // the code after an `await` may not run if something before it threw
+        for (const x of this.excChoice()) this.pendingK.add(x);
         return v;
       }
       case "YieldExpression": {
@@ -1087,6 +1115,10 @@ class Engine {
       case "sessionStorage":
       case "indexedDB":
         return new Set(["x:db"]);
+      case "Notification":
+        return new Set(["x:notify"]);
+      case "BroadcastChannel":
+        return new Set(["x:chan"]);
       case "process":
         return new Set(["x:process"]);
       default:
@@ -1109,7 +1141,9 @@ class Engine {
     }
     const base = this.ev(n.object, sc);
     const name = this.propName(n, sc.file);
-    if (n.computed && name === null) this.ev(n.property, sc);
+    // `table[key]`, `list[i]`: which entry is read is a choice made by the key
+    const keyChoice = n.computed && name === null ? this.kOf(this.ev(n.property, sc)) : new Set<string>();
+    if (keyChoice.size > 0) return new Set([...this.member(base, name), ...keyChoice]);
     if (name !== null && THREAD_TEXT_FIELDS.has(name)) {
       this.source("threads", sc);
       return new Set([...this.member(base, name), "t:threads"]);
@@ -1251,6 +1285,14 @@ class Engine {
 
   // ---- calls -----------------------------------------------------------------------------------------------------------------------
   private evCall(n: N, sc: Scope, isNew: boolean): Set<string> {
+    const saved = this.ctl;
+    try {
+      return this.evCallInner(n, sc, isNew);
+    } finally {
+      this.ctl = saved;
+    }
+  }
+  private evCallInner(n: N, sc: Scope, isNew: boolean): Set<string> {
     const callee = unwrap(n.callee);
     const argNodes: N[] = n.arguments ?? [];
     const args: Array<Set<string>> = argNodes.map((a) => this.ev(a, sc));
@@ -1301,6 +1343,10 @@ class Engine {
 
     // ---- the value of the callee ----
     const calleeV = member ? this.member(recvV, methodName) : this.ev(callee, sc);
+    // `fns[bit]()`: the function itself was chosen by what was read, so the call, and all that runs inside it, is made by that choice
+    if (member && member.computed && methodName === null) for (const x of this.kOf(this.ev(member.property, sc))) calleeV.add(x);
+    const chosen = [...calleeV].filter((x) => x.startsWith("k:"));
+    if (chosen.length > 0) this.ctl = new Set([...this.ctl, ...chosen]);
     const thisV = member ? recvV : null;
     let handled = false;
 
@@ -1337,7 +1383,7 @@ class Engine {
         else for (const s of this.cell(`super:${id}`)) if (s.startsWith("c:")) for (const c of this.cell(`ctor:${s.slice(2)}`)) this.bindCall(c, args, [`o:${id}`], sc);
       } else if (t.startsWith("r:") && !isNew) {
         handled = true;
-        this.add(`res:${t}`, args.flatMap((a) => [...a]));
+        this.add(`res:${t}`, this.ctlV(new Set(args.flatMap((a) => [...a]))));
       }
     }
 
@@ -1456,8 +1502,9 @@ class Engine {
     }
     if (isNew && name === "Notification") {
       this.sink("notify", undefined, args, n, sc);
-      return out;
+      return new Set(["x:notify"]);
     }
+    if (isNew && name === "BroadcastChannel") return new Set(["x:chan"]);
     if (TIMER_CLEARS.has(name) && !isNew) return out;
     if (TIMERS.has(name) && !isNew) {
       // the delay is a choice made by what it was computed from, and what runs after it is called by that choice
@@ -1666,6 +1713,11 @@ class Engine {
         for (const f of args.flatMap((a) => this.tokens(a, "f:"))) this.bindCall(f, [], null, sc);
         return out;
       case "net": {
+        // `fetch` handed in as a value (`fetch: typeof fetch = globalThis.fetch`) called for the plugin's own route
+        if (method === null && !isNew && targetOf === "?" && this.isOwnRoute(argNodes[0], file)) {
+          this.add(R_CELL, args.flatMap((a) => [...this.labels(a)]));
+          return new Set(this.cell(R_CELL));
+        }
         if (method === null && !isNew && n.callee.type !== "Identifier") return null;
         if (method === "on" || method === "once" || method === "off" || method === "removeListener" || method === "close" || method === "destroy" || method === "abort" || method === "end" && args.length === 0 || method === "setHeader" && args.length === 0) {
           for (const f of args.flatMap((a) => this.tokens(a, "f:"))) this.bindCall(f, [], null, sc);
@@ -1740,6 +1792,16 @@ class Engine {
           return res;
         }
         return out;
+      }
+      case "notify": {
+        // the system's notifications, handed in or global: what is given to it is shown to the person
+        if (isNew || method === null) this.sink("notify", undefined, args, n, sc);
+        return new Set([x]);
+      }
+      case "chan": {
+        // a channel between the plugin's own tabs: the page of the plugin, not a way out of bb
+        if (method === "postMessage") this.sink("ui", undefined, args, n, sc);
+        return new Set([x]);
       }
       case "fsw": {
         if (method === "write" || method === "end") {
@@ -1862,7 +1924,7 @@ class Engine {
         return true;
       }
       if (method === "then" || method === "catch" || method === "finally") {
-        for (const f of cbs) this.add(`ctx:${f.slice(2)}`, [...recvV].filter((x) => x.startsWith("k:")));
+        for (const f of cbs) this.add(`ctx:${f.slice(2)}`, [...[...recvV].filter((x) => x.startsWith("k:")), ...this.excChoice()]);
         for (const x of cbRet) out.add(x);
         if (method !== "then" || cbs.length === 0) for (const t of recvV) out.add(t);
         return true;
@@ -1870,6 +1932,8 @@ class Engine {
       if (method === "forEach" || method === "each") return true;
       if (method === "get" || method === "pop" || method === "shift" || method === "at" || method === "find" || method === "findLast" || method === "values" || method === "entries" || method === "next" || method === "keys" || method === "flat") {
         for (const x of elems) out.add(x);
+        // `map.get(key)`, `list.at(i)`: which entry is read is a choice made by the key
+        if (method === "get" || method === "at") for (const x of this.kOf(args[0] ?? [])) out.add(x);
         if (method === "values" || method === "entries" || method === "keys" || method === "flat") for (const t of recvV) if (t.startsWith("o:")) out.add(t);
         return true;
       }
@@ -1961,11 +2025,13 @@ class Engine {
       }
       case "TryStatement":
         this.exec(s.block, sc);
+        // what was thrown under a choice made by what was read: whoever catches it, and whoever runs after it, is run by that choice
+        const thrown = this.excChoice();
         if (s.handler) {
           if (s.handler.param) this.bindPattern(s.handler.param, new Set(this.cell(EXC_CELL)), sc);
-          this.exec(s.handler.body, sc);
+          this.under(thrown, () => this.exec(s.handler.body, sc));
         }
-        if (s.finalizer) this.exec(s.finalizer, sc);
+        if (s.finalizer) this.under(thrown, () => this.exec(s.finalizer, sc));
         return;
       case "LabeledStatement":
         this.exec(s.body, sc);

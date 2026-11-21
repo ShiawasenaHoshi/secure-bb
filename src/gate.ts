@@ -1144,7 +1144,8 @@ export class Gate {
       next.cfgWindowMin > cur.cfgWindowMin ||
       next.cfgCapMin > cur.cfgCapMin ||
       (next.cfgMode === "sliding" && cur.cfgMode === "fixed") ||
-      (next.autoSafe && !cur.autoSafe);
+      (next.autoSafe && !cur.autoSafe) ||
+      (next.flowDowngrade && !cur.flowDowngrade);
     if (widens) {
       if (code === undefined) throw new GateError("invalid_code", "widening the policy needs a code");
       this.touch("policy", code);

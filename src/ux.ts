@@ -1426,7 +1426,7 @@ export function uiClickLine(c: CapLike): { danger: boolean; text: string; phrase
   return { danger: false, text: "может нажимать элементы интерфейса bb", phrase: "нажимать элементы интерфейса bb за вас (какие именно — из кода видно не всегда)" };
 }
 /** The first line for a plugin that uses bb's own API or presses bb's buttons; null when it does neither. «Безопасно: только оформление» is never said of it. */
-export function sdkHeadline(caps: CapLike[]): Risk | null {
+export function sdkHeadline(caps: CapLike[], downgrade = false): Risk | null {
   const mine = SDK_LINES.filter((l) => caps.some((c) => c.kind === l.kind));
   if (mine.length === 0) return null;
   const click = caps.find((c) => c.kind === "ui_click");
@@ -1435,30 +1435,36 @@ export function sdkHeadline(caps: CapLike[]): Risk | null {
   // Where the conversations go, when the checks followed them: the line says it, and a plugin that has the network but does not send them there is not red for that.
   const flowOf = (kind: string): FlowLike | undefined => caps.find((c) => c.kind === kind)?.flow;
   const readsFlow = flowOf("sdk_read");
-  const readsKnown = readsFlow !== undefined && readsFlow.verdict !== "unknown";
+  const readsKnown = downgrade && readsFlow !== undefined && readsFlow.verdict !== "unknown";
   const danger = lines.some((l) => l.danger) || (lines.some((l) => l.kind === "sdk_read") && sendsOut && !readsKnown);
   const shown = lines.slice(0, 3).map((l) => {
     const f = l.kind === "sdk_read" || l.kind === "sdk_questions" ? flowOf(l.kind) : undefined;
     const why = l.kind === "sdk_read" ? (caps.find((c) => c.kind === "sdk_read")?.purpose ?? []) : [];
-    return f ? `${READS_PLAIN[l.kind] ?? l.text}${flowSuffix({ kind: l.kind, detail: [], flow: f, purpose: why }, false)}` : l.text;
+    if (!f) return l.text;
+    // The network is in the plugin and the level is not lowered: say what the code shows, and that the network is there
+    const netNote = sendsOut && f.verdict !== "unknown" && f.verdict !== "leaves" && !downgrade;
+    if (netNote && f.verdict === "nowhere") return `${READS_PLAIN[l.kind] ?? l.text} — по коду никуда не отправляет; сеть в плагине есть (для чего — см. подробности)${why.length > 0 ? ` — ${why.join("; ")}` : ""}`;
+    return `${READS_PLAIN[l.kind] ?? l.text}${flowSuffix({ kind: l.kind, detail: [], flow: f, purpose: why }, false)}${netNote ? "; сеть в плагине есть (для чего — см. подробности)" : ""}`;
   });
   const text = shown.join("; ") + (lines.length > 3 ? `; и ещё ${lines.length - 3}` : "");
   return { level: danger ? "danger" : "caution", text: text.charAt(0).toUpperCase() + text.slice(1) };
 }
-export function riskHeadline(caps: CapLike[], reviewRules: string[] = []): Risk {
+export function riskHeadline(caps: CapLike[], reviewRules: string[] = [], opts: { downgrade?: boolean } = {}): Risk {
+  const downgrade = opts.downgrade === true;
   const has = (k: string): CapLike | undefined => caps.find((c) => c.kind === k);
   // What was read and where it goes, red, first: the checks followed the data to the network, another program, a file outside, a message in the person's name.
   const leak = leakHeadline(caps);
   if (leak) {
     // The rest of what it can do follows the red line: starting agents, knowing the state of threads…
     const leaking = new Set(caps.filter((c) => c.flow?.verdict === "leaves" && READS_PLAIN[c.kind]).map((c) => c.kind));
-    const rest = sdkHeadline(caps.filter((c) => !leaking.has(c.kind)))?.text;
+    const rest = sdkHeadline(caps.filter((c) => !leaking.has(c.kind)), downgrade)?.text;
     return { level: "danger", text: rest ? `${leak}; ${rest.charAt(0).toLowerCase()}${rest.slice(1)}` : leak };
   }
   // Other programs' logins come first and are said outright: that is more than any variable of the environment. Red when the plugin can also send it out.
   const creds = has("credentials");
   if (creds) {
-    const known = creds.flow && creds.flow.verdict !== "unknown";
+    // «Никуда не отправляет» lowers the level only where the policy `flow.downgrade` says so (off: the analysis is not yet proven complete)
+    const known = downgrade && creds.flow && creds.flow.verdict !== "unknown";
     return { level: has("network") && !known ? "danger" : "caution", text: `Читает ваши учётные данные других программ: ${creds.detail.slice(0, 3).join(", ")}${creds.detail.length > 3 ? ", …" : ""}${creds.flow ? flowSuffix({ ...creds, purpose: [] }, false) : ""}` };
   }
   const env = has("env");
@@ -1470,7 +1476,7 @@ export function riskHeadline(caps: CapLike[], reviewRules: string[] = []): Risk 
   // «Ваши документы» only where the code reaches the person's own folders; files the code does not name are said as what they are: not known.
   if (fs && !(fs.paths && fs.paths.length > 0) && fs.detail.includes(FS_HOME)) return { level: "danger", text: "Может читать и менять ваши документы" };
   if (has("server_access") || has("builtin_rpc")) return { level: "danger", text: "Может управлять самим bb: аккаунтом, подключениями, инструкциями" };
-  const sdk = sdkHeadline(caps);
+  const sdk = sdkHeadline(caps, downgrade);
   if (sdk) return sdk;
   if (fs && fs.paths && fs.paths.length > 0) return { level: "caution", text: `Может читать и менять файлы: ${fs.paths.slice(0, 2).join(", ")}${fs.paths.length > 2 ? ", …" : ""}` };
   if (fs) return { level: "caution", text: "Работает с файлами (какими — из кода не видно)" };

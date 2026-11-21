@@ -720,7 +720,7 @@ export default async function plugin(bb: BbPluginApi) {
    * What a policy change means in guard mode. Window size, ceiling and mode are the guard's (widening needs a touch there); thread scope and the
    * configuration windows are this plugin's; "safe class passes without a touch" does not exist.
    */
-  const policyPlan = async (patch: { windowMin?: number; capMin?: number; mode?: "sliding" | "fixed"; scope?: "tree" | "thread"; cfgWindowMin?: number; cfgCapMin?: number; cfgMode?: "sliding" | "fixed"; autoSafe?: boolean }) => {
+  const policyPlan = async (patch: { windowMin?: number; capMin?: number; mode?: "sliding" | "fixed"; scope?: "tree" | "thread"; cfgWindowMin?: number; cfgCapMin?: number; cfgMode?: "sliding" | "fixed"; autoSafe?: boolean; flowDowngrade?: boolean }) => {
     if (patch.autoSafe === true) throw new GateError("invalid", "в режиме сторожа автопропуск безопасного класса не существует: каждое одобрение даёт человек");
     const cur = await needGuard().policy();
     const wanted: Partial<GuardPolicy> = {};
@@ -731,7 +731,7 @@ export default async function plugin(bb: BbPluginApi) {
     const { windowMin: _w, capMin: _c, mode: _m, autoSafe: _a, ...local } = patch;
     const cp = store.policy();
     const next = { ...cp, ...local };
-    const localWidens = (next.scope === "tree" && cp.scope === "thread") || next.cfgWindowMin > cp.cfgWindowMin || next.cfgCapMin > cp.cfgCapMin || (next.cfgMode === "sliding" && cp.cfgMode === "fixed");
+    const localWidens = (next.scope === "tree" && cp.scope === "thread") || next.cfgWindowMin > cp.cfgWindowMin || next.cfgCapMin > cp.cfgCapMin || (next.cfgMode === "sliding" && cp.cfgMode === "fixed") || (next.flowDowngrade && !cp.flowDowngrade);
     return { wanted, guardWidens, local, localWidens };
   };
 
