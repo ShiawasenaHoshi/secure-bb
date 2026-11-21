@@ -19,6 +19,7 @@ import { OUTCOME_LABEL, firedText, verdictText } from "./src/sentinel/view";
 import type { QuestionView } from "./src/sentinel/view";
 import type { FeedRow } from "./src/sentinel/types";
 import { T } from "./src/text";
+import { buildPolicyChange, buildPolicySetInput, buildPolicyTouchQuery, defined } from "./src/rpc-input";
 import { createCredential, getAssertion, originProblem, type CreationOptions } from "./src/webauthn";
 import type { PasskeyAssertion } from "./src/guardlink";
 
@@ -436,7 +437,7 @@ function PublishCard({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; refetch: ()
   useEffect(() => setBranch(cur.branch), [cur.branch]);
   const set = (patch: Record<string, unknown>) =>
     void act.run(async () => {
-      await rpc.call("publish.settings", { ...patch, ...(code.length === 6 ? { code } : {}) });
+      await rpc.call("publish.settings", defined({ ...patch, ...(code.length === 6 ? { code } : {}) }) as never);
       setCode("");
     });
   return (
@@ -499,7 +500,7 @@ function AiCard({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; refetch: () => v
   useEffect(() => setModel(ai.settings.secondModel), [ai.settings.secondModel]);
   const set = (patch: Record<string, unknown>) =>
     void act.run(async () => {
-      await rpc.call("ai.settings", { ...patch, ...(code.length === 6 ? { code } : {}) });
+      await rpc.call("ai.settings", defined({ ...patch, ...(code.length === 6 ? { code } : {}) }) as never);
       setCode("");
     });
   const box = (label: string, key: "enabled" | "autoFreeze" | "autoExternal" | "second", dependsOnModule = true) => (
@@ -562,7 +563,7 @@ function QuestionEditor({ q, rpc, refetch }: { q: QuestionView; rpc: Rpc; refetc
   const act = useCodeAction(refetch);
   useEffect(() => setText(q.instructions), [q.instructions]);
   useEffect(() => setThreshold(String(q.threshold ?? "")), [q.threshold]);
-  const save = (patch: Record<string, unknown>) => void act.run(async () => { await rpc.call("sentinel.settings", { ...patch, code }); setCode(""); return { note: "Сохранено." }; });
+  const save = (patch: Record<string, unknown>) => void act.run(async () => { await rpc.call("sentinel.settings", defined({ ...patch, code }) as never); setCode(""); return { note: "Сохранено." }; });
   return (
     <details className="rounded-md border border-border p-2">
       <summary className="cursor-pointer">{q.label}{q.threshold !== null ? ` · порог ${q.threshold}` : ""}{q.edited ? " · изменён" : ""}</summary>
@@ -589,7 +590,7 @@ function SentinelSection({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; refetch
   const v = ov.sentinel;
   const [code, setCode] = useState("");
   const act = useCodeAction(refetch);
-  const set = (patch: Record<string, unknown>) => void act.run(async () => { await rpc.call("sentinel.settings", { ...patch, code }); setCode(""); });
+  const set = (patch: Record<string, unknown>) => void act.run(async () => { await rpc.call("sentinel.settings", defined({ ...patch, code }) as never); setCode(""); });
   return (
     <div className="space-y-2">
       <div className={card}>
@@ -1201,10 +1202,11 @@ function PolicyCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof
           disabled={act.busy || (pk.has && pk.problem !== null && pk.keyOnly)}
           onClick={() =>
             void act.run(async () => {
-              const change = { autoSafe, windowMin: Number(windowMin), capMin: Number(capMin), mode, scope, cfgWindowMin: Number(cfgWindowMin), cfgCapMin: Number(cfgCapMin), cfgMode };
+              // Guard mode has no "safe class passes": autoSafe is not sent there (bb rejects undefined fields in an RPC input).
+              const change = buildPolicyChange({ autoSafe: ov.guard ? undefined : autoSafe, windowMin, capMin, mode, scope, cfgWindowMin, cfgCapMin, cfgMode });
               // With a key and no code typed: the touch (if the change widens anything; a narrowing needs none).
-              const t = pk.has && code.length !== 6 ? await touchFor(rpc, { kind: "policy", ...change, autoSafe: undefined }, (d) => setTouching(`Подтвердите касанием. Сторож: «${d}»`)) : null;
-              await rpc.call("policy.set", { ...change, ...(t ? { passkey: t.passkey } : code.length === 6 ? { code } : {}) });
+              const t = pk.has && code.length !== 6 ? await touchFor(rpc, buildPolicyTouchQuery(change), (d) => setTouching(`Подтвердите касанием. Сторож: «${d}»`)) : null;
+              await rpc.call("policy.set", buildPolicySetInput(change, t ? { passkey: t.passkey } : code.length === 6 ? { code } : {}) as never);
               setCode("");
               setTouching(null);
               return t ? { note: `Сохранено касанием. Сторож описал действие так: «${t.description}».` } : undefined;
