@@ -710,10 +710,23 @@ export function aaguidName(aaguid: string | null | undefined): string {
 export const isPasswordManager = (name: string): boolean => name === "Proton Pass" || name === "1Password" || name === "Dashlane" || name === "Bitwarden";
 
 // ---- touch hints ------------------------------------------------------------------------------------------------------------
-export const TOUCH_SLOW_MS = 15_000;
-export const TOUCH_SLOW_HINT = "Проверьте окно менеджера паролей (1Password, Proton Pass…) или выберите другое устройство.";
+export const TOUCH_SLOW_MS = 12_000;
+export const TOUCH_SLOW_HINT = "Касание не завершилось. Если ключ в менеджере паролей — посмотрите его окно; или выберите другое устройство.";
 export const SAVED_NARROWING = "Сохранено: это сужение, касание не требуется.";
 export const touchWithHint = (description: string, slow: boolean): string => `Подтвердите касанием. Защита: «${description}»${slow ? `. ${TOUCH_SLOW_HINT}` : ""}`;
+export interface TouchTimers {
+  set: (fn: () => void, ms: number) => unknown;
+  clear: (handle: unknown) => void;
+}
+/**
+ * The sentence under a button that touches: at once without the hint, and after TOUCH_SLOW_MS with it. The request is never cancelled (the touch may
+ * still come); the returned function only stops the timer. `timers` is for tests.
+ */
+export function startTouchNote(description: string, shown: (text: string) => void, timers: TouchTimers = { set: (fn, ms) => setTimeout(fn, ms), clear: (h) => clearTimeout(h as never) }): () => void {
+  shown(touchWithHint(description, false));
+  const handle = timers.set(() => shown(touchWithHint(description, true)), TOUCH_SLOW_MS);
+  return () => timers.clear(handle);
+}
 
 // ---- first run ---------------------------------------------------------------------------------------------------------------
 export const MODE_NAMES: Record<TrustMode, string> = { simple: "Простой", detailed: "Подробный", strict: "Строгий" };
@@ -1182,6 +1195,7 @@ const ERROR_TEXT: Array<[RegExp, string]> = [
   [/too many|blocked until|block/i, "Слишком много неверных кодов: ввод закрыт на час."],
   [/third-party plugins first|interface code could read/i, "Пока работают чужие плагины с интерфейсом, сессию открыть нельзя: они могли бы подсмотреть её."],
   [/directory that others can write/i, "Папка плагина доступна на запись другим пользователям: после проверки файлы можно подменить. Исправьте права или ставьте плагин другим способом."],
+  [/changed since it was shown|not in the difference|not what the page showed/i, "Файл изменился между показом и действием: ничего не записано, показано заново."],
   [/is already (approved|dismissed|accepted|reverted|superseded)|already approved/i, "Это уже решено: обновите страницу."],
   [/no such|not found|no review|no request|no difference/i, "Этого уже нет: обновите страницу."],
   [/list expired|does not match the one that was shown|prepare it again/i, "Список устарел: соберите его заново."],
@@ -1526,3 +1540,275 @@ export function dropShadowedLocal<T extends { pluginId: string; version: string 
 /** Under «Вернуть как было»: a session does not cover it (it changes the agent's files), and the card says so. */
 export const RESTORE_FRESH_CODE = "Нужен свежий код: меняются файлы агента — сессия здесь не помогает.";
 export const restoreNote = (sessionOpen: boolean): string | null => (sessionOpen ? RESTORE_FRESH_CODE : null);
+
+// ---- parts of a settings file: «Оставить» mine, «Вернуть» theirs -------------------------------------------------------------------
+export interface PartLike {
+  id: string;
+  path: string[];
+  kind: "key-added" | "key-changed" | "key-removed" | "elem-added" | "elem-removed";
+  before: string | null;
+  after: string | null;
+  elem: string | null;
+  danger: string | null;
+  restorable: boolean;
+}
+export const PART_KEEP = "Оставить";
+export const PART_BACK = "Вернуть";
+export const PART_STALE = "Файл изменился между показом и действием: ничего не записано, показано заново.";
+export const PARTS_HEADLINE = "Что именно изменилось — каждое по отдельности";
+export const PARTS_HELP = "«Оставить» — это моё: оно войдёт в одобренные настройки. «Вернуть» — это чужое: из файла уйдёт только оно, остальное не трогается и кода не нужно.";
+/** «Оставить» for a part that makes the agent more dangerous needs a fresh touch; for the rest a session is enough. */
+export const partNeedsFresh = (p: Pick<PartLike, "danger">): boolean => p.danger !== null;
+export const PART_FRESH_NOTE = "Это делает агента опаснее: чтобы оставить, нужен свежий код или касание.";
+export const PART_NO_BACK = "Эту часть по отдельности вернуть нельзя — только весь файл (кнопка ниже).";
+
+const q = (v: string | null): string => `«${v ?? ""}»`;
+/** One line for a part, in plain words: what the agent can do now that it could not before (or no longer can). */
+export function partTitle(p: PartLike): string {
+  const at = p.path.join(".");
+  const [a, b] = p.path;
+  if (at === "permissions.defaultMode") return p.after === "bypassPermissions" ? "Режим bypassPermissions: агент будет делать всё, не спрашивая вас" : p.kind === "key-removed" ? "Режим разрешений убран" : `Режим разрешений: ${p.after ?? ""}`;
+  if (at === "permissions.allow") return p.kind === "elem-added" ? `Агенту разрешено без вопросов: ${q(p.elem)}` : `Больше не разрешено без вопросов: ${q(p.elem)}`;
+  if (at === "permissions.deny") return p.kind === "elem-added" ? `Добавлен запрет: ${q(p.elem)}` : `Снят запрет: ${q(p.elem)}`;
+  if (at === "permissions.ask") return p.kind === "elem-added" ? `Теперь будет спрашивать про: ${q(p.elem)}` : `Больше не будет спрашивать про: ${q(p.elem)}`;
+  if (at === "permissions.additionalDirectories") return p.kind === "elem-added" ? `Агенту открыта папка: ${q(p.elem)}` : `Папка закрыта: ${q(p.elem)}`;
+  if (a === "hooks") return p.kind === "elem-removed" ? `Хук убран (${b ?? ""}): ${p.elem ?? ""}` : `Хук (${b ?? ""}): агент будет запускать сам — ${p.elem ?? p.after ?? ""}`;
+  if (a === "env" && b !== undefined) return p.kind === "key-removed" ? `Переменная окружения агента ${b} убрана` : `Переменная окружения агента ${b}: ${p.after ?? ""}`;
+  switch (p.kind) {
+    case "elem-added":
+      return `${at}: добавлено ${q(p.elem)}`;
+    case "elem-removed":
+      return `${at}: убрано ${q(p.elem)}`;
+    case "key-added":
+      return `${at}: задано ${q(p.after)}`;
+    case "key-removed":
+      return `${at}: убрано (было ${q(p.before)})`;
+    case "key-changed":
+      return `${at}: было ${q(p.before)}, стало ${q(p.after)}`;
+  }
+}
+/** The parts to draw: none when the difference cannot be split or is a single part (then the card's own buttons say it all). */
+export const drawableParts = (parts: PartLike[] | null | undefined): PartLike[] => (parts && parts.length > 1 ? parts : []);
+export const partKeptNote = (p: PartLike, remaining: number): string => `Оставлено: ${partTitle(p)}${remaining > 0 ? `. Осталось решить: ${remaining}` : ". Больше расхождений в этом файле нет"}`;
+export const partBackNote = (p: PartLike): string => `Возвращено: ${partTitle(p)}`;
+/** The guard says the file is not the one the page showed (or the part is gone): nothing was written, the page must draw again. */
+export const isStalePart = (raw: string): boolean => /changed since it was shown|not in the difference|not what the page showed|already (accepted|reverted|superseded)/i.test(raw);
+
+// ---- the red bar about the agents' settings: what the code really blocks -------------------------------------------------------------
+/**
+ * What an open CRITICAL difference in the agents' settings does at this moment. Each flag is a fact about the code, and test/guard/critical-effects.test.ts
+ * measures every one of them against a real guard: if the behaviour changes, that test fails and the text below is not allowed to stay as it is.
+ */
+export interface CriticalEffects {
+  /** The windows of trust that were open when the change was seen are closed (and a thread whose directory it is, with its sub-threads, is marked). */
+  closesEarlierWindows: boolean;
+  /** A new version from an own or known source whose rights did not grow still passes by itself. */
+  sourcesStillPass: boolean;
+  /** Versions already approved keep running. */
+  approvedStillRun: boolean;
+  /** A window opened after the change works (with a touch, as always). */
+  newWindowsStillWork: boolean;
+  /** New messages to the agents are held only after «Остановить агентов» was pressed. */
+  holdsAgentsOnlyAfterStop: boolean;
+}
+export const CRITICAL_EFFECTS: CriticalEffects = { closesEarlierWindows: true, sourcesStillPass: true, approvedStillRun: true, newWindowsStillWork: true, holdsAgentsOnlyAfterStop: true };
+export interface AgentAlarmText {
+  /** What is blocked while it is open. */
+  blocked: string;
+  /** What keeps working. */
+  works: string;
+}
+export function agentAlarmText(e: CriticalEffects = CRITICAL_EFFECTS): AgentAlarmText {
+  const blocked: string[] = [];
+  if (e.closesEarlierWindows) blocked.push("окна доверия, открытые до этого изменения, закрыты, а в чатах, где оно случилось, временное доверие не действует");
+  if (!e.sourcesStillPass) blocked.push("новые версии плагинов сами не проходят (ни по источнику, ни по окнам): только вашим решением");
+  if (!e.newWindowsStillWork) blocked.push("новое окно доверия открыть нельзя");
+  if (!e.approvedStillRun) blocked.push("одобренные плагины не запускаются");
+  const works: string[] = [];
+  if (e.sourcesStillPass) works.push("версии из ваших источников без новых прав проходят сами");
+  if (e.approvedStillRun) works.push("уже одобренные плагины работают");
+  if (e.newWindowsStillWork) works.push("новое окно доверия открыть можно");
+  works.push(e.holdsAgentsOnlyAfterStop ? "агенты сами не остановлены: это делает кнопка «Остановить агентов» в карточке" : "новые сообщения агентам удерживаются");
+  const cap = (t: string): string => t.charAt(0).toUpperCase() + t.slice(1);
+  return { blocked: blocked.length > 0 ? `${cap(blocked.join("; "))}.` : "Ничего не заблокировано: это только сигнал.", works: `${cap(works.join("; "))}.` };
+}
+
+// ---- «Под защитой»: every installed plugin ------------------------------------------------------------------------------------------
+export type Standing = "works" | "waits" | "quarantine";
+export const STANDING_LABEL: Record<Standing, string> = { works: "работает", waits: "ждёт вашего решения", quarantine: "в карантине" };
+export interface ProtectedInput {
+  id: string;
+  version: string;
+  status: string;
+  statusDetail?: string | null;
+  source: string;
+  /** The thread that proposed it, when known. */
+  threadId: string | null;
+  pin: { version: string; approvedAt: number; via: string; why?: string | null } | null;
+  /** The headline of the rights of the approved version (`riskHeadline`), or null when nothing was read. */
+  rights: string | null;
+  /** A version of it waits for a decision on the page, and the person has not set it aside. */
+  waits: boolean;
+}
+export interface ProtectedRow {
+  id: string;
+  standing: Standing;
+  standingLabel: string;
+  /** «из папки /x, тред thr_1» / «github.com/o/r». */
+  from: string;
+  rights: string;
+  version: string;
+  approved: string;
+}
+export const NO_RIGHTS_TEXT = "права не определены (версию ещё не проверяли)";
+const RUNNING_STATUS = new Set(["running", "starting", "degraded"]);
+const HELD_STATUS_DETAIL = /waiting for activation guard|held by activation guard|held by secure-bb|удержан/i;
+export function standingOf(i: Pick<ProtectedInput, "status" | "statusDetail" | "waits">): Standing {
+  if (RUNNING_STATUS.has(i.status) && !HELD_STATUS_DETAIL.test(i.statusDetail ?? "")) return "works";
+  return i.waits ? "waits" : "quarantine";
+}
+export function protectedRow(i: ProtectedInput, now: number): ProtectedRow {
+  const standing = standingOf(i);
+  const kind = /^path:/.test(i.source) ? "path" : /^git:|github\.com/.test(i.source) ? "git" : /^npm:/.test(i.source) ? "npm" : "";
+  const from = `${sourceLabel(kind, i.source)}${i.threadId ? `, тред ${i.threadId}` : ""}`;
+  return {
+    id: i.id,
+    standing,
+    standingLabel: STANDING_LABEL[standing],
+    from,
+    rights: i.rights ?? NO_RIGHTS_TEXT,
+    version: i.version,
+    approved: i.pin ? `одобрена версия ${i.pin.version}: ${approvedByText(i.pin, now)}` : "версия не одобрена",
+  };
+}
+export interface ProtectedHeadline {
+  title: string;
+  builtinLine: string | null;
+}
+/** The title of the fold (the count of every installed plugin that is not bb's own) and the one line about bb's own. */
+export function protectedHeadline(rows: Array<Pick<ProtectedRow, "standing">>, builtin: number): ProtectedHeadline {
+  return { title: `Под защитой (${rows.length})`, builtinLine: builtin > 0 ? `встроенные bb: ${builtin}` : null };
+}
+/** Sorted: waiting first, then quarantine, then the working ones; by name inside. */
+export function sortProtected<T extends Pick<ProtectedRow, "standing" | "id">>(rows: T[]): T[] {
+  const rank: Record<Standing, number> = { waits: 0, quarantine: 1, works: 2 };
+  return [...rows].sort((a, b) => rank[a.standing] - rank[b.standing] || a.id.localeCompare(b.id));
+}
+
+// ---- how often the person approves: a hint, not a nag -------------------------------------------------------------------------------
+/** The person approved versions of one plugin or one source at least this many times within the window: the hint is due. */
+export const FREQ_LIMIT = 3;
+export const FREQ_WINDOW_MS = 3_600_000;
+/** After the hint was used or put away it is silent for a day. */
+export const FREQ_QUIET_MS = 24 * 3_600_000;
+export const FREQ_KEY = "secure-bb.freq.at";
+export const FREQ_OFF_KEY = "secure-bb.freq.off";
+export const FREQ_SETTING_LABEL = "Подсказывать, когда я слишком часто одобряю одно и то же";
+export interface ApprovalEvent {
+  ts: number;
+  pluginId: string | null;
+  /** The source the guard wrote with the approval (`github:o/r`, `path:/x`); null where the journal has none. */
+  source: string | null;
+}
+/** What the journal counts as «the person approved a version»: a touch (also in a pack) or the guard's own record of it. A pass by itself or by a window is not asking anybody. */
+const FREQ_KINDS = new Set(["approved.touch", "approved.guard"]);
+export function approvalEventsOf(rows: Array<{ ts: number; kind: string; pluginId: string | null; detail?: unknown }>): ApprovalEvent[] {
+  return rows
+    .filter((r) => FREQ_KINDS.has(r.kind))
+    .map((r) => {
+      const src = (r.detail as { source?: unknown } | null | undefined)?.source;
+      return { ts: r.ts, pluginId: r.pluginId, source: typeof src === "string" ? src : null };
+    });
+}
+export interface FreqHint {
+  scope: "source" | "plugin";
+  count: number;
+  /** The question, in the owner's words. */
+  text: string;
+  /** What the ready buttons are, main first. */
+  offer: Array<"trust" | "window">;
+}
+export interface FreqCard {
+  pluginId: string;
+  source: string;
+  /** The source can go into «мои источники» from this card. */
+  canTrust: boolean;
+  /** A window can be opened from this card. */
+  canWindow: boolean;
+}
+export interface FreqState {
+  off: boolean;
+  /** When the hint was last used or put away. */
+  lastAt: number | null;
+}
+const recentIn = (events: ApprovalEvent[], now: number, match: (e: ApprovalEvent) => boolean): number => events.filter((e) => now - e.ts >= 0 && now - e.ts <= FREQ_WINDOW_MS && match(e)).length;
+export function frequentHint(events: ApprovalEvent[], now: number, card: FreqCard, state: FreqState, windowMin: number): FreqHint | null {
+  if (state.off || (state.lastAt !== null && now - state.lastAt < FREQ_QUIET_MS)) return null;
+  const bySource = card.source === "" ? 0 : recentIn(events, now, (e) => e.source === card.source);
+  const byPlugin = recentIn(events, now, (e) => e.pluginId === card.pluginId);
+  const offer: FreqHint["offer"] = [];
+  if (card.canTrust) offer.push("trust");
+  if (card.canWindow) offer.push("window");
+  if (offer.length === 0) return null;
+  if (bySource >= FREQ_LIMIT && card.canTrust)
+    return { scope: "source", count: bySource, offer, text: `Вы часто одобряете ${/^(?:github|path):/.test(card.source) ? friendlySource(card.source) : sourceLabel("git", card.source)}. Доверять этому источнику (новые версии — без вопросов, пока права не растут)?` };
+  if (byPlugin >= FREQ_LIMIT) {
+    const first = card.canWindow ? "window" : "trust";
+    return { scope: "plugin", count: byPlugin, offer: [first, ...offer.filter((o) => o !== first)], text: card.canWindow ? `Вы часто одобряете ${card.pluginId}. Открыть окно на ${windowMin} мин (новые версии — без вопросов, пока права не растут)?` : `Вы часто одобряете ${card.pluginId}. Доверять этому источнику (новые версии — без вопросов, пока права не растут)?` };
+  }
+  return null;
+}
+/** The first card, in the order the page shows them, that the hint is due on: it goes on ONE card, not on all. */
+export function pickFrequent(cards: FreqCard[], events: ApprovalEvent[], now: number, state: FreqState, windowMin: number): { pluginId: string; hint: FreqHint } | null {
+  for (const c of cards) {
+    const hint = frequentHint(events, now, c, state, windowMin);
+    if (hint) return { pluginId: c.pluginId, hint };
+  }
+  return null;
+}
+export const parseFreqAt = (raw: string | null): number | null => {
+  const n = raw === null ? NaN : Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : null;
+};
+export const FREQ_NOT_NOW = "Не сейчас";
+export const FREQ_BUTTON: Record<"trust" | "window", (windowMin: number) => string> = { trust: () => "Доверять источнику", window: (m) => `Окно на ${m} мин` };
+
+// ---- exceptions: one list ---------------------------------------------------------------------------------------------------------
+export type ExceptionKind = "window" | "cfgWindow" | "approval" | "source" | "kept";
+export const EXCEPTION_LABEL: Record<ExceptionKind, string> = { window: "Окно доверия", cfgWindow: "Окно доверия", approval: "Одобрение", source: "Доверенный источник", kept: "Оставлено в настройках агента" };
+export interface ExceptionRow {
+  key: string;
+  kind: ExceptionKind;
+  title: string;
+  /** One more line (the thread, who approved, why it is dangerous), or null. */
+  detail: string | null;
+  /** When it began (for «за 24 часа» and the order); null when the list has no time for it. */
+  at: number | null;
+  /** What «Отозвать» takes back, by the id each rpc wants. */
+  revoke: { kind: ExceptionKind; id: number | string };
+}
+export interface ExceptionInput {
+  windows: Array<{ id: number; pluginId: string; openedAt: number; remainingSec: number }>;
+  cfgWindows: Array<{ id: number; openedAt: number; scopeLabels: string[]; remainingSec: number }>;
+  approvals: Array<{ id: number; pluginId: string; version: string; via: string; why?: string | null; approvedAt: number; revokedAt: number | null }>;
+  sources: string[];
+  kept: Array<{ id: number; rel: string; keptAt: number; danger: string | null; part: PartLike }>;
+}
+export const minutesLeft = (sec: number): string => `${Math.max(1, Math.ceil(sec / 60))} мин`;
+/** Every exception the person made — windows, approvals, trusted sources, kept changes of the agents — in one list, newest first (sources, which have no time, last). */
+export function exceptionRows(i: ExceptionInput, now: number, onlyDay = false): ExceptionRow[] {
+  const rows: ExceptionRow[] = [
+    ...i.windows.map((w): ExceptionRow => ({ key: `window:${w.id}`, kind: "window", title: `${EXCEPTION_LABEL.window}: плагин ${w.pluginId} — ещё ${minutesLeft(w.remainingSec)}`, detail: "новые версии проходят без вопросов, пока окно открыто", at: w.openedAt, revoke: { kind: "window", id: w.id } })),
+    ...i.cfgWindows.map((w): ExceptionRow => ({ key: `cfgWindow:${w.id}`, kind: "cfgWindow", title: `${EXCEPTION_LABEL.cfgWindow}: ${w.scopeLabels.join(", ")} — ещё ${minutesLeft(w.remainingSec)}`, detail: "изменения этих настроек bb проходят без вопросов, пока окно открыто", at: w.openedAt, revoke: { kind: "cfgWindow", id: w.id } })),
+    ...i.approvals.filter((a) => a.revokedAt === null).map((a): ExceptionRow => ({ key: `approval:${a.id}`, kind: "approval", title: `${EXCEPTION_LABEL.approval}: ${a.pluginId} ${a.version}`, detail: approvedByText(a, now), at: a.approvedAt, revoke: { kind: "approval", id: a.id } })),
+    ...i.kept.map((k): ExceptionRow => ({ key: `kept:${k.id}`, kind: "kept", title: `${EXCEPTION_LABEL.kept}: ${partTitle(k.part)}`, detail: `${k.rel}${k.danger ? `. Делает агента опаснее: ${k.danger}` : ""}`, at: k.keptAt, revoke: { kind: "kept", id: k.id } })),
+    ...i.sources.map((e): ExceptionRow => ({ key: `source:${e}`, kind: "source", title: `${EXCEPTION_LABEL.source}: ${friendlySource(e)}`, detail: "новые версии оттуда проходят без вопросов, пока плагин не попросит новых прав", at: null, revoke: { kind: "source", id: e } })),
+  ];
+  return rows
+    .filter((r) => !onlyDay || r.at === null || now - r.at < 24 * 3_600_000)
+    .sort((a, b) => (a.at === null ? 1 : 0) - (b.at === null ? 1 : 0) || (b.at ?? 0) - (a.at ?? 0));
+}
+export const exceptionsHeadline = (n: number): string => `Исключения (${n})`;
+export const EXCEPTIONS_HELP = "Всё, что вы разрешили в обход обычных вопросов. «Отозвать» — это ужесточение: кода не нужно, плагин или настройка снова спросит вас.";
+export const EXCEPTIONS_EMPTY = "Исключений нет: защита спрашивает про всё новое.";
+export const RESET_NOTE = "Закрывает все окна, отзывает одобрения и оставленные изменения агентов, очищает «мои источники». Это только ужесточение, касание не нужно. Плагины, у которых отозвано одобрение, перестанут загружаться, пока вы не решите заново. Режим не меняется.";

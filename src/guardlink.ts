@@ -100,7 +100,8 @@ export type GuardAction =
   | { op: "trust-mode"; mode: TrustMode }
   | { op: "sources-add"; entries: string[] }
   | { op: "agents-accept"; ids: number[] }
-  | { op: "agents-restore"; id: number };
+  | { op: "agents-restore"; id: number }
+  | { op: "agents-keep-part"; id: number; partId: string; fileSha: string; danger: boolean };
 export interface GuardChallenge {
   challenge: string;
   allowCredentials: Array<{ type: "public-key"; id: string }>;
@@ -141,6 +142,21 @@ export interface AgentDrift {
   rejectedAt?: number | null;
   /** What «Вернуть как было» would do for an open difference, or why it cannot (the guard decides; the page shows the manual way then). */
   restorable?: { ok: true; action: "write" | "delete" | "json" } | { ok: false; reason: string };
+  /** A settings file's difference split by the path inside the JSON (absent: not a settings file; null: it cannot be split, the whole file is the only choice). */
+  parts?: SettingsPart[] | null;
+}
+/** One part of a settings file's difference: a key or one element of a list. Values are text for the screen (secrets hidden). */
+export interface SettingsPart {
+  id: string;
+  path: string[];
+  kind: "key-added" | "key-changed" | "key-removed" | "elem-added" | "elem-removed";
+  before: string | null;
+  after: string | null;
+  elem: string | null;
+  /** Why keeping it makes the agent more dangerous (a fresh touch is needed), or null. */
+  danger: string | null;
+  /** The helper can put it back. */
+  restorable: boolean;
 }
 /** The guard's answer to `agents-restore`. */
 export interface AgentsRestoreResult {
@@ -156,6 +172,8 @@ export interface AgentsState {
   enabled: boolean;
   home?: string;
   extraRoots?: string[];
+  /** Parts of settings files the owner kept and has not taken back (the list of exceptions). */
+  kept?: Array<{ id: number; path: string; rel: string; keptAt: number; danger: string | null; part: SettingsPart }>;
   /** The guard knows a restore helper (it may still be down: the answer to a restore says so). */
   restoreConfigured?: boolean;
   lastScanAt?: number | null;
@@ -289,6 +307,12 @@ export interface GuardPort {
   agentsReject(ids: number[]): Promise<{ rejected: number }>;
   /** «Вернуть как было»: a touch for this difference; the guard puts back its own baseline through the restore helper. */
   agentsRestore(id: number, proof: GuardProof): Promise<AgentsRestoreResult>;
+  /** «Вернуть» one part of a settings file: no touch (tightening). */
+  agentsRollbackPart(id: number, partId: string, fileSha: string): Promise<{ restored: true; resolved: boolean; remaining: number }>;
+  /** «Отозвать» a part that was kept: out of the file and out of the approved text; no touch (tightening). */
+  agentsRevokeKept(id: number): Promise<{ revoked: true; inFile: boolean }>;
+  /** «Оставить» one part: a touch (a session for a part that does not make the agent more dangerous). */
+  agentsKeepPart(id: number, partId: string, fileSha: string, danger: boolean, proof: GuardProof): Promise<{ kept: true; accepted: boolean; remaining: number }>;
 }
 
 const TIMEOUT_MS = 5000;
@@ -428,6 +452,18 @@ export class GuardLink implements GuardPort {
   async agentsRestore(id: number, proof: GuardProof): Promise<AgentsRestoreResult> {
     const { ok: _ok, id: _id, ...rest } = await this.call({ op: "agents-restore", id, ...proofFields(proof) });
     return rest as unknown as AgentsRestoreResult;
+  }
+  async agentsRollbackPart(id: number, partId: string, fileSha: string): Promise<{ restored: true; resolved: boolean; remaining: number }> {
+    const r = await this.call({ op: "agents-rollback-part", id, partId, fileSha });
+    return { restored: true, resolved: r.resolved === true, remaining: Number(r.remaining) };
+  }
+  async agentsRevokeKept(id: number): Promise<{ revoked: true; inFile: boolean }> {
+    const r = await this.call({ op: "agents-revoke-kept", id });
+    return { revoked: true, inFile: r.inFile === true };
+  }
+  async agentsKeepPart(id: number, partId: string, fileSha: string, danger: boolean, proof: GuardProof): Promise<{ kept: true; accepted: boolean; remaining: number }> {
+    const r = await this.call({ op: "agents-keep-part", id, partId, fileSha, danger, ...proofFields(proof) });
+    return { kept: true, accepted: r.accepted === true, remaining: Number(r.remaining) };
   }
   async verifyJournal(): Promise<GuardJournalReport> {
     return (await this.call({ op: "journal-verify" })) as unknown as GuardJournalReport;

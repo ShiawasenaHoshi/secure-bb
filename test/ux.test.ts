@@ -1,12 +1,13 @@
 // UX v1, PR 2: the page's choices as pure functions (status, first problem, card colour, plain words, "while you were away", key names).
 import { describe, expect, it } from "vitest";
 import {
-  AWAY_KEY, MODE_DESCRIPTIONS, MODE_NAMES, TECHNICAL_WORDS, TOUCH_SLOW_HINT, aaguidName, awaySince, awayText, capabilityPhrase, capabilityPhrases, cardColor, classifyAway,
+  AWAY_KEY, TOUCH_SLOW_MS, startTouchNote, MODE_DESCRIPTIONS, MODE_NAMES, TECHNICAL_WORDS, TOUCH_SLOW_HINT, aaguidName, awaySince, awayText, capabilityPhrase, capabilityPhrases, cardColor, classifyAway,
   cleanWhy, deferKey, detailLevel, groupAway, isBlockedEntry, isPasswordManager, pageStatus, parseDeferred, plural, redText, sourceLabel, suggestSources, touchWithHint,
   wizardNeeded, yellowText, GUARD_DOWN_TEXT, SAVED_NARROWING,
 } from "../src/ux.ts";
 import { MISMATCH_HINT, bypassAllowed, isMismatch, mismatchText, quarantineCount, reasonKind } from "../src/ux.ts";
-import type { AwayEvent, StatusInput } from "../src/ux.ts";
+import type { AwayEvent, PartLike, StatusInput } from "../src/ux.ts";
+import { EXCEPTIONS_EMPTY, EXCEPTIONS_HELP, RESET_NOTE, exceptionRows, exceptionsHeadline, FREQ_LIMIT, FREQ_QUIET_MS, FREQ_WINDOW_MS, approvalEventsOf, frequentHint, parseFreqAt, pickFrequent, FREQ_BUTTON, NO_RIGHTS_TEXT, STANDING_LABEL, protectedHeadline, protectedRow, sortProtected, standingOf, PARTS_HEADLINE, PARTS_HELP, PART_FRESH_NOTE, PART_NO_BACK, PART_STALE, drawableParts, humanError, isStalePart, partKeptNote, partNeedsFresh, partTitle } from "../src/ux.ts";
 
 const none: StatusInput = { guardDown: false, red: [], yellow: [], alarms: [] };
 const ref = (anchor: string, tab: "status" | "more" = "status") => ({ anchor, tab, text: anchor });
@@ -276,8 +277,21 @@ describe("where a key is stored (AAGUID)", () => {
 describe("touch hints", () => {
   it("the hint about the password manager appears only after the wait", () => {
     expect(touchWithHint("Одобрить p", false)).toBe("Подтвердите касанием. Защита: «Одобрить p»");
-    expect(touchWithHint("Одобрить p", true)).toContain("менеджера паролей");
-    expect(touchWithHint("Одобрить p", true)).toContain("1Password");
+    expect(touchWithHint("Одобрить p", true)).toContain("Касание не завершилось. Если ключ в менеджере паролей — посмотрите его окно; или выберите другое устройство");
+  });
+  it("the timer: no hint at first, the hint after 12 s, the request is not touched, cancelling stops the timer", () => {
+    const shown: string[] = [];
+    let pending: { fn: () => void; ms: number } | null = null;
+    let cleared = 0;
+    const stop = startTouchNote("Одобрить p", (t) => shown.push(t), { set: (fn, ms) => ((pending = { fn, ms }), 1), clear: () => void cleared++ });
+    expect(TOUCH_SLOW_MS).toBe(12_000);
+    expect(pending!.ms).toBe(12_000);
+    expect(shown).toEqual(["Подтвердите касанием. Защита: «Одобрить p»"]);
+    pending!.fn();
+    expect(shown).toHaveLength(2);
+    expect(shown[1]).toContain(TOUCH_SLOW_HINT);
+    stop();
+    expect(cleared).toBe(1);
   });
   it("saving a narrowing says that no touch was needed", () => {
     expect(SAVED_NARROWING).toBe("Сохранено: это сужение, касание не требуется.");
@@ -389,5 +403,163 @@ describe("no bypass on a hash mismatch", () => {
     expect(MISMATCH_HINT).toBe("Переустановите плагин из его источника. Если код снова не совпадёт, сообщите об этом в разделе журнала.");
     expect(mismatchText("p", "1").line).toContain(MISMATCH_HINT);
     expect(MISMATCH_HINT).not.toMatch(TECHNICAL_WORDS);
+  });
+});
+
+describe("parts of a settings file", () => {
+  const part = (over: Partial<PartLike>): PartLike => ({ id: "0123456789abcdef", path: ["permissions", "allow"], kind: "elem-added", before: null, after: null, elem: "Bash(curl:*)", danger: null, restorable: true, ...over });
+  it("each part in plain words", () => {
+    expect(partTitle(part({ path: ["permissions", "defaultMode"], kind: "key-added", after: "bypassPermissions", elem: null }))).toBe("Режим bypassPermissions: агент будет делать всё, не спрашивая вас");
+    expect(partTitle(part({}))).toBe("Агенту разрешено без вопросов: «Bash(curl:*)»");
+    expect(partTitle(part({ kind: "elem-removed" }))).toBe("Больше не разрешено без вопросов: «Bash(curl:*)»");
+    expect(partTitle(part({ path: ["permissions", "deny"], kind: "elem-removed" }))).toBe("Снят запрет: «Bash(curl:*)»");
+    expect(partTitle(part({ path: ["env", "NODE_OPTIONS"], kind: "key-added", after: "--require x", elem: null }))).toBe("Переменная окружения агента NODE_OPTIONS: --require x");
+    expect(partTitle(part({ path: ["hooks", "PreToolUse"], elem: "curl evil" }))).toContain("агент будет запускать сам");
+    expect(partTitle(part({ path: ["model"], kind: "key-changed", before: "a", after: "b", elem: null }))).toBe("model: было «a», стало «b»");
+  });
+  it("the words of a part never carry the technical words of the main text", () => {
+    for (const t of [PARTS_HELP, PARTS_HEADLINE, PART_FRESH_NOTE, PART_NO_BACK, PART_STALE, partTitle(part({}))]) expect(t).not.toMatch(TECHNICAL_WORDS);
+  });
+  it("a dangerous part needs a fresh touch, the rest does not; a single part is not split (the card's own buttons say it all)", () => {
+    expect(partNeedsFresh(part({ danger: "сеть" }))).toBe(true);
+    expect(partNeedsFresh(part({}))).toBe(false);
+    expect(drawableParts([part({})])).toEqual([]);
+    expect(drawableParts(null)).toEqual([]);
+    expect(drawableParts([part({}), part({ id: "fedcba9876543210" })])).toHaveLength(2);
+  });
+  it("the file moved on between showing and acting: the page draws again", () => {
+    expect(isStalePart("the file changed since it was shown: look again")).toBe(true);
+    expect(isStalePart("this part is not in the difference any more: look again")).toBe(true);
+    expect(isStalePart("invalid_code")).toBe(false);
+    expect(humanError("the file changed since it was shown: look again")).toBe(PART_STALE);
+  });
+  it("the note after keeping says how many are left", () => {
+    expect(partKeptNote(part({}), 1)).toContain("Осталось решить: 1");
+    expect(partKeptNote(part({}), 0)).toContain("Больше расхождений в этом файле нет");
+  });
+});
+
+describe("«Под защитой»: every plugin", () => {
+  const base = { id: "usage-tracker", version: "0.1.17", status: "running", source: "path:/home/me/plugins/usage-tracker", threadId: null, pin: null, rights: null, waits: false };
+  it("works / waits / in quarantine, by what the core says and whether a decision is waited for", () => {
+    expect(standingOf(base)).toBe("works");
+    expect(standingOf({ ...base, status: "disabled", waits: true })).toBe("waits");
+    expect(standingOf({ ...base, status: "disabled", waits: false })).toBe("quarantine");
+    // «held by the guard» is not working even if the core says running
+    expect(standingOf({ ...base, status: "running", statusDetail: "waiting for activation guard", waits: true })).toBe("waits");
+  });
+  it("where from (folder or repository, and the thread), the rights, the version and when it was approved", () => {
+    const row = protectedRow({ ...base, threadId: "thr_abc", rights: "Может обращаться по сети к api.x.com", pin: { version: "0.1.16", approvedAt: Date.UTC(2026, 10, 21, 12), via: "touch" } }, Date.UTC(2026, 10, 21, 13));
+    expect(row).toMatchObject({ standingLabel: "работает", from: "из папки /home/me/plugins/usage-tracker, тред thr_abc", rights: "Может обращаться по сети к api.x.com", version: "0.1.17" });
+    expect(row.approved).toMatch(/^одобрена версия 0\.1\.16: /);
+    expect(protectedRow({ ...base, source: "git:https://github.com/o/r.git@main" }, 0).from).toBe("github.com/o/r");
+    const bare = protectedRow(base, 0);
+    expect(bare.rights).toBe(NO_RIGHTS_TEXT);
+    expect(bare.approved).toBe("версия не одобрена");
+  });
+  it("the title counts every plugin; bb's own are one line; waiting ones come first", () => {
+    const rows = [{ id: "b", standing: "works" as const }, { id: "a", standing: "works" as const }, { id: "c", standing: "waits" as const }, { id: "d", standing: "quarantine" as const }];
+    expect(protectedHeadline(rows, 18)).toEqual({ title: "Под защитой (4)", builtinLine: "встроенные bb: 18" });
+    expect(protectedHeadline([], 0)).toEqual({ title: "Под защитой (0)", builtinLine: null });
+    expect(sortProtected(rows).map((r) => r.id)).toEqual(["c", "d", "a", "b"]);
+  });
+  it("plain words", () => {
+    for (const t of [NO_RIGHTS_TEXT, ...Object.values(STANDING_LABEL)]) expect(t).not.toMatch(TECHNICAL_WORDS);
+  });
+});
+
+describe("how often the person approves", () => {
+  const NOW = Date.UTC(2026, 10, 22, 12);
+  const card = { pluginId: "notes", source: "github:me/notes", canTrust: true, canWindow: true };
+  const ev = (minAgo: number, over: Partial<{ pluginId: string | null; source: string | null }> = {}) => ({ ts: NOW - minAgo * 60_000, pluginId: "notes", source: "github:me/notes", ...over });
+  const none = { off: false, lastAt: null };
+  it("counts what the journal says the person approved: a touch, the guard's record; not a pass by itself, not a window", () => {
+    const rows = [
+      { ts: 1, kind: "approved.touch", pluginId: "a", detail: { source: "github:o/r" } },
+      { ts: 2, kind: "approved.guard", pluginId: "a" },
+      { ts: 3, kind: "approved.source", pluginId: "a", detail: { source: "github:o/r" } },
+      { ts: 4, kind: "approved.window", pluginId: "a" },
+      { ts: 5, kind: "approved.trust", pluginId: "a" },
+      { ts: 6, kind: "window.open", pluginId: "a" },
+    ];
+    expect(approvalEventsOf(rows)).toEqual([{ ts: 1, pluginId: "a", source: "github:o/r" }, { ts: 2, pluginId: "a", source: null }]);
+  });
+  it("three approvals of one source within an hour: the question with the ready buttons", () => {
+    const h = frequentHint([ev(5), ev(20, { pluginId: "x" }), ev(50, { pluginId: "y" })], NOW, card, none, 30)!;
+    expect(h.scope).toBe("source");
+    expect(h.count).toBe(3);
+    expect(h.text).toBe("Вы часто одобряете me/notes (на GitHub). Доверять этому источнику (новые версии — без вопросов, пока права не растут)?");
+    expect(h.offer).toEqual(["trust", "window"]);
+    expect(FREQ_BUTTON.window(30)).toBe("Окно на 30 мин");
+  });
+  it("three approvals of one plugin: the window first", () => {
+    const h = frequentHint([ev(1, { source: null }), ev(2, { source: null }), ev(3, { source: null })], NOW, card, none, 30)!;
+    expect(h).toMatchObject({ scope: "plugin", count: 3, offer: ["window", "trust"] });
+    expect(h.text).toContain("Вы часто одобряете notes. Открыть окно на 30 мин");
+    expect(frequentHint([ev(1, { source: null }), ev(2, { source: null }), ev(3, { source: null })], NOW, { ...card, canWindow: false }, none, 30)!.offer).toEqual(["trust"]);
+  });
+  it("fewer than three, or older than an hour: silence; the limit is three", () => {
+    expect(FREQ_LIMIT).toBe(3);
+    expect(frequentHint([ev(1), ev(2)], NOW, card, none, 30)).toBeNull();
+    expect(frequentHint([ev(1), ev(2), ev(61)], NOW, card, none, 30)).toBeNull();
+    expect(frequentHint([ev(1), ev(2), ev(FREQ_WINDOW_MS / 60_000)], NOW, card, none, 30)).not.toBeNull();
+    expect(frequentHint([ev(1, { pluginId: "other", source: "github:o/r" }), ev(2), ev(3)], NOW, card, none, 30)).toBeNull();
+  });
+  it("once a day: used or put away, then quiet for 24 h; and it can be switched off", () => {
+    const three = [ev(1), ev(2), ev(3)];
+    expect(frequentHint(three, NOW, card, { off: false, lastAt: NOW - 60_000 }, 30)).toBeNull();
+    expect(frequentHint(three, NOW, card, { off: false, lastAt: NOW - FREQ_QUIET_MS + 1000 }, 30)).toBeNull();
+    expect(frequentHint(three, NOW, card, { off: false, lastAt: NOW - FREQ_QUIET_MS - 1000 }, 30)).not.toBeNull();
+    expect(frequentHint(three, NOW, card, { off: true, lastAt: null }, 30)).toBeNull();
+  });
+  it("nothing to offer: no hint (a card that can neither trust a source nor open a window)", () => {
+    expect(frequentHint([ev(1), ev(2), ev(3)], NOW, { ...card, canTrust: false, canWindow: false }, none, 30)).toBeNull();
+  });
+  it("it goes on one card: the first one it is due on", () => {
+    const cards = [{ ...card, pluginId: "quiet", source: "github:z/z" }, card, { ...card, pluginId: "notes2" }];
+    expect(pickFrequent(cards, [ev(1), ev(2), ev(3)], NOW, none, 30)?.pluginId).toBe("notes");
+    expect(pickFrequent(cards, [], NOW, none, 30)).toBeNull();
+  });
+  it("the stored time is read carefully", () => {
+    expect(parseFreqAt("1763800000000")).toBe(1763800000000);
+    expect(parseFreqAt("x")).toBeNull();
+    expect(parseFreqAt(null)).toBeNull();
+  });
+});
+
+describe("exceptions: one list", () => {
+  const NOW = Date.UTC(2026, 10, 22, 12);
+  const part: PartLike = { id: "0123456789abcdef", path: ["permissions", "defaultMode"], kind: "key-added", before: null, after: "bypassPermissions", elem: null, danger: "bypassPermissions", restorable: true };
+  const input = {
+    windows: [{ id: 3, pluginId: "notes", openedAt: NOW - 600_000, remainingSec: 1200 }],
+    cfgWindows: [{ id: 1, openedAt: NOW - 3_000_000, scopeLabels: ["инструкции", "скиллы"], remainingSec: 61 }],
+    approvals: [
+      { id: 7, pluginId: "notes", version: "1.0.0", via: "touch", approvedAt: NOW - 7_200_000, revokedAt: null },
+      { id: 8, pluginId: "old", version: "0.1.0", via: "touch", approvedAt: NOW - 90_000_000, revokedAt: null },
+      { id: 9, pluginId: "gone", version: "0.0.1", via: "touch", approvedAt: NOW, revokedAt: NOW },
+    ],
+    sources: ["github:me/*"],
+    kept: [{ id: 5, rel: ".claude/settings.json", keptAt: NOW - 60_000, danger: "bypassPermissions", part }],
+  };
+  it("windows, approvals, sources and kept changes of the agents: one list, each with the thing «Отозвать» takes back", () => {
+    const rows = exceptionRows(input, NOW);
+    expect(rows.map((r) => r.kind)).toEqual(["kept", "window", "cfgWindow", "approval", "approval", "source"]);
+    expect(rows.map((r) => r.revoke)).toEqual([
+      { kind: "kept", id: 5 }, { kind: "window", id: 3 }, { kind: "cfgWindow", id: 1 }, { kind: "approval", id: 7 }, { kind: "approval", id: 8 }, { kind: "source", id: "github:me/*" },
+    ]);
+    expect(rows[0]!.title).toBe("Оставлено в настройках агента: Режим bypassPermissions: агент будет делать всё, не спрашивая вас");
+    expect(rows[0]!.detail).toContain("Делает агента опаснее: bypassPermissions");
+    expect(rows[1]!.title).toBe("Окно доверия: плагин notes — ещё 20 мин");
+    expect(rows[2]!.title).toBe("Окно доверия: инструкции, скиллы — ещё 2 мин");
+    expect(rows[5]!.title).toBe("Доверенный источник: me/* (на GitHub)");
+  });
+  it("a revoked approval is not an exception; «за 24 часа» cuts the old ones but not the sources, which have no time", () => {
+    expect(exceptionRows(input, NOW).some((r) => r.key === "approval:9")).toBe(false);
+    expect(exceptionRows(input, NOW, true).map((r) => r.key)).toEqual(["kept:5", "window:3", "cfgWindow:1", "approval:7", "source:github:me/*"]);
+  });
+  it("nothing made: the empty line; the headline counts the list", () => {
+    expect(exceptionRows({ windows: [], cfgWindows: [], approvals: [], sources: [], kept: [] }, NOW)).toEqual([]);
+    expect(exceptionsHeadline(6)).toBe("Исключения (6)");
+    for (const t of [EXCEPTIONS_HELP, EXCEPTIONS_EMPTY, RESET_NOTE]) expect(t).not.toMatch(TECHNICAL_WORDS);
   });
 });

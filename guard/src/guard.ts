@@ -58,9 +58,10 @@ import {
   type TrustMode,
 } from "./trust.ts";
 import { scan as scanAgents, type FileKind, type Limits, type ScanResult } from "./agents-scan.ts";
-import { JSON_FILE, watchedRel, type JsonKey } from "./restore.ts";
+import { JSON_FILE, applyPathChange, watchedRel, type JsonKey } from "./restore.ts";
 import { stable } from "./agents-scan.ts";
 import { helperUp, sendRestore } from "./restore-client.ts";
+import { applyForward, partAction, partDanger, partRestorable, shownValue, splitSettings, viewPart, type JsonPart, type PartView } from "./json-parts.ts";
 
 export type GuardErrorCode = "invalid" | "not_found" | "conflict" | "not_registered" | "invalid_code" | "invalid_passkey" | "expired" | "blocked" | "unknown_op" | "no_restore" | "unavailable" | "restore_failed";
 
@@ -356,6 +357,9 @@ export function isRoutineAction(a: Record<string, unknown>): boolean {
       return true;
     case "touch":
       return typeof a.purpose === "string" && ROUTINE_TOUCH_PURPOSES.has(a.purpose);
+    // Keeping a part of a settings file that does not make the agent more dangerous (the guard has checked the flag itself): routine. A dangerous one: never.
+    case "agents-keep-part":
+      return a.danger === false;
     default:
       return false;
   }
@@ -1641,8 +1645,18 @@ export class Guard {
       // Only the id: what is written comes from the guard's own baseline, never from the action.
       case "agents-restore":
         return { op: "agents-restore", id: intOf(a.id, "id", 1, Number.MAX_SAFE_INTEGER) };
+      // One part of a settings file. `danger` is what the caller says; it is checked against the guard's own reading before anything is signed or spent.
+      case "agents-keep-part": {
+        const id = intOf(a.id, "id", 1, Number.MAX_SAFE_INTEGER);
+        const partId = str(a.partId, "partId", 16, 16);
+        const fileSha = str(a.fileSha, "fileSha", 16, 16);
+        if (typeof a.danger !== "boolean") throw new GuardError("invalid", "danger is true or false");
+        const { part, danger } = this.partOf(id, partId, fileSha);
+        if (part && (danger !== null) !== a.danger) throw new GuardError("conflict", "the part is not what the page showed: look again");
+        return { op: "agents-keep-part", id, partId, fileSha, danger: a.danger };
+      }
       default:
-        throw new GuardError("invalid", "an action is approve, approve-trust, session-open, batch-approve, open-window, policy, touch, trust-mode, sources-add, agents-accept or agents-restore");
+        throw new GuardError("invalid", "an action is approve, approve-trust, session-open, batch-approve, open-window, policy, touch, trust-mode, sources-add, agents-accept, agents-restore or agents-keep-part");
     }
   }
 
@@ -1690,6 +1704,10 @@ export class Guard {
         const first = rows.filter((r) => Number(r.initial) === 1).length;
         const list = rows.slice(0, 5).map((r) => `${String(r.path)} (${String(r.change)}, ${String(r.class)})`).join("; ");
         return `${first === rows.length ? "Первый эталон: принять всё как есть — " : ""}Принять в эталон наблюдателя за конфигурациями и памятью агентов ${rows.length} расхождений (критичных ${by("critical")}, инструкций ${by("instructions")}, прочих ${by("other")}): ${list}${rows.length > 5 ? ` и ещё ${rows.length - 5}` : ""}`;
+      }
+      case "agents-keep-part": {
+        const { part, path } = this.partOf(Number(a.id), String(a.partId), String(a.fileSha));
+        return `Оставить в настройках агента (${path}): ${this.partSentence(part)}. Это войдёт в одобренные настройки; остальное в файле решается отдельно${a.danger === true ? ". Это делает агента опаснее: нужно свежее касание" : ""}`;
       }
       case "agents-restore": {
         if (this.agents === null) throw new GuardError("invalid", "the agent watch is not configured at this guard");
@@ -1968,6 +1986,8 @@ export class Guard {
       rejectedAt: r.rejected_at === null || r.rejected_at === undefined ? null : Number(r.rejected_at),
       // What «Вернуть как было» would do, or why it cannot be done (the page shows the manual way then).
       ...(String(r.status) === "open" ? { restorable: ((p) => (p.ok ? { ok: true, action: p.action } : { ok: false, reason: p.reason }))(this.restorePlan(r)) } : {}),
+      // A settings file's difference split by the path inside the JSON (null: it cannot be split; the whole file is the only choice).
+      ...(String(r.status) === "open" ? { parts: this.partsOf(r)?.map(viewPart) ?? null } : {}),
     });
     const rank = `CASE class WHEN 'critical' THEN 0 WHEN 'instructions' THEN 1 ELSE 2 END`;
     const open = (this.db.prepare(`SELECT * FROM agent_drifts WHERE status = 'open' ORDER BY ${rank}, id DESC LIMIT 500`).all() as Raw[]).map(view);
@@ -1990,6 +2010,7 @@ export class Guard {
       recent,
       alarms: (last?.alarms as unknown[] | undefined) ?? [],
       notes: (last?.notes as unknown[] | undefined) ?? [],
+      kept: this.keptParts(),
     };
   }
 
@@ -2095,6 +2116,213 @@ export class Guard {
     const resolved = now !== undefined && now.status !== "open";
     this.tx(() => this.log("agents.restore", null, null, { ...detail, result: ans.result, resolved, ...factorDetail(factor) }));
     return { restored: true, action: plan.action, result: ans.result, resolved, path, rel: String(d!.rel) };
+  }
+
+  // ---- parts of a settings file: «Оставить» (mine) and «Вернуть» (theirs) --------------------------------------------------------------
+  /** The parts of an open difference of a settings file, from the guard's own baseline and the file it read; null when it cannot be split. */
+  private partsOf(d: Raw): JsonPart[] | null {
+    if (String(d.kind) !== "claude-settings" || String(d.status) !== "open" || String(d.change) === "removed") return null;
+    const next = (d.new_content as string | null | undefined) ?? null;
+    if (next === null) return null;
+    const base = this.baselineText(d);
+    return base === undefined ? null : splitSettings(base, next);
+  }
+  /** The text the owner approved for this file: null for a file that is new (nothing was approved); undefined: there is a baseline, but it is not whole (too large, or not the file's text). */
+  private baselineText(d: Raw): string | null | undefined {
+    if (String(d.change) === "added") return null;
+    const b = this.db.prepare(`SELECT * FROM agent_baseline WHERE path = ?`).get(String(d.path)) as Raw | undefined;
+    const base = (b?.content as string | null | undefined) ?? null;
+    return b && base !== null && sha256hex(base) === String(b.sha256) ? base : undefined;
+  }
+  /**
+   * One part of one open difference, found by the id the page named; the page's `fileSha` (the first 16 digits of the hash it was shown) must be the file's
+   * now, otherwise the file changed between the showing and the action: a conflict, the page draws again.
+   */
+  private partOf(id: number, partId: string, fileSha: string): { drift: Raw; part: JsonPart; parts: JsonPart[]; danger: string | null; path: string } {
+    if (this.agents === null) throw new GuardError("invalid", "the agent watch is not configured at this guard");
+    const [d] = this.openDrifts([id]);
+    if (d!.new_sha === null || String(d!.new_sha).slice(0, 16) !== fileSha) throw new GuardError("conflict", "the file changed since it was shown: look again");
+    const parts = this.partsOf(d!);
+    if (parts === null) throw new GuardError("no_restore", "этот файл нельзя разобрать по частям: вернуть или принять можно только целиком");
+    const part = parts.find((p) => p.id === partId);
+    if (!part) throw new GuardError("conflict", "this part is not in the difference any more: look again");
+    return { drift: d!, part, parts, danger: partDanger(part), path: String(d!.path) };
+  }
+  /**
+   * A difference of a settings file that is left with no part: the file says the same as the approved text, only written another way (a final newline,
+   * the order of keys). Nothing is left to decide, so it is recorded as the approved text and closed — never an alarm that has nothing in it.
+   */
+  private settleSemantic(path: string): void {
+    const d = this.db.prepare(`SELECT * FROM agent_drifts WHERE path = ? AND status = 'open'`).get(path) as Raw | undefined;
+    if (!d) return;
+    const parts = this.partsOf(d);
+    if (parts === null || parts.length > 0) return;
+    this.tx(() => {
+      const now = this.now();
+      this.db
+        .prepare(`INSERT INTO agent_baseline (path, root, rel, kind, sha256, size, content, accepted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(path) DO UPDATE SET sha256 = excluded.sha256, size = excluded.size, content = excluded.content, accepted_at = excluded.accepted_at`)
+        .run(String(d.path), String(d.root), String(d.rel), String(d.kind), String(d.new_sha), Number(d.new_size ?? 0), String(d.new_content), now);
+      this.db.prepare(`UPDATE agent_drifts SET status = 'reverted', resolved_at = ? WHERE id = ?`).run(now, Number(d.id));
+    });
+  }
+  /** The parts the owner kept and has not taken back: the list of exceptions. Values are for the screen (secrets hidden). */
+  private keptParts(): Array<{ id: number; path: string; rel: string; keptAt: number; danger: string | null; part: PartView }> {
+    const rows = this.db.prepare(`SELECT * FROM agent_kept WHERE revoked_at IS NULL ORDER BY id DESC LIMIT 200`).all() as Raw[];
+    return rows.map((r) => ({ id: Number(r.id), path: String(r.path), rel: String(r.rel), keptAt: Number(r.kept_at), danger: (r.danger as string | null) ?? null, part: viewPart(JSON.parse(String(r.part)) as JsonPart) }));
+  }
+
+  /**
+   * «Отозвать» a part that was kept: it goes out of the file (the helper, for this one path) and out of the approved text. Tightening, so no code. What was kept
+   * is only what the owner chose with a touch; taking it back needs none, as taking back a window or an approval needs none.
+   */
+  async agentsRevokeKept(raw: Record<string, unknown>): Promise<{ revoked: true; inFile: boolean }> {
+    if (this.agents === null) throw new GuardError("invalid", "the agent watch is not configured at this guard");
+    const socket = this.agents.restore?.socket;
+    if (socket === undefined) throw new GuardError("no_restore", "помощник отката не настроен у сторожа: вернуть можно только вручную");
+    const id = intOf(raw.id, "id", 1, Number.MAX_SAFE_INTEGER);
+    const k = this.db.prepare(`SELECT * FROM agent_kept WHERE id = ? AND revoked_at IS NULL`).get(id) as Raw | undefined;
+    if (!k) throw new GuardError("not_found", `no kept change #${id}`);
+    const part = JSON.parse(String(k.part)) as JsonPart;
+    const path = String(k.path);
+    if (!partRestorable(part)) throw new GuardError("no_restore", "эту часть помощник не возвращает: вернуть можно только вручную");
+    if (!(await helperUp(socket, this.agents.restore?.timeoutMs))) throw new GuardError("unavailable", "помощник отката не отвечает (служба sbb-restore не запущена или сокет недоступен): ничего не записано");
+    this.agentsScan({ force: true });
+    // The file as the guard sees it now: the open difference's hash, or the approved one when the file is as approved.
+    const open = this.db.prepare(`SELECT * FROM agent_drifts WHERE path = ? AND status = 'open'`).get(path) as Raw | undefined;
+    const base = this.db.prepare(`SELECT * FROM agent_baseline WHERE path = ?`).get(path) as Raw | undefined;
+    const fileSha = open ? (open.new_sha === null ? null : String(open.new_sha)) : base ? String(base.sha256) : null;
+    const back = partAction(part, "rollback");
+    let inFile = false;
+    if (fileSha !== null) {
+      const ans = await sendRestore(socket, { op: "restore-json-path", path, fileSha256: fileSha, pointer: part.path, action: back.action, ...(back.action === "delete" ? {} : { value: back.value }) }, this.agents.restore?.timeoutMs);
+      if (!ans.ok) {
+        this.tx(() => this.log("agents.revoke-kept.fail", null, null, { kept: id, path, part: part.path.join("."), error: ans.code, message: ans.message.slice(0, 200) }));
+        if (ans.code === "stale") throw new GuardError("conflict", "the file changed since it was shown: look again");
+        throw new GuardError(ans.code === "unavailable" ? "unavailable" : "restore_failed", ans.code === "unavailable" ? "помощник отката не ответил: файл не изменён" : `помощник отказал: ${ans.message}`);
+      }
+      inFile = ans.result !== "absent";
+    }
+    this.tx(() => {
+      // Out of the approved text too, or the file (without it) would show as a difference of its own.
+      if (base) {
+        const text = (base.content as string | null) ?? null;
+        if (text !== null && sha256hex(text) === String(base.sha256)) {
+          const doc = ((): Record<string, unknown> | null => {
+            try {
+              const v = JSON.parse(text) as unknown;
+              return typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+            } catch {
+              return null;
+            }
+          })();
+          if (doc) {
+            applyPathChange(doc, part.path, back.action, back.value);
+            const next = `${JSON.stringify(doc, null, 2)}\n`;
+            this.db.prepare(`UPDATE agent_baseline SET sha256 = ?, size = ?, content = ?, accepted_at = ? WHERE path = ?`).run(sha256hex(next), Buffer.byteLength(next, "utf8"), next, this.now(), path);
+          }
+        }
+      }
+      this.db.prepare(`UPDATE agent_kept SET revoked_at = ? WHERE id = ?`).run(this.now(), id);
+      this.log("agents.revoke-kept", null, null, { kept: id, path, rel: String(k.rel), part: part.path.join("."), kind: part.kind, inFile });
+    });
+    this.agentsScan({ force: true });
+    this.settleSemantic(path);
+    return { revoked: true, inFile };
+  }
+
+  private partSentence(p: JsonPart): string {
+    const at = p.path.join(".");
+    switch (p.kind) {
+      case "elem-added":
+        return `добавлено в ${at}: ${shownValue(p.path, p.elem)}`;
+      case "elem-removed":
+        return `убрано из ${at}: ${shownValue(p.path, p.elem)}`;
+      case "key-added":
+        return `${at} задан: ${shownValue(p.path, p.after)}`;
+      case "key-removed":
+        return `${at} убран (было ${shownValue(p.path, p.before)})`;
+      case "key-changed":
+        return `${at}: было ${shownValue(p.path, p.before)}, стало ${shownValue(p.path, p.after)}`;
+    }
+  }
+
+  /**
+   * «Вернуть» one part: the helper takes this one change out of the file and leaves the rest. Tightening (what comes back is the approved state), so no
+   * code. Only a part of an OPEN difference, only on a path the helper edits, and only against the file the page showed (`fileSha`) — the helper checks
+   * the hash of the whole file again, so that a change that came in between is never overwritten.
+   */
+  async agentsRollbackPart(raw: Record<string, unknown>): Promise<{ restored: true; resolved: boolean; remaining: number; path: string; rel: string }> {
+    if (this.agents === null) throw new GuardError("invalid", "the agent watch is not configured at this guard");
+    const socket = this.agents.restore?.socket;
+    if (socket === undefined) throw new GuardError("no_restore", "помощник отката не настроен у сторожа: вернуть можно только вручную");
+    const id = intOf(raw.id, "id", 1, Number.MAX_SAFE_INTEGER);
+    const partId = str(raw.partId, "partId", 16, 16);
+    const fileSha = str(raw.fileSha, "fileSha", 16, 16);
+    // The file as it is right now (not as it was at the last timer).
+    this.agentsScan({ force: true });
+    const { drift: d, part, danger } = this.partOf(id, partId, fileSha);
+    if (!partRestorable(part)) throw new GuardError("no_restore", "эту часть помощник не возвращает: вернуть можно только весь файл");
+    if (!(await helperUp(socket, this.agents.restore?.timeoutMs))) throw new GuardError("unavailable", "помощник отката не отвечает (служба sbb-restore не запущена или сокет недоступен): ничего не записано");
+    const a = partAction(part, "rollback");
+    const path = String(d.path);
+    const fileSha256 = String(d.new_sha);
+    const ans = await sendRestore(socket, { op: "restore-json-path", path, fileSha256, pointer: part.path, action: a.action, ...(a.action === "delete" ? {} : { value: a.value }) }, this.agents.restore?.timeoutMs);
+    const detail = { drift: id, path, rel: String(d.rel), part: part.path.join("."), kind: part.kind, action: a.action, danger: danger !== null, was: fileSha256.slice(0, 16) };
+    if (!ans.ok) {
+      this.tx(() => this.log("agents.rollback-part.fail", null, null, { ...detail, error: ans.code, message: ans.message.slice(0, 200) }));
+      // The file is not the one the part was worked out from: nothing was written and the page draws again.
+      if (ans.code === "stale") throw new GuardError("conflict", "the file changed since it was shown: look again");
+      throw new GuardError(ans.code === "unavailable" ? "unavailable" : "restore_failed", ans.code === "unavailable" ? "помощник отката не ответил: файл не изменён" : `помощник отказал: ${ans.message}`);
+    }
+    this.agentsScan({ force: true });
+    this.settleSemantic(path);
+    // Resolved: nothing of this file is left to decide.
+    const rest = this.db.prepare(`SELECT * FROM agent_drifts WHERE path = ? AND status = 'open'`).get(path) as Raw | undefined;
+    const remaining = rest ? (this.partsOf(rest)?.length ?? 1) : 0;
+    const resolved = rest === undefined;
+    this.tx(() => this.log("agents.rollback-part", null, null, { ...detail, result: ans.result, resolved, remaining }));
+    return { restored: true, resolved, remaining, path, rel: String(d.rel) };
+  }
+
+  /**
+   * «Оставить» one part: it goes into the approved text of the file; the rest stays a difference. A touch: a code or a key for a part that makes the agent
+   * more dangerous (bypass, a shell or network permission, a hook, `env`…), and for the rest a session is enough. Nothing is written to the agents' file.
+   */
+  agentsKeepPart(raw: Record<string, unknown>): { kept: true; accepted: boolean; remaining: number; danger: boolean } {
+    if (this.agents === null) throw new GuardError("invalid", "the agent watch is not configured at this guard");
+    const id = intOf(raw.id, "id", 1, Number.MAX_SAFE_INTEGER);
+    const partId = str(raw.partId, "partId", 16, 16);
+    const fileSha = str(raw.fileSha, "fileSha", 16, 16);
+    this.agentsScan({ force: true });
+    // Everything that can be checked without a code is checked first, so that a spent code is not wasted on a refusal.
+    const first = this.partOf(id, partId, fileSha);
+    const dangerous = first.danger !== null;
+    if (raw.danger !== undefined && raw.danger !== dangerous) throw new GuardError("conflict", "the part is not what the page showed: look again");
+    const factor = this.verifyFactor("agents.keepPart", this.normalizeAction({ op: "agents-keep-part", id, partId, fileSha, danger: dangerous }), raw);
+    const result = this.tx(() => {
+      // Again, inside the transaction: the difference may have moved while the code was being checked.
+      const { drift: d, part, parts } = this.partOf(id, partId, fileSha);
+      const base = this.baselineText(d);
+      const approved = base === undefined ? null : applyForward(base, part);
+      if (approved === null) throw new GuardError("no_restore", "этот файл нельзя разобрать по частям: принять можно только целиком");
+      const now = this.now();
+      const done = parts.length === 1;
+      // The last part: the file as it is becomes the approved one (what is kept is exactly what was seen). Otherwise a new approved text with this part in it.
+      const content = done ? String(d.new_content) : approved;
+      const sha = done ? String(d.new_sha) : sha256hex(content);
+      this.db
+        .prepare(`INSERT INTO agent_baseline (path, root, rel, kind, sha256, size, content, accepted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(path) DO UPDATE SET root = excluded.root, rel = excluded.rel, kind = excluded.kind, sha256 = excluded.sha256, size = excluded.size, content = excluded.content, accepted_at = excluded.accepted_at`)
+        .run(String(d.path), String(d.root), String(d.rel), String(d.kind), sha, Buffer.byteLength(content, "utf8"), content, now);
+      // The old difference is closed; the next look at the file makes the difference that is left (or finds none).
+      this.db.prepare(`UPDATE agent_drifts SET status = ?, resolved_at = ? WHERE id = ?`).run(done ? "accepted" : "superseded", now, id);
+      this.db.prepare(`INSERT INTO agent_kept (path, rel, part, danger, kept_at) VALUES (?, ?, ?, ?, ?)`).run(String(d.path), String(d.rel), JSON.stringify(part), first.danger === null ? null : first.danger.slice(0, 300), now);
+      this.log("agents.keep-part", null, null, { drift: id, path: String(d.path), rel: String(d.rel), part: part.path.join("."), kind: part.kind, danger: dangerous, reason: first.danger === null ? null : first.danger.slice(0, 200), remaining: parts.length - 1, ...factorDetail(factor) });
+      return { accepted: done, remaining: parts.length - 1 };
+    });
+    // The file is looked at again at once: what is left of the difference is drawn from the new approved text.
+    this.agentsScan({ force: true });
+    this.settleSemantic(first.path);
+    return { kept: true, accepted: result.accepted, remaining: result.remaining, danger: dangerous };
   }
 
   /**

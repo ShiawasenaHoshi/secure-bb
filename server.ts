@@ -680,7 +680,7 @@ export default async function plugin(bb: BbPluginApi) {
    * In guard mode a code that arrives with any RPC is checked by the guard first (it consumes the code there: the secret is not here),
    * and the handler then runs with the mark that says so. RPCs that need more than that (they act at the guard) do it themselves.
    */
-  const OWN_GUARD_PATH = new Set(["queue.approve", "queue.approveTrust", "batch.approve", "window.open", "policy.set", "session.open", "totp.begin", "totp.confirm", "agents.accept", "agents.restore", "trust.mode", "trust.add", "trust.migrate"]);
+  const OWN_GUARD_PATH = new Set(["queue.approve", "queue.approveTrust", "batch.approve", "window.open", "policy.set", "session.open", "totp.begin", "totp.confirm", "agents.accept", "agents.restore", "agents.keepPart", "agents.rollbackPart", "agents.revokeKept", "trust.mode", "trust.add", "trust.migrate"]);
   const withGuardTouch = <T extends object>(handlers: T): T => {
     const out: Record<string, unknown> = {};
     if (!guardLink) {
@@ -858,6 +858,30 @@ export default async function plugin(bb: BbPluginApi) {
         action: r.action,
         note: r.resolved ? "Готово: настройки агента возвращены, тревога снята" : "Файл возвращён, но сторож всё ещё видит расхождение (возможно, агент изменил его снова): посмотрите карточку",
       };
+    }),
+    // One part of a settings file. «Вернуть» (theirs) tightens: no code. «Оставить» (mine): a touch; a session only for a part that is not dangerous (the guard checks the flag itself).
+    "agents.rollbackPart": wrap(async ({ id, partId, fileSha }) => {
+      if (!agents || !guardLink) throw new GateError("invalid", "вернуть часть файла можно только через сторожа");
+      const r = await guardLink.agentsRollbackPart(id, partId, fileSha);
+      await agents.refresh(false);
+      changed();
+      return { ok: true as const, resolved: r.resolved, remaining: r.remaining, note: r.resolved ? "Готово: возвращено, тревога снята" : "Готово: возвращено" };
+    }),
+    "agents.revokeKept": wrap(async ({ id }) => {
+      if (!agents || !guardLink) throw new GateError("invalid", "отозвать можно только через сторожа");
+      const r = await guardLink.agentsRevokeKept(id);
+      await agents.refresh(true);
+      changed();
+      return { ok: true as const, note: r.inFile ? "Отозвано: это ушло из файла настроек агента" : "Отозвано: в файле этого уже не было" };
+    }),
+    "agents.keepPart": wrap(async ({ id, partId, fileSha, danger, code, passkey, session }) => {
+      if (!agents || !guardLink) throw new GateError("invalid", "оставить часть файла можно только через сторожа");
+      const proof = proofOrSession({ code, passkey, session }, danger);
+      if (proof === undefined) throw new GateError("invalid_code", "a code or a touch is needed: the guard checks it");
+      const r = await guardLink.agentsKeepPart(id, partId, fileSha, danger, proof);
+      await agents.refresh(true);
+      changed();
+      return { ok: true as const, accepted: r.accepted, remaining: r.remaining, note: r.accepted ? "Оставлено: больше расхождений в этом файле нет" : "Оставлено" };
     }),
     // «Остановить агентов»: no code (a tightening). Every running thread is stopped; new turns are held while the critical difference is open.
     "agents.stop": wrap(async () => {
@@ -1178,6 +1202,10 @@ export default async function plugin(bb: BbPluginApi) {
         case "agents.restore": {
           if (q.ids === undefined || q.ids.length !== 1) throw new GateError("invalid", "one difference id is needed");
           return out({ op: "agents-restore", id: q.ids[0]! });
+        }
+        case "agents.keepPart": {
+          if (q.ids === undefined || q.ids.length !== 1 || q.partId === undefined || q.fileSha === undefined || q.danger === undefined) throw new GateError("invalid", "the difference, the part, the file hash and the danger flag are needed");
+          return out({ op: "agents-keep-part", id: q.ids[0]!, partId: q.partId, fileSha: q.fileSha, danger: q.danger });
         }
         case "trust.mode": {
           if (q.trustMode === undefined) throw new GateError("invalid", "trustMode is needed");

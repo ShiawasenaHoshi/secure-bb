@@ -4,12 +4,16 @@ import net from "node:net";
 
 export interface RestoreSend {
   /** `restore` (default) or `restore-json-key` (one section of .claude.json: `key` and `value` | `delete`). */
-  op?: "restore" | "restore-json-key";
+  op?: "restore" | "restore-json-key" | "restore-json-path";
   path: string;
-  sha256: string;
+  sha256?: string;
+  /** `restore-json-path`: the SHA-256 of the whole file the change was worked out from, the path inside it, and what to do there. */
+  fileSha256?: string;
+  pointer?: string[];
+  action?: "set" | "delete" | "array-add" | "array-remove";
   content?: string;
   key?: string[];
-  value?: Record<string, unknown>;
+  value?: unknown;
   delete?: true;
 }
 export type RestoreAnswer = { ok: true; result: "written" | "deleted" | "absent" } | { ok: false; code: string; message: string };

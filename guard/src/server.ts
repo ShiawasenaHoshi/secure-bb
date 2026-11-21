@@ -98,6 +98,14 @@ export function dispatch(guard: Guard, req: unknown, version: string): Record<st
     // «Вернуть как было»: a touch; the content is the guard's own baseline, the id is all the request carries.
     case "agents-restore":
       return guard.agentsRestore(r);
+    // One part of a settings file: «Вернуть» (tightening, no code) and «Оставить» (a touch; a session only for a part that does not make the agent more dangerous).
+    case "agents-rollback-part":
+      return guard.agentsRollbackPart(r);
+    case "agents-keep-part":
+      return guard.agentsKeepPart(r);
+    // «Отозвать» a kept part (the list of exceptions): tightening, no code.
+    case "agents-revoke-kept":
+      return guard.agentsRevokeKept(r);
     // «Это не я — отклонить»: tightening, no code.
     case "agents-reject":
       return guard.agentsReject(r);
