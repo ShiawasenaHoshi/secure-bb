@@ -1,5 +1,5 @@
 // Agent watch at the guard (design: secure-bb-agent-watch-design.md, "Тесты"): a temporary directory stands in for /var/bbagent.
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, readFileSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -47,8 +47,10 @@ function makeHome(): { home: string; put: (rel: string, text: string) => string;
   return { home, put, ws };
 }
 
+let lastAgents: { home: string; extraRoots: string[] } | null = null;
 async function start(h: { home: string }, extra: Record<string, unknown> = {}): Promise<TestGuard> {
-  g = await startGuard({ agents: { home: h.home, extraRoots: [], ...extra } });
+  lastAgents = { home: h.home, extraRoots: [], ...extra };
+  g = await startGuard({ agents: lastAgents });
   return g;
 }
 const scan = (): void => void g!.guard.agentsScan({ force: true });
@@ -669,3 +671,186 @@ describe("the guard files run as they are (Node strips the types: no other TypeS
     }
   });
 });
+
+// ---- links and races: what the agent owns, it can swap; nothing behind a link may be read ---------------------------------------------
+describe("links, swaps and the guard's own files", () => {
+  const MARK = "LEAK-MARKER-9f3a";
+  /** A directory outside the home with a settings.json and a CLAUDE.md that must never be read. */
+  function outside(): string {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "sbb-agents-out-")));
+    homes.push(dir);
+    writeFileSync(join(dir, "settings.json"), JSON.stringify({ note: MARK, hooks: { Stop: [{ hooks: [{ type: "command", command: MARK }] }] } }));
+    writeFileSync(join(dir, "CLAUDE.md"), `${MARK}\n`);
+    return dir;
+  }
+  /** Everything the guard says to anybody who asks: the state, the journal. */
+  async function everything(): Promise<string> {
+    return JSON.stringify([await g!.send({ op: "agents-state" }), await g!.send({ op: "state" })]);
+  }
+  const secretOf = (): string => g!.secret;
+
+  it("a file that is a link to somewhere outside the home is not read: an alarm", async () => {
+    const h = makeHome();
+    const out = outside();
+    mkdirSync(join(h.home, ".claude"), { recursive: true });
+    symlinkSync(join(out, "CLAUDE.md"), join(h.home, ".claude/CLAUDE.md"));
+    await start(h);
+    scan();
+    expect(state().alarms).toEqual([expect.objectContaining({ path: join(h.home, ".claude/CLAUDE.md"), kind: "outside" })]);
+    expect(open()).toEqual([]);
+    expect(await everything()).not.toContain(MARK);
+    expect((await journal()).some((j) => j.kind === "agents.alarm")).toBe(true);
+  });
+
+  it("a link inside the home that stays inside is recorded as a link, not followed", async () => {
+    const h = makeHome();
+    h.put("real/notes.md", `${MARK}\n`);
+    mkdirSync(join(h.home, ".claude"), { recursive: true });
+    symlinkSync(join(h.home, "real/notes.md"), join(h.home, ".claude/CLAUDE.md"));
+    await start(h);
+    scan();
+    expect(state().alarms).toEqual([]);
+    const d = find(join(h.home, ".claude/CLAUDE.md"));
+    expect(d.diff).toContain("-> ");
+    expect(await everything()).not.toContain(MARK); // the target's text is not what was read
+  });
+
+  it("a directory on the way that is a link to a directory outside the home: nothing in it is read", async () => {
+    const h = makeHome();
+    const out = outside();
+    symlinkSync(out, join(h.home, ".claude")); // ~/.claude -> outside
+    mkdirSync(join(out, "opencode"), { recursive: true });
+    writeFileSync(join(out, "opencode", "opencode.json"), `{"x":"${MARK}"}`);
+    symlinkSync(out, join(h.home, ".config")); // ~/.config -> outside (…/opencode/opencode.json behind it)
+    await start(h);
+    scan();
+    const paths = state().alarms.map((a: any) => `${a.kind}:${a.path}`);
+    expect(paths.some((x: string) => x.startsWith("outside:") && x.includes(".claude"))).toBe(true);
+    expect(paths.some((x: string) => x.startsWith("outside:") && x.includes(".config"))).toBe(true);
+    expect(open()).toEqual([]);
+    expect(await everything()).not.toContain(MARK);
+  });
+
+  it("a working directory that is a link (or holds a link to a directory) outside is not read", async () => {
+    const h = makeHome();
+    const out = outside();
+    mkdirSync(dirnameOf(h.ws("x")), { recursive: true });
+    symlinkSync(out, h.ws("thr_linked")); // the working directory itself
+    mkdirSync(h.ws("thr_real"), { recursive: true });
+    symlinkSync(out, join(h.ws("thr_real"), ".claude")); // a directory inside it
+    await start(h);
+    scan();
+    const alarms = state().alarms.map((a: any) => a.path);
+    expect(alarms).toEqual(expect.arrayContaining([h.ws("thr_linked"), join(h.ws("thr_real"), ".claude")]));
+    expect(open()).toEqual([]);
+    expect(await everything()).not.toContain(MARK);
+  });
+
+  it("the plugins' directory may itself be a link: a workspaces directory that leads out is refused", async () => {
+    const h = makeHome();
+    const out = outside();
+    mkdirSync(join(h.home, "data", "plugins", "p", "host-data"), { recursive: true });
+    mkdirSync(join(out, "w1"), { recursive: true });
+    writeFileSync(join(out, "w1", "CLAUDE.md"), `${MARK}\n`);
+    symlinkSync(out, join(h.home, "data", "plugins", "p", "host-data", "workspaces"));
+    await start(h);
+    scan();
+    expect(state().alarms.length).toBeGreaterThan(0);
+    expect(await everything()).not.toContain(MARK);
+  });
+
+  it("a swap between looking and opening: a file replaced by a link to the guard's TOTP secret is not read", async () => {
+    const h = makeHome();
+    const f = h.put(".claude/settings.json", "{}");
+    let swapped = 0;
+    await start(h, {
+      hooks: {
+        beforeOpen: (p: string) => {
+          if (p !== f) return;
+          swapped++;
+          rmSync(p);
+          symlinkSync(g!.paths.secret, p); // the agent's trick
+        },
+      },
+    });
+    scan();
+    expect(swapped).toBe(1);
+    expect(state().alarms).toEqual([expect.objectContaining({ path: f, kind: "swapped" })]);
+    expect(open()).toEqual([]);
+    expect(await everything()).not.toContain(secretOf());
+  });
+
+  it("a swap for another regular file (another inode) is caught too; so is a swap of the directory on the way", async () => {
+    const h = makeHome();
+    const f = h.put(".claude/CLAUDE.md", "mine\n");
+    const other = h.put("elsewhere.md", `${MARK}\n`);
+    await start(h, { hooks: { beforeOpen: (p: string) => p === f && renameSync(other, p) } });
+    scan();
+    expect(state().alarms).toEqual([expect.objectContaining({ path: f, kind: "swapped" })]);
+    expect(await everything()).not.toContain(MARK);
+    await g!.close();
+
+    // the directory on the way becomes a link after its real path was looked at: the content read is thrown away
+    const h2 = makeHome();
+    const out = outside();
+    h2.put(".claude/settings.json", "{}");
+    const inner = join(h2.home, ".claude");
+    await start(h2, {
+      hooks: {
+        beforeOpen: (p: string) => {
+          if (p !== join(inner, "settings.json")) return;
+          renameSync(inner, `${inner}.moved`);
+          symlinkSync(out, inner);
+        },
+      },
+    });
+    scan();
+    expect(open()).toEqual([]);
+    expect(state().alarms.length).toBeGreaterThan(0);
+    expect(await everything()).not.toContain(MARK);
+  });
+
+  it("the guard's own data never reaches the answers: links to it, and even a root of it named from the console", async () => {
+    const h = makeHome();
+    await start(h);
+    const secret = secretOf();
+    const { stateDir, dataDir } = g!.paths;
+    expect(readFileSync(g!.paths.secret, "utf8")).toContain(secret);
+    // 1. a file that links to the secret; 2. a directory that links to the state directory; 3. a workspace that is the state directory
+    mkdirSync(join(h.home, ".claude"), { recursive: true });
+    symlinkSync(g!.paths.secret, join(h.home, ".claude/CLAUDE.md"));
+    symlinkSync(stateDir, join(h.home, ".codex"));
+    mkdirSync(dirname(h.ws("x")), { recursive: true });
+    symlinkSync(stateDir, h.ws("thr_state"));
+    scan();
+    expect(state().alarms.length).toBeGreaterThanOrEqual(3);
+    expect(open()).toEqual([]);
+    expect(await everything()).not.toContain(secret);
+
+    // 4. the state directory (and the data directory above it) added as roots from the console, with files named like the watched ones
+    for (const name of ["CLAUDE.md", "AGENTS.md"]) writeFileSync(join(stateDir, name), `${secret}\n`);
+    lastAgents!.extraRoots.push(stateDir, dataDir);
+    tick();
+    scan();
+    expect(state().alarms.some((a: any) => a.path === stateDir && a.kind === "outside")).toBe(true);
+    expect(open()).toEqual([]);
+    // 5. the home that contains the guard's data (a misconfiguration): still refused
+    lastAgents!.extraRoots.length = 0;
+    expect(await everything()).not.toContain(secret);
+    expect(JSON.stringify(state())).not.toContain(secret);
+    // the baseline cannot hold it either
+    expect(state().baselineFiles).toBe(0);
+  });
+
+  it("a home that contains the guard's data (a misconfiguration) does not read it", async () => {
+    g = await startGuard();
+    const dir = g.paths.stateDir;
+    await g.close();
+    g = await startGuard({ agents: { home: dirname(dir), extraRoots: [dir] } });
+    for (const name of ["CLAUDE.md", "AGENTS.md"]) writeFileSync(join(g.paths.stateDir, name), `${g.secret}\n`);
+    scan();
+    expect(JSON.stringify(state())).not.toContain(g.secret);
+    expect(JSON.stringify(await g.send({ op: "state" }))).not.toContain(g.secret);
+  });
+});
+const dirnameOf = dirname;

@@ -128,7 +128,7 @@ export interface AgentsState {
   openTotal?: number;
   drifts?: AgentDrift[];
   recent?: AgentDrift[];
-  alarms?: Array<{ path: string; kind: "unreadable"; error: string }>;
+  alarms?: Array<{ path: string; kind: "unreadable" | "outside" | "swapped"; error: string }>;
   notes?: Array<{ kind: string; text: string }>;
   /** Set on the answer to `agents-scan`: the scan was served at most once in 10 s. */
   scanned?: boolean;

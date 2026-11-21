@@ -1632,6 +1632,8 @@ const CLASS_STYLE: Record<string, string> = {
   instructions: "border-yellow-500/70",
   other: "border-border",
 };
+/** What an alarm of the watch says: no access, or a link / a swap that led out of what is watched (nothing was read then). */
+const alarmText = (x: { kind: string; error: string }): string => (x.kind === "unreadable" ? `нет доступа (${x.error})` : x.kind === "outside" ? `ссылка ведёт за пределы наблюдаемого — ${x.error}` : `подмена во время чтения — ${x.error}`);
 const CHANGE_LABEL: Record<string, string> = { added: "новый файл", changed: "изменён", removed: "удалён" };
 const SEVERITY_STYLE: Record<string, string> = { block: "font-semibold text-red-700 dark:text-red-400", review: "text-yellow-700 dark:text-yellow-400", info: muted };
 
@@ -1653,8 +1655,8 @@ function AgentsAlarm({ ov }: { ov: Overview }) {
     <div className="rounded-md border-2 border-destructive bg-destructive/10 p-2 text-destructive" role="alert" data-secure-bb-alarm>
       {alarms.length > 0 ? (
         <>
-          <p className="font-semibold">ТРЕВОГА: сторож не видит файлы агентов ({alarms.length})</p>
-          <ul className="mt-1 list-disc pl-5 text-xs">{alarms.slice(0, 5).map((x) => <li key={x.path} className="break-all">{x.path} — нет доступа ({x.error})</li>)}</ul>
+          <p className="font-semibold">ТРЕВОГА: сторож не читает файлы агентов ({alarms.length})</p>
+          <ul className="mt-1 list-disc pl-5 text-xs">{alarms.slice(0, 5).map((x) => <li key={x.path} className="break-all">{x.path} — {alarmText(x)}</li>)}</ul>
           <p className="mt-1 text-xs">Так выглядит снятый ACL на каталоге агентов (его может снять владелец файлов — агент) или сломанные права. Пока доступа нет, наблюдатель слепой: изменения в этих путях никто не видит.</p>
         </>
       ) : null}
@@ -1774,9 +1776,9 @@ function AgentsSection({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; refetch: 
       {ag.error ? <Msg error={`сторож не ответил на последний запрос: ${ag.error}`} /> : null}
       {(st.alarms ?? []).length > 0 ? (
         <div className={cardBlocked} role="alert">
-          <p className="font-semibold">Нет доступа к файлам агентов ({st.alarms!.length})</p>
-          <ul className="mt-1 list-disc pl-5 text-xs">{st.alarms!.map((x) => <li key={x.path} className="break-all">{x.path} — {x.error}</li>)}</ul>
-          <p className="mt-1 text-xs">ACL чтения для пользователя сторожа снят или права сломаны (установщик выдаёт его, `--undo` снимает). Без него наблюдатель слепой.</p>
+          <p className="font-semibold">Файлы агентов не читаются ({st.alarms!.length})</p>
+          <ul className="mt-1 list-disc pl-5 text-xs">{st.alarms!.map((x) => <li key={x.path} className="break-all">{x.path} — {alarmText(x)}</li>)}</ul>
+          <p className="mt-1 text-xs">Либо ACL чтения для пользователя сторожа снят или права сломаны, либо агент подсунул ссылку или подменил файл (сторож по ссылкам за пределы наблюдаемого не ходит и ничего оттуда не читает) (установщик выдаёт его, `--undo` снимает). Без него наблюдатель слепой.</p>
         </div>
       ) : null}
       {(st.notes ?? []).length > 0 ? (

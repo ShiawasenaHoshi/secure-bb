@@ -10,7 +10,7 @@
 // by anything in this file. A touch is either a TOTP code or a passkey signature over a challenge the guard issued for exactly
 // that action (see "Passkeys" below); passkeys are registered only through the console (`sbb-guard passkey-enroll`).
 import { readFileSync, renameSync, unlinkSync, writeFileSync, openSync, closeSync, writeSync, constants, lstatSync } from "node:fs";
-import { basename } from "node:path";
+import { basename, dirname } from "node:path";
 import { timingSafeEqual } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { DEFAULT_ORIGIN, DEFAULT_RP_ID, type RelyingParty } from "./config.ts";
@@ -217,6 +217,10 @@ export interface AgentsConfig {
   extraRoots: string[];
   /** Tests lower the limits of a scan. */
   limits?: Partial<Limits>;
+  /** More directories that are never read (the guard's data and its socket; its state directory is always one). */
+  deny?: string[];
+  /** Tests: a function called between looking at a file and opening it. */
+  hooks?: { beforeOpen?: (path: string) => void };
 }
 
 /** What a touch is made of: a TOTP code, or (instead of it) a passkey assertion. */
@@ -262,9 +266,13 @@ export class Guard {
   private readonly rp: RelyingParty;
   private readonly agents: AgentsConfig | null;
   private lastAgentsScan = 0;
+  private readonly secretDir: string;
+  private readonly headDir: string;
 
   constructor(o: GuardOptions) {
     this.agents = o.agents ?? null;
+    this.secretDir = dirname(o.secretPath);
+    this.headDir = dirname(o.headPath);
     this.rp = o.rp ?? { rpId: DEFAULT_RP_ID, origin: DEFAULT_ORIGIN };
     this.db = o.db;
     this.now = o.now;
@@ -1103,7 +1111,7 @@ export class Guard {
     const t = this.now();
     if (!opts.force && this.lastAgentsScan !== 0 && t - this.lastAgentsScan < AGENTS_SCAN_GAP_MS) return { scanned: false, throttled: true, at: this.lastAgentsScan };
     this.lastAgentsScan = t;
-    const res = scanAgents({ home: this.agents.home, extraRoots: this.agents.extraRoots, ...(this.agents.limits ? { limits: this.agents.limits } : {}) });
+    const res = scanAgents({ home: this.agents.home, extraRoots: this.agents.extraRoots, ...(this.agents.limits ? { limits: this.agents.limits } : {}), deny: [this.secretDir, this.headDir, ...(this.agents.deny ?? [])], ...(this.agents.hooks ? { hooks: this.agents.hooks } : {}) });
     this.tx(() => this.reconcileAgents(res));
     return { scanned: true, throttled: false, at: t };
   }

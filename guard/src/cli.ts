@@ -2,6 +2,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import net from "node:net";
+import { dirname } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { resolvePaths, type GuardPaths } from "./config.ts";
 import { openDb, privateDir } from "./db.ts";
@@ -87,7 +88,7 @@ const optStr = (o: Opts, k: string): string | undefined => (typeof o[k] === "str
 function open(paths: GuardPaths, now: () => number): { guard: Guard; close: () => void } {
   privateDir(paths.stateDir);
   const db = openDb(paths.db);
-  return { guard: new Guard({ db, now, secretPath: paths.secret, headPath: paths.head, rp: paths.rp, agents: { home: paths.agentsHome, extraRoots: paths.agentsRoots } }), close: () => db.close() };
+  return { guard: new Guard({ db, now, secretPath: paths.secret, headPath: paths.head, rp: paths.rp, agents: { home: paths.agentsHome, extraRoots: paths.agentsRoots, deny: [paths.dataDir, dirname(paths.socket)] } }), close: () => db.close() };
 }
 
 /** One request to a running guard. */
