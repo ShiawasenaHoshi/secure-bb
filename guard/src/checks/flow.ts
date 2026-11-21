@@ -118,6 +118,8 @@ const PURE_GLOBALS = new Set(["String", "Number", "Boolean", "parseInt", "parseF
 const TIMERS = new Set(["setTimeout", "setInterval", "setImmediate", "queueMicrotask", "requestAnimationFrame", "requestIdleCallback"]);
 const EMIT_METHODS = new Set(["emit", "dispatchEvent", "postMessage", "publish", "broadcast"]);
 const LISTEN_METHODS = new Set(["on", "once", "addListener", "addEventListener", "prependListener", "prependOnceListener", "subscribe", "onmessage"]);
+/** Calls the analysis does not resolve that cannot carry a choice out: a sound player, a timer's handle, a clock. A list, not a guess: anything else under a branch on what was read is «не видно». */
+const BENIGN_UNRESOLVED = /^(Audio|play|pause|load|unref|ref|timeout|now|hasOwnProperty|(Object\.prototype\.)?hasOwnProperty\.call|getTime|performance\.now|AbortSignal\.timeout|AbortSignal\.any|onDispose|bb\.onDispose)$/;
 const TIMER_CLEARS = new Set(["clearTimeout", "clearInterval", "clearImmediate", "cancelAnimationFrame", "cancelIdleCallback"]);
 /** Methods of strings, arrays, maps and promises: the result is made of the receiver and the arguments. */
 const PURE_METHODS = new Set(["toString", "toJSON", "toLowerCase", "toUpperCase", "toLocaleLowerCase", "toLocaleUpperCase", "trim", "trimStart", "trimEnd", "padStart", "padEnd", "slice", "substring", "substr", "split", "join", "concat", "replace", "replaceAll", "match", "matchAll", "normalize", "repeat", "charAt", "charCodeAt", "codePointAt", "indexOf", "lastIndexOf", "includes", "startsWith", "endsWith", "localeCompare", "at", "flat", "reverse", "toSorted", "toReversed", "toSpliced", "with", "test", "exec", "toFixed", "toISOString", "toLocaleString", "toLocaleDateString", "toLocaleTimeString", "getTime", "valueOf", "has", "hasOwnProperty", "isArray", "keys", "entries", "values", "get", "set", "add", "delete", "clear", "push", "pop", "shift", "unshift", "splice", "fill", "copyWithin", "next", "return", "bind", "encode", "decode", "toBase64", "readUInt8", "writeUInt8", "subarray", "update", "digest", "format", "resolve", "reject", "all", "allSettled", "race", "any", "from", "of", "assign", "freeze", "create", "entries", "fromEntries", "stringify", "parse", "defineProperty", "getPrototypeOf", "isFrozen", "min", "max", "floor", "ceil", "round", "abs", "random", "pow", "sqrt", "now", "UTC", "parseISO", "dirname", "basename", "extname", "join", "normalize", "relative", "isAbsolute", "sep", "fileURLToPath", "pathToFileURL", "homedir", "tmpdir", "hostname", "platform", "arch", "cwd", "uptime", "randomUUID", "randomBytes", "createHash", "createHmac", "timingSafeEqual", "on", "once", "off", "addEventListener", "removeEventListener", "json", "text", "blob", "arrayBuffer", "formData", "clone", "abort"]);
@@ -198,6 +200,8 @@ class Engine {
   /** The data the branch we are in depends on (`k:` labels): what is called under it is called, or not, by what was read. */
   private ctl = new Set<string>();
   private timedOut = false;
+  /** Choices made by a wait (a timer, a promise that resolves after one): what follows an `await` of it runs when that choice says. */
+  private pendingK = new Set<string>();
   /** Phase two: what a call the analysis cannot resolve does to its arguments. Not before the callees are settled, or a callee resolved later would stay tainted by the guess. */
   private fallback = false;
   private visits = 0;
@@ -527,7 +531,7 @@ class Engine {
   private unboundName(n0: N, sc: Scope): string | null {
     const n = unwrap(n0);
     if (n?.type === "Identifier") return this.lookup(sc, n.name) === null ? n.name : null;
-    if (n?.type === "MemberExpression" && !n.computed && n.property.type === "Identifier" && n.object.type === "Identifier" && GLOBAL_OBJECTS.has(n.object.name) && this.lookup(sc, n.object.name) === null) return n.property.name;
+    if (n?.type === "MemberExpression" && !n.computed && n.property.type === "Identifier" && unwrap(n.object).type === "Identifier" && GLOBAL_OBJECTS.has(unwrap(n.object).name) && this.lookup(sc, unwrap(n.object).name) === null) return n.property.name;
     return null;
   }
   private isProcessEnv(n: N, sc: Scope): boolean {
@@ -957,8 +961,11 @@ class Engine {
       case "TSTypeAssertion":
       case "ChainExpression":
       case "ParenthesizedExpression":
-      case "AwaitExpression":
-        return n.argument || n.expression ? this.ev(n.argument ?? n.expression, sc) : new Set();
+      case "AwaitExpression": {
+        const v = n.argument || n.expression ? this.ev(n.argument ?? n.expression, sc) : new Set<string>();
+        for (const x of v) if (x.startsWith("k:")) this.pendingK.add(x);
+        return v;
+      }
       case "YieldExpression": {
         const v = n.argument ? this.ev(n.argument, sc) : new Set<string>();
         const fn = this.enclosingFn(sc);
@@ -992,9 +999,13 @@ class Engine {
         const a = this.ev(n.argument, sc);
         return n.operator === "void" ? new Set() : this.kOf(a);
       }
-      case "UpdateExpression":
+      case "UpdateExpression": {
         this.ev(n.argument, sc);
+        // `k++` in a loop whose end depends on what was read: the counter is a choice made by it
+        const arg = unwrap(n.argument);
+        if (this.ctl.size > 0 && (arg.type === "Identifier" || arg.type === "MemberExpression")) this.bindPattern(arg, new Set(), sc);
         return new Set();
+      }
       case "AssignmentExpression": {
         const v = this.ev(n.right, sc);
         const left = unwrap(n.left);
@@ -1003,6 +1014,7 @@ class Engine {
           else this.bindPattern(left, v, sc);
         }
         else if (n.operator === "+=") this.bindPattern(left, this.flat(v) as Set<string>, sc);
+        else this.bindPattern(left, this.kOf(v), sc);
         return v;
       }
       case "MemberExpression":
@@ -1054,6 +1066,11 @@ class Engine {
   private evIdentifier(n: N, sc: Scope): Set<string> {
     const k = this.lookup(sc, n.name);
     if (k) return this.cell(k);
+    return this.globalValue(n.name, sc);
+  }
+  /** What a name nothing declared is: the globals the analysis knows (`fetch`, `localStorage`…). `globalThis.fetch` is the same value as `fetch`. */
+  private globalValue(name: string, sc: Scope): Set<string> {
+    const n = { name };
     switch (n.name) {
       case "undefined":
         return new Set();
@@ -1082,6 +1099,8 @@ class Engine {
       return new Set(["x:env"]);
     }
     const objNode = unwrap(n.object);
+    const gname = this.unboundName(n, sc);
+    if (gname !== null && !n.computed) return this.globalValue(gname, sc);
     if (objNode.type === "Super") {
       const ci = this.classOf(sc);
       const out = new Set<string>();
@@ -1251,7 +1270,9 @@ class Engine {
     const methodName = member ? this.propName(member, file) : callee.type === "Identifier" ? callee.name : null;
     const recvNode = member ? unwrap(member.object) : null;
     const recvV = member && recvNode.type !== "Super" ? this.ev(member.object, sc) : new Set<string>();
-    const chain = this.sdkChainRaw(callee, file);
+    const chain0 = this.sdkChainRaw(callee, file);
+    // `globalThis.navigator.sendBeacon` is `navigator.sendBeacon`
+    const chain = chain0 === null ? null : this.lookup(sc, chain0.split(".")[0]!) === null ? chain0.replace(/^(globalThis|window|self|global)\./, "") : chain0;
     const unbound = this.unboundName(callee, sc);
 
     // ---- bb's API ----
@@ -1382,7 +1403,9 @@ class Engine {
         for (const x of this.flat(recvV)) out.add(x);
       }
       const what = chain ?? methodName ?? "a function";
-      this.unknownSink(`a call to ${what}, which the code does not show`, [...args, recvV], n, sc);
+      // Under a branch on what was read an unresolved call is a way out unless it is one of the harmless trifles
+      const trifle = BENIGN_UNRESOLVED.test(methodName ?? "") || BENIGN_UNRESOLVED.test(chain ?? "");
+      this.unknownSink(`a call to ${what}, which the code does not show`, [...args, recvV], n, sc, !trifle);
       this.escape(args, n, sc);
     }
     return out;
@@ -1439,6 +1462,8 @@ class Engine {
     if (TIMERS.has(name) && !isNew) {
       // the delay is a choice made by what it was computed from, and what runs after it is called by that choice
       const delay = this.kOf(args[1] ?? []);
+      // `new Promise((r) => setTimeout(r, delay))`: the promise settles when the delay says
+      for (const r of this.tokens(args[0] ?? [], "r:")) this.add(`res:${r}`, delay);
       for (const f of this.tokens(args[0] ?? [], "f:")) {
         this.add(`ctx:${f.slice(2)}`, delay);
         this.bindCall(f, [], null, sc);
@@ -1837,6 +1862,7 @@ class Engine {
         return true;
       }
       if (method === "then" || method === "catch" || method === "finally") {
+        for (const f of cbs) this.add(`ctx:${f.slice(2)}`, [...recvV].filter((x) => x.startsWith("k:")));
         for (const x of cbRet) out.add(x);
         if (method !== "then" || cbs.length === 0) for (const t of recvV) out.add(t);
         return true;
@@ -2028,6 +2054,7 @@ class Engine {
         this.exec(s, sc);
         const k = this.exitGuard(s, sc);
         if (k.size > 0) this.ctl = new Set([...this.ctl, ...k]);
+        if (this.pendingK.size > 0) this.ctl = new Set([...this.ctl, ...this.pendingK]);
       }
     } finally {
       this.ctl = saved;
@@ -2054,6 +2081,7 @@ class Engine {
     const sc = fn.scope;
     // what calls this function (and the choices that made them) decides whether it runs
     this.ctl = new Set(this.cell(`ctx:${fn.id}`));
+    this.pendingK = new Set();
     try {
       if (fn.isModule) {
         this.execSeq(fn.node.body, sc);
