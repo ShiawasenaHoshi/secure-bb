@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type net from "node:net";
 import { resolvePaths, type GuardPaths } from "../../guard/src/config.ts";
 import { openDb, privateDir } from "../../guard/src/db.ts";
-import { Guard, type AgentsConfig } from "../../guard/src/guard.ts";
+import { Guard, type AgentsConfig, type TrustConfig } from "../../guard/src/guard.ts";
 import { request } from "../../guard/src/cli.ts";
 import { listen } from "../../guard/src/server.ts";
 import { base32Decode, generateSecret, hotp, stepAt } from "../../guard/src/totp.ts";
@@ -34,13 +34,13 @@ export interface TestGuard {
   close(): Promise<void>;
 }
 
-export async function startGuard(opts: { register?: boolean; serve?: boolean; rp?: RelyingParty; agents?: AgentsConfig } = {}): Promise<TestGuard> {
+export async function startGuard(opts: { register?: boolean; serve?: boolean; rp?: RelyingParty; agents?: AgentsConfig; trust?: TrustConfig } = {}): Promise<TestGuard> {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "sbb-guard-")));
   const paths = resolvePaths({ data: dir, socket: join(dir, "run", "guard.sock") });
   privateDir(paths.stateDir);
   const clock = new Clock();
   const db = openDb(paths.db);
-  const guard = new Guard({ db, now: clock.now, secretPath: paths.secret, headPath: paths.head, ...(opts.rp ? { rp: opts.rp } : {}), ...(opts.agents ? { agents: opts.agents } : {}) });
+  const guard = new Guard({ db, now: clock.now, secretPath: paths.secret, headPath: paths.head, ...(opts.rp ? { rp: opts.rp } : {}), ...(opts.agents ? { agents: opts.agents } : {}), ...(opts.trust ? { trust: opts.trust } : {}) });
   const secret = generateSecret();
   const code = (): string => hotp(base32Decode(secret), stepAt(clock.t));
   if (opts.register !== false) {

@@ -579,6 +579,16 @@ export class Gate {
       this.store.logDecision("hold", ctx.pluginId, ctx.contentHash, { version: ctx.version, trigger: ctx.trigger, reason: "guard unreachable", message: err instanceof Error ? err.message : String(err) });
       return { action: "wait", reason: T.agentHeldNoReview };
     }
+    // Not approved and no window: the guard may let it in by itself (an own source, rights not grown). The core runs the hooks before it asks the
+    // guard, so without this question the hook would hold such a version once and it would wait for a recheck. What the guard decides is the guard's:
+    // this only asks. A "wait" (or no answer) changes nothing here; the checks below hold as before.
+    if (!look.approved && look.window === null) {
+      const asked = await guard.decide({ pluginId: ctx.pluginId, version: ctx.version, contentHash: ctx.contentHash, rootDir: ctx.rootDir, source: ctx.source, sourceKind: ctx.sourceKind, trigger: ctx.trigger }).catch(() => null);
+      if (asked?.action === "proceed") {
+        this.scheduleCheck(ctx);
+        return { action: "proceed" };
+      }
+    }
     // An approval a window made a moment ago, while that window is still open, is not final: the core may have asked the guard first, and
     // the guard approves by the window without knowing what this hook knows (a new capability, a tainted tree). Looked at again below;
     // if it must be held, the approval is withdrawn (tightening: no code). A human's approval, a pin of a closed window, an import: final.

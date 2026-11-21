@@ -137,6 +137,14 @@ export const MIGRATIONS: string[] = [
      last_seen INTEGER NOT NULL,
      resolved_at INTEGER)`,
   `CREATE INDEX agent_drifts_status ON agent_drifts (status, path)`,
+  // Trust by source and rights (UX v1, PR 1). `rights`: what the guard itself found in the version's directory (JSON: capability tokens and review rules),
+  // kept with the approval as the baseline a later version of the same source is compared with; `source_id`: the source the approval is from
+  // (`github:owner/name` or `path:/dir`; null for sources the lists cannot name). `note` in the queue: why a version did not pass by itself.
+  `ALTER TABLE approvals ADD COLUMN rights TEXT`,
+  `ALTER TABLE approvals ADD COLUMN source_id TEXT`,
+  `ALTER TABLE queue ADD COLUMN rights TEXT`,
+  `ALTER TABLE queue ADD COLUMN note TEXT`,
+  `CREATE INDEX approvals_baseline ON approvals (plugin_id, source_id)`,
 ];
 
 export function openDb(path: string): DatabaseSync {

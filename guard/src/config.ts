@@ -19,6 +19,10 @@ export interface GuardPaths {
   /** Agent watch: the agents' home, and the extra roots the console names (absolute paths; extending the list is a console matter only). */
   agentsHome: string;
   agentsRoots: string[];
+  /** Directories where the core keeps the plugins it installed from git: a version of such a source is read (and may pass by itself) only from under one of them. Empty: none passes by itself. */
+  pluginsRoots: string[];
+  /** Sources the owner names as the official catalog (`github:owner/name`, `github:owner/*`): the level "known". Empty: no source is known. */
+  knownSources: string[];
 }
 
 export const DEFAULT_DATA_DIR = "/var/sbb-guard";
@@ -27,7 +31,7 @@ export const DEFAULT_AGENTS_HOME = "/var/bbagent";
 /** Outside the data directory: that one is 0700, and the bb user must reach the socket through a directory of its own (0750, owner the guard, group the bb user's). */
 export const DEFAULT_SOCKET = "/var/run/sbb-guard/guard.sock";
 
-export function resolvePaths(opts: { data?: string; socket?: string; socketGid?: string; rpId?: string; origin?: string; agentsHome?: string; agentsRoots?: string }, env: Record<string, string | undefined> = process.env): GuardPaths {
+export function resolvePaths(opts: { data?: string; socket?: string; socketGid?: string; rpId?: string; origin?: string; agentsHome?: string; agentsRoots?: string; pluginsRoots?: string; knownSources?: string }, env: Record<string, string | undefined> = process.env): GuardPaths {
   const dataDir = opts.data ?? env.SBB_GUARD_DATA ?? DEFAULT_DATA_DIR;
   const stateDir = join(dataDir, "state");
   const gidText = opts.socketGid ?? env.SBB_GUARD_SOCKET_GID;
@@ -49,8 +53,12 @@ export function resolvePaths(opts: { data?: string; socket?: string; socketGid?:
       .map((x) => x.trim())
       .filter((x) => x !== "")
       .map((x) => absolute(x, "--agents-root")),
+    pluginsRoots: list(opts.pluginsRoots ?? env.SBB_GUARD_PLUGINS_ROOTS).map((x) => absolute(x, "--plugins-root")),
+    knownSources: list(opts.knownSources ?? env.SBB_GUARD_KNOWN_SOURCES),
   };
 }
+
+const list = (v: string | undefined): string[] => (v ?? "").split(",").map((x) => x.trim()).filter((x) => x !== "");
 
 function absolute(p: string, flag: string): string {
   if (!isAbsolute(p)) throw new Error(`${flag} must be an absolute path`);

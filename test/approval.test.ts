@@ -43,6 +43,9 @@ const EXPECTED: Record<string, RpcGroup> = {
   "sentinel.settings": "dangerous",
   "approvals.export": "dangerous",
   "agents.accept": "dangerous", // a touch for exactly these differences, at the guard: a session does not do
+  "trust.mode": "dangerous", // weakening the mode is a touch at the guard; strengthening needs none (the guard says which)
+  "trust.add": "dangerous",
+  "trust.migrate": "dangerous",
   // free
   overview: "free",
   "journal.verify": "free",
@@ -58,6 +61,7 @@ const EXPECTED: Record<string, RpcGroup> = {
   "skills.remove": "free",
   "skills.removed": "free",
   "agents.scan": "free",
+  "trust.remove": "free", // tightening
   "ai.scan": "free",
   "publish.run": "free",
 };

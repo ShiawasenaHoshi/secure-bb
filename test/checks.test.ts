@@ -429,17 +429,17 @@ describe("review 2.1 — what used to be silent", () => {
   describe("minified (items 6, 9)", () => {
     it("the vendored parser files are not called minified, and are not special-cased by path", async () => {
       for (const f of ["acorn.mjs", "acorn-jsx.mjs", "acorn-typescript.mjs"]) {
-        const r = await tree({ "vendored.mjs": readFileSync(new URL(`../vendor/${f}`, import.meta.url)) });
+        const r = await tree({ "vendored.mjs": readFileSync(new URL(`../guard/vendor/${f}`, import.meta.url)) });
         expect(rules(r), f).not.toContain("minified");
       }
     });
     it("the exemption is by hash: the same file with one byte changed is judged on its merits", async () => {
-      const text = readFileSync(new URL("../vendor/acorn.mjs", import.meta.url), "utf8");
+      const text = readFileSync(new URL("../guard/vendor/acorn.mjs", import.meta.url), "utf8");
       expect(rules(await tree({ "v.mjs": text + "\n// x\n" }))).not.toContain("minified"); // still readable code: no exemption needed
       expect(KNOWN_VENDORED_SHA256.size).toBe(3);
     });
     it("every built-in hash is the one written in vendor/README.md", () => {
-      const readme = readFileSync(new URL("../vendor/README.md", import.meta.url), "utf8");
+      const readme = readFileSync(new URL("../guard/vendor/README.md", import.meta.url), "utf8");
       for (const h of KNOWN_VENDORED_SHA256) expect(readme).toContain(h);
     });
     it("a few \\u escapes in a big file do not make it dense", async () => {

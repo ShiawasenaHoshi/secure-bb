@@ -28,6 +28,15 @@ export interface GuardApproval {
   approvedAt: number;
   revokedAt: number | null;
 }
+/** Trust by source and rights (the guard's own): the mode, "my sources", the sources the owner named as the official catalog. */
+export type TrustMode = "simple" | "detailed" | "strict";
+export interface GuardTrust {
+  mode: TrustMode;
+  mySources: string[];
+  known: string[];
+  /** How many plugin directories the guard may read for sources from git (0: nothing from git passes by itself). */
+  pluginsRoots: number;
+}
 export interface GuardQueueEntry {
   id: number;
   contentHash: string;
@@ -41,6 +50,8 @@ export interface GuardQueueEntry {
   firstSeen: number;
   lastSeen: number;
   seenCount: number;
+  /** Why the version did not pass by itself, in the guard's words (it read the directory itself). Absent in a guard that predates the rule. */
+  note?: string | null;
   /** Supplied by this plugin (the guard cannot check it): for display only. */
   annotation: { ts: number; findings: unknown; verified: false } | null;
 }
@@ -79,6 +90,8 @@ export type GuardAction =
   | { op: "open-window"; pluginId: string; minutes?: number; scope?: "tree" | "thread" }
   | { op: "policy"; patch: Partial<GuardPolicy> }
   | { op: "touch"; purpose: string }
+  | { op: "trust-mode"; mode: TrustMode }
+  | { op: "sources-add"; entries: string[] }
   | { op: "agents-accept"; ids: number[] };
 export interface GuardChallenge {
   challenge: string;
@@ -141,6 +154,8 @@ export interface GuardState {
   /** Absent in a guard that predates passkeys. */
   passkeys?: { rpId: string; origin: string; keys: Array<{ id: number; label: string; createdAt: number; lastUsedAt: number | null }>; enrollmentOpen: boolean };
   policy: GuardPolicy;
+  /** Absent in a guard that predates trust by source. */
+  trust?: GuardTrust;
   queue: GuardQueueEntry[];
   approvals: GuardApproval[];
   revoked: GuardApproval[];
@@ -175,6 +190,11 @@ export interface GuardHoldRequest {
 export interface GuardPort {
   state(): Promise<GuardState>;
   lookup(pluginId: string, contentHash: string): Promise<GuardLookup>;
+  /**
+   * Asks what the core asks (the same op): the guard reads the version's directory itself and lets a version of an own source in when its
+   * rights did not grow. The hook asks first because the core runs hooks BEFORE it asks the guard, and a hook that holds would keep that version out.
+   */
+  decide(ctx: GuardHoldRequest): Promise<{ action: "proceed" | "wait" }>;
   /** Asks the guard to keep a version for a human; `stop`: even if a window is open (a window does not lift it). Tightening: no code. */
   hold(ctx: GuardHoldRequest, stop: boolean): Promise<void>;
   annotate(target: { requestId?: number; contentHash?: string }, findings: unknown): Promise<void>;
@@ -186,6 +206,11 @@ export interface GuardPort {
   revoke(target: { approvalId?: number; pluginId?: string }): Promise<number>;
   policy(patch?: Partial<GuardPolicy>, proof?: GuardProof): Promise<GuardPolicy>;
   touch(purpose: string, proof: GuardProof): Promise<void>;
+  /** The mode of trust by source: weakening it takes a touch (the guard checks), the same or a stricter one does not. */
+  setTrustMode(mode: TrustMode, proof?: GuardProof): Promise<TrustMode>;
+  /** "My sources": adding takes a touch (`migrated`: from the old list of trusted repositories); removing does not. */
+  addSources(entries: string[], proof: GuardProof | undefined, migrated?: boolean): Promise<string[]>;
+  removeSource(entry: string): Promise<string[]>;
   /** A challenge for one action; the touch that answers it goes with the command itself. */
   challenge(action: GuardAction): Promise<GuardChallenge>;
   /** Registering a key: `{token}` → creation options; `{token, clientDataJSON, attestationObject}` → the key waits for the console. */
@@ -251,6 +276,10 @@ export class GuardLink implements GuardPort {
     const r = await this.call({ op: "lookup", pluginId, contentHash });
     return { approved: r.approved === true, approval: r.approval ?? null, window: r.window ?? null, requestId: r.requestId ?? null };
   }
+  async decide(ctx: GuardHoldRequest): Promise<{ action: "proceed" | "wait" }> {
+    const r = await this.call({ op: "decide", ...ctx });
+    return { action: r.action === "proceed" ? "proceed" : "wait" };
+  }
   async hold(ctx: GuardHoldRequest, stop: boolean): Promise<void> {
     await this.call({ op: "hold", ...ctx, stop });
   }
@@ -279,6 +308,15 @@ export class GuardLink implements GuardPort {
   }
   async touch(purpose: string, proof: GuardProof): Promise<void> {
     await this.call({ op: "touch", purpose, ...proofFields(proof) });
+  }
+  async setTrustMode(mode: TrustMode, proof?: GuardProof): Promise<TrustMode> {
+    return (await this.call({ op: "trust-mode", mode, ...(proof === undefined ? {} : proofFields(proof)) })).mode as TrustMode;
+  }
+  async addSources(entries: string[], proof: GuardProof | undefined, migrated = false): Promise<string[]> {
+    return (await this.call({ op: "sources-add", entries, ...(migrated ? { migrated: true } : {}), ...(proof === undefined ? {} : proofFields(proof)) })).mySources as string[];
+  }
+  async removeSource(entry: string): Promise<string[]> {
+    return (await this.call({ op: "sources-remove", entry })).mySources as string[];
   }
   async challenge(action: GuardAction): Promise<GuardChallenge> {
     const r = await this.call({ op: "challenge", action });

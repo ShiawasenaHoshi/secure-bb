@@ -4,7 +4,7 @@ import type { CheckResult } from "./checks/types.js";
 import { assess, type Assessment, type Probe } from "./detect.js";
 import type { Gate, TotpState } from "./gate.js";
 import type { AgentsView } from "./agents.js";
-import type { GuardApproval, GuardJournalReport, GuardPort, GuardState } from "./guardlink.js";
+import type { GuardApproval, GuardJournalReport, GuardPort, GuardState, GuardTrust } from "./guardlink.js";
 import { realpath } from "node:fs/promises";
 import type { JournalReport } from "./journal.js";
 import type { InstalledPluginLite } from "./probe.js";
@@ -74,6 +74,8 @@ export interface GuardView {
   recent: GuardState["journal"]["recent"];
   revoked: GuardApproval[];
   /** Passkeys: where the page must be opened for them to work, the keys that can touch, whether the console has a registration window open. */
+  /** Trust by source and rights: the mode and "my sources", as the guard holds them. Null: a guard that predates it. */
+  trust: GuardTrust | null;
   passkey: { rpId: string; origin: string; keys: Array<{ id: number; label: string; createdAt: number; lastUsedAt: number | null }>; enrollmentOpen: boolean; totpOff: boolean } | null;
 }
 export interface Overview {
@@ -198,7 +200,7 @@ async function guardOverlay(d: OverviewDeps, port: GuardPort): Promise<{ view: G
   try {
     state = await port.state();
   } catch (err) {
-    return { view: { connected: false, error: err instanceof Error ? err.message : String(err), journal: null, recent: [], revoked: [], passkey: null }, state: null };
+    return { view: { connected: false, error: err instanceof Error ? err.message : String(err), journal: null, recent: [], revoked: [], trust: null, passkey: null }, state: null };
   }
   // A second factor exists if either kind does: a guard with passkeys only (codes switched off) is as registered as one with a TOTP secret.
   const keys = state.passkeys?.keys ?? [];
@@ -221,6 +223,7 @@ async function guardOverlay(d: OverviewDeps, port: GuardPort): Promise<{ view: G
       journal: r ? { valid: r.valid, entries: r.entries, head: r.head ? r.head.hash.slice(0, 16) : null, problems: r.problems.slice(0, 20) } : null,
       recent: state.journal.recent,
       revoked: state.revoked,
+      trust: state.trust ?? null,
       passkey: state.passkeys ? { rpId: state.passkeys.rpId, origin: state.passkeys.origin, keys, enrollmentOpen: state.passkeys.enrollmentOpen, totpOff: state.totp.disabled === true } : null,
     },
     state,
@@ -277,7 +280,7 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
         threadId: proposal?.threadId ?? null,
         proposalId: proposal?.id ?? null,
         status: g.status,
-        reason: typeof note?.reason === "string" ? note.reason : null,
+        reason: g.note ?? (typeof note?.reason === "string" ? note.reason : null),
         firstSeen: g.firstSeen,
         lastSeen: g.lastSeen,
       });
