@@ -211,7 +211,44 @@ export const MIGRATIONS: string[] = [
   ...SENTINEL_MIGRATIONS,
   // Skills queue: the version of the skill rules a row was decided by (a row from older rules is checked again).
   `ALTER TABLE skill_queue ADD COLUMN rules_version INTEGER NOT NULL DEFAULT 0`,
+  // Approval sessions: only the hash of the token is kept (the token itself lives in the memory of the page that opened the session).
+  `CREATE TABLE IF NOT EXISTS approval_sessions (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     token_hash TEXT NOT NULL UNIQUE,
+     opened_at INTEGER NOT NULL,
+     last_at INTEGER NOT NULL,
+     expires_at INTEGER NOT NULL,
+     hard_expires_at INTEGER NOT NULL,
+     closed_at INTEGER,
+     closed_reason TEXT)`,
+  // Batch approval: the list is fixed here before any code is entered; `set_hash` covers every item and its fingerprint.
+  `CREATE TABLE IF NOT EXISTS approval_batches (
+     id TEXT PRIMARY KEY,
+     set_hash TEXT NOT NULL,
+     items TEXT NOT NULL,
+     created_at INTEGER NOT NULL,
+     expires_at INTEGER NOT NULL,
+     used_at INTEGER)`,
 ];
+
+export interface SessionRow {
+  id: number;
+  tokenHash: string;
+  openedAt: number;
+  lastAt: number;
+  expiresAt: number;
+  hardExpiresAt: number;
+}
+export interface BatchRow {
+  id: string;
+  setHash: string;
+  /** JSON: the fixed list (kind, id, fingerprint, label). */
+  items: string;
+  createdAt: number;
+  expiresAt: number;
+  usedAt: number | null;
+}
+const session = (r: Raw): SessionRow => ({ id: Number(r.id), tokenHash: String(r.token_hash), openedAt: Number(r.opened_at), lastAt: Number(r.last_at), expiresAt: Number(r.expires_at), hardExpiresAt: Number(r.hard_expires_at) });
 
 export interface Policy {
   /** Trust-window size in minutes. */
@@ -548,6 +585,49 @@ export class Store implements RegistryCache {
   failuresSince(sinceMs: number): number {
     const r = this.db.prepare(`SELECT COUNT(*) AS n FROM attempts WHERE ok = 0 AND ts > ?`).get(sinceMs) as { n: number };
     return r.n;
+  }
+
+  // ---- approval sessions ------------------------------------------------
+  insertSession(tokenHash: string, openedAt: number, expiresAt: number, hardExpiresAt: number): void {
+    this.db
+      .prepare(`INSERT INTO approval_sessions (token_hash, opened_at, last_at, expires_at, hard_expires_at) VALUES (?, ?, ?, ?, ?)`)
+      .run(tokenHash, openedAt, openedAt, expiresAt, hardExpiresAt);
+  }
+  /** The session with this token hash that is not closed (it may still be past its time: the caller checks). */
+  sessionByHash(tokenHash: string): SessionRow | null {
+    const r = this.db.prepare(`SELECT * FROM approval_sessions WHERE token_hash = ? AND closed_at IS NULL`).get(tokenHash) as Raw | undefined;
+    return r ? session(r) : null;
+  }
+  slideSession(id: number, lastAt: number, expiresAt: number): void {
+    this.db.prepare(`UPDATE approval_sessions SET last_at = ?, expires_at = ? WHERE id = ?`).run(lastAt, expiresAt, id);
+  }
+  /** Closes every session that is not closed yet; returns how many were. */
+  closeSessions(reason: string): number {
+    return this.db.prepare(`UPDATE approval_sessions SET closed_at = ?, closed_reason = ? WHERE closed_at IS NULL`).run(this.now(), reason).changes;
+  }
+  closeSession(id: number, reason: string): boolean {
+    return this.db.prepare(`UPDATE approval_sessions SET closed_at = ?, closed_reason = ? WHERE id = ? AND closed_at IS NULL`).run(this.now(), reason, id).changes === 1;
+  }
+  unclosedSessions(): SessionRow[] {
+    return (this.db.prepare(`SELECT * FROM approval_sessions WHERE closed_at IS NULL`).all() as Raw[]).map(session);
+  }
+
+  // ---- batches ----------------------------------------------------------
+  insertBatch(b: { id: string; setHash: string; items: string; createdAt: number; expiresAt: number }): void {
+    this.db.prepare(`INSERT INTO approval_batches (id, set_hash, items, created_at, expires_at) VALUES (?, ?, ?, ?, ?)`).run(b.id, b.setHash, b.items, b.createdAt, b.expiresAt);
+  }
+  getBatch(id: string): BatchRow | null {
+    const r = this.db.prepare(`SELECT * FROM approval_batches WHERE id = ?`).get(id) as Raw | undefined;
+    return r ? { id: String(r.id), setHash: String(r.set_hash), items: String(r.items), createdAt: Number(r.created_at), expiresAt: Number(r.expires_at), usedAt: r.used_at === null ? null : Number(r.used_at) } : null;
+  }
+  /** Marks a batch used; false if it already was (a list is approved once). */
+  useBatch(id: string, at: number): boolean {
+    return this.db.prepare(`UPDATE approval_batches SET used_at = ? WHERE id = ? AND used_at IS NULL`).run(at, id).changes === 1;
+  }
+  /** Drops used and expired batches; returns how many unused ones remain. */
+  pruneBatches(now: number): number {
+    this.db.prepare(`DELETE FROM approval_batches WHERE used_at IS NOT NULL OR expires_at <= ?`).run(now);
+    return (this.db.prepare(`SELECT COUNT(*) AS n FROM approval_batches`).get() as { n: number }).n;
   }
 
   // ---- approvals --------------------------------------------------------
@@ -1037,8 +1117,12 @@ export class Store implements RegistryCache {
     this.log(kind, pluginId, contentHash, detail);
     return true;
   }
-  listLog(limit = 100): LogRow[] {
-    return (this.db.prepare(`SELECT * FROM log ORDER BY id DESC LIMIT ?`).all(limit) as Raw[]).map((r) => ({
+  /** `withoutPrefix`: leave out kinds that start so (the agent's view hides approval-session records). */
+  listLog(limit = 100, withoutPrefix?: string): LogRow[] {
+    const rows = withoutPrefix === undefined
+      ? this.db.prepare(`SELECT * FROM log ORDER BY id DESC LIMIT ?`).all(limit)
+      : this.db.prepare(`SELECT * FROM log WHERE substr(kind, 1, ?) <> ? ORDER BY id DESC LIMIT ?`).all(withoutPrefix.length, withoutPrefix, limit);
+    return (rows as Raw[]).map((r) => ({
       id: r.id as number,
       ts: r.ts as number,
       kind: r.kind as string,

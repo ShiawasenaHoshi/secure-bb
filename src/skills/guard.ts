@@ -9,6 +9,7 @@
 //   clean  -> accepted if it comes from a trusted registry source, or inside an open configuration window on "skills"
 //             (the window is the watchdog's); otherwise it waits in the queue like a review
 // bb's own skills (built-in, and those of built-in plugins) are only pinned: never blocked, never queued.
+import type { Proof } from "../approval.js";
 import type { Store } from "../store.js";
 import { isTrustedRepo, normalizePattern } from "../taint/repos.js";
 import { decide, inspectSkill, SKILL_RULES_VERSION, summarize } from "./inspect.js";
@@ -34,7 +35,7 @@ export interface GuardDeps {
   builtinPlugins: () => Promise<Set<string>>;
   now: () => number;
   /** A touch: throws unless `code` is a fresh valid TOTP code. */
-  touch: (purpose: string, code: string) => void;
+  touch: (purpose: string, code: Proof) => void;
   log?: (message: string) => void;
 }
 
@@ -335,8 +336,13 @@ export class SkillGuard {
   }
 
   // ---- people ------------------------------------------------------------------------------------------------------------
+  /** One queue entry (the batch approval looks at it before and after the code). */
+  entry(id: number): SkillQueueRow | null {
+    return this.skills.getRow(id);
+  }
+
   /** Accepts the queued content (a touch). A block needs `acknowledgeBlock`. */
-  async approve(id: number, code: string, opts: { acknowledgeBlock?: boolean } = {}): Promise<{ note: string }> {
+  async approve(id: number, code: Proof, opts: { acknowledgeBlock?: boolean } = {}): Promise<{ note: string }> {
     const row = this.skills.getRow(id);
     if (!row) throw new SkillError("not_found", `no entry #${id} in the skills queue`);
     if (row.state !== "held" && row.state !== "alarm" && row.state !== "removed") throw new SkillError("conflict", `entry #${id} is already ${row.state}`);
