@@ -469,6 +469,42 @@ export default async function plugin(bb: BbPluginApi) {
       blocked: (reason?.startsWith(BLOCKED_REASON) ?? false) || (result !== null && bySeverity(result, "block").length > 0),
     };
   };
+  /**
+   * A proposal the core has not asked the guard about yet (nothing installed: the checks stopped it before install). What a human approves
+   * is always the guard's entry for the hash the CORE computes, never a key of ours: so the snapshot is installed first, the guard's entry
+   * (made when the core asks) is waited for, and that entry is approved. The code is spent only once the entry exists.
+   */
+  const approvePendingProposal = async (localId: number, code: string | undefined, acknowledgeBlock: boolean | undefined): Promise<{ ok: true; note: string }> => {
+    const link = needGuard();
+    if (code === undefined) throw new GateError("invalid_code", "a code is needed: the guard checks it");
+    const lq = store.getQueue(localId);
+    if (!lq || lq.status !== "held" || lq.proposalId === null) throw new GateError("not_found", `no pending proposal #${localId}`);
+    const proposal = store.getProposal(lq.proposalId);
+    if (!proposal) throw new GateError("not_found", "the proposal is gone");
+    const blocked = lq.reason?.startsWith(BLOCKED_REASON) ?? false;
+    if (blocked && !acknowledgeBlock) throw new GateError("invalid", "this version was blocked by the checks; confirm that you accept the risk to approve it anyway", { blocked: true });
+    const snap = await realpath(proposal.snapshotDir);
+    const find = async (): Promise<GuardQueueEntry | null> => {
+      for (const q of (await link.state()).queue) {
+        if (q.status !== "held" || q.pluginId !== proposal.pluginId) continue;
+        if ((await realpath(q.rootDir).catch(() => q.rootDir)) === snap) return q;
+      }
+      return null;
+    };
+    let entry = await find();
+    if (!entry) {
+      await bb.sdk.plugins.install({ source: proposal.snapshotDir });
+      await gate.recordBuilt(proposal.snapshotDir).catch((e) => bb.log.warn(`recordBuilt failed: ${String(e)}`));
+      for (let i = 0; i < 20 && !entry; i++) {
+        entry = await find();
+        if (!entry) await new Promise((r) => setTimeout(r, 250));
+      }
+    }
+    if (!entry) throw new GateError("conflict", "the core has not asked the guard about this snapshot yet; try again in a moment (the code was not spent)");
+    const res = await approveAtGuard(entry.id, code, acknowledgeBlock);
+    store.setQueueStatus(lq.id, "approved");
+    return res;
+  };
   const approveAtGuard = async (id: number, code: string | undefined, acknowledgeBlock: boolean | undefined): Promise<{ ok: true; note: string }> => {
     const link = needGuard();
     if (code === undefined) throw new GateError("invalid_code", "a code is needed: the guard checks it");
@@ -564,7 +600,7 @@ export default async function plugin(bb: BbPluginApi) {
       return { ok: true as const };
     }),
     "queue.approve": wrap(async ({ id, code, session, acknowledgeBlock }) => {
-      if (guardLink) return approveAtGuard(id, code, acknowledgeBlock);
+      if (guardLink) return id < 0 ? approvePendingProposal(-id, code, acknowledgeBlock) : approveAtGuard(id, code, acknowledgeBlock);
       // Lifting a block is the dangerous kind of this RPC: a fresh code, never a session.
       const proof = gate.proofFor("queue.approve", { code, session }, { escalate: acknowledgeBlock === true });
       const note = await approveQueueFull(id, proof, { acknowledgeBlock });
@@ -573,6 +609,14 @@ export default async function plugin(bb: BbPluginApi) {
     "queue.dismiss": wrap(async ({ id, code, session }) => {
       if (guardLink) {
         if (code === undefined) throw new GateError("invalid_code", "a code is needed: the guard checks it");
+        if (id < 0) {
+          const lq = store.getQueue(-id);
+          if (!lq || lq.status !== "held") throw new GateError("not_found", `no pending proposal #${-id}`);
+          await guardLink.touch("dismiss", code);
+          store.setQueueStatus(lq.id, "dismissed");
+          changed();
+          return { ok: true as const };
+        }
         await guardEntry(id);
         await guardLink.dismiss(id, code);
         changed();
@@ -585,6 +629,7 @@ export default async function plugin(bb: BbPluginApi) {
     "window.open": wrap(async ({ queueId, code, session, scope }) => {
       if (guardLink) {
         if (code === undefined) throw new GateError("invalid_code", "a code is needed: the guard checks it");
+        if (queueId < 0) throw new GateError("invalid", "this proposal is not installed yet: approve it (or install it) first, then open a window from the guard's entry");
         await gate.openGuardWindow(await guardEntry(queueId), code, scope);
         recheck();
         changed();

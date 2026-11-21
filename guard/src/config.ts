@@ -17,6 +17,8 @@ export interface GuardPaths {
 }
 
 export const DEFAULT_DATA_DIR = "/var/sbb-guard";
+/** Outside the data directory: that one is 0700, and the bb user must reach the socket through a directory of its own (0750, owner the guard, group the bb user's). */
+export const DEFAULT_SOCKET = "/var/run/sbb-guard/guard.sock";
 
 export function resolvePaths(opts: { data?: string; socket?: string; socketGid?: string }, env: Record<string, string | undefined> = process.env): GuardPaths {
   const dataDir = opts.data ?? env.SBB_GUARD_DATA ?? DEFAULT_DATA_DIR;
@@ -31,7 +33,7 @@ export function resolvePaths(opts: { data?: string; socket?: string; socketGid?:
     secret: join(stateDir, "totp.secret"),
     head: join(stateDir, "journal.head"),
     alive: join(stateDir, "alive"),
-    socket: opts.socket ?? env.SBB_GUARD_SOCKET ?? join(dataDir, "run", "guard.sock"),
+    socket: opts.socket ?? env.SBB_GUARD_SOCKET ?? DEFAULT_SOCKET,
     socketGid,
   };
 }

@@ -124,6 +124,47 @@ describe("guard mode: approvals are the guard's, the hook only holds", () => {
   });
 });
 
+describe("guard mode: what is approved is the guard's entry for the core's hash", () => {
+  const coreHash = (dir: string) => `sha256:core-${dir.slice(-10)}`; // not the snapshot's own hash, as in the real core
+  const coreCtx = (name: string, dir: string) => hookCtx(name, dir, coreHash(dir));
+
+  it("propose → the install makes the core ask → approve by code → the plugin loads", { timeout: 30_000 }, async () => {
+    g = await startGuardOnDate();
+    let h!: Booted;
+    h = await bootPlugin(g.paths.socket, { onInstall: async (src) => void (await core(g!, h, coreCtx("demo", src))) });
+    const { res } = await proposed(h, "demo");
+    expect(res.exitCode).toBe(0);
+    const page = await ov(h);
+    expect(page.queue).toHaveLength(1);
+    expect(page.queue[0].contentHash).toMatch(/^sha256:core-/); // never a local: key
+    await h.rpc("queue.approve", { id: page.queue[0].id, code: fresh(g) });
+    expect(await core(g, h, coreCtx("demo", h.installs[0]!))).toBe("load");
+    const st = await g.send({ op: "state" });
+    expect(st.approvals.map((a: any) => a.contentHash)).toEqual([coreHash(h.installs[0]!)]);
+  });
+
+  it("a proposal the core never asked about is installed first, the guard's entry awaited, and that entry approved", { timeout: 30_000 }, async () => {
+    g = await startGuardOnDate();
+    let h!: Booted;
+    h = await bootPlugin(g.paths.socket, { onInstall: async (src) => void (await core(g!, h, coreCtx("evil", src))) });
+    const { res } = await proposed(h, "evil", "eval(atob('YWxlcnQoMSk='));\n"); // stopped by the checks before install
+    expect(res.exitCode).toBe(3);
+    expect(h.installs).toHaveLength(0);
+    const page = await ov(h);
+    expect(page.queue).toHaveLength(1);
+    expect(page.queue[0].id).toBeLessThan(0);
+    expect(page.queue[0].reason).toMatch(/ещё не установлен/);
+    await expect(h.rpc("queue.approve", { id: page.queue[0].id, code: g.code() })).rejects.toThrow(); // block needs the risk acknowledged
+    expect((await g.send({ op: "touch", purpose: "x", code: fresh(g) })).ok).toBe(true); // ...and that refusal did not spend a code
+    await h.rpc("queue.approve", { id: page.queue[0].id, code: fresh(g), acknowledgeBlock: true });
+    expect(h.installs).toHaveLength(1);
+    const st = await g.send({ op: "state" });
+    expect(st.approvals).toHaveLength(1);
+    expect(st.approvals[0].contentHash).toBe(coreHash(h.installs[0]!));
+    expect((await ov(h)).queue.every((q: any) => q.id > 0)).toBe(true);
+  });
+});
+
 describe("guard mode: windows", () => {
   it("the guard opens and slides the window; the plugin keeps the thread and the capabilities, and can only hold more", { timeout: 30_000 }, async () => {
     g = await startGuardOnDate();

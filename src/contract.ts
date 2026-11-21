@@ -8,6 +8,8 @@ import * as s from "./schema.js";
 
 const code = s.string({ min: 1, max: 16 });
 const id = s.integer({ min: 1 });
+/** A queue id: negative = a proposal the core has not asked the guard about yet (guard mode). */
+const queueId = s.integer({ min: -1_000_000_000 });
 /** Routine RPCs take a fresh code or the token of an open approval session (src/approval.ts says which RPC is routine). */
 const proof = { code: s.optional(code), session: s.optional(s.string({ min: 1, max: 128 })) };
 const batchKind = s.oneOf(["queue", "skill", "drift"] as const);
@@ -28,8 +30,8 @@ export const rpcContract = defineRpcContract({
     output: s.json<{ secret: string; uri: string; matrix: boolean[][] }>(),
   },
   "totp.confirm": { input: s.object({ code }), output: s.json<{ ok: true }>() },
-  "queue.approve": { input: s.object({ id, ...proof, acknowledgeBlock: s.optional(s.boolean()) }), output: s.json<{ ok: true; note: string }>() },
-  "queue.dismiss": { input: s.object({ id, ...proof }), output: s.json<{ ok: true }>() },
+  "queue.approve": { input: s.object({ id: queueId, ...proof, acknowledgeBlock: s.optional(s.boolean()) }), output: s.json<{ ok: true; note: string }>() },
+  "queue.dismiss": { input: s.object({ id: queueId, ...proof }), output: s.json<{ ok: true }>() },
   "window.open": {
     input: s.object({ queueId: id, ...proof, scope: s.optional(s.oneOf(["tree", "thread"] as const)) }),
     output: s.json<{ ok: true }>(),

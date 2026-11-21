@@ -34,7 +34,7 @@ export interface TestGuard {
 
 export async function startGuard(opts: { register?: boolean; serve?: boolean } = {}): Promise<TestGuard> {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "sbb-guard-")));
-  const paths = resolvePaths({ data: dir });
+  const paths = resolvePaths({ data: dir, socket: join(dir, "run", "guard.sock") });
   privateDir(paths.stateDir);
   const clock = new Clock();
   const db = openDb(paths.db);
@@ -94,7 +94,7 @@ import { Guard as GuardClass } from "../../guard/src/guard.ts";
 /** A guard whose clock is the (faked) Date, so the plugin and the guard agree on time. */
 export async function startGuardOnDate(): Promise<TestGuard> {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "sbb-guard-")));
-  const paths = resolvePaths({ data: dir });
+  const paths = resolvePaths({ data: dir, socket: join(dir, "run", "guard.sock") });
   privateDir(paths.stateDir);
   const db = openDb(paths.db);
   const guard = new GuardClass({ db, now: () => Date.now(), secretPath: paths.secret, headPath: paths.head });
@@ -134,7 +134,7 @@ export interface Installed {
 }
 
 /** Boots the plugin with BB_SECURE_BB_GUARD_SOCKET set (or without it: `socket: null`). */
-export async function bootPlugin(socket: string | null) {
+export async function bootPlugin(socket: string | null, opts: { onInstall?: (source: string) => Promise<void> } = {}) {
   let plugins: Installed[] = [];
   const installs: string[] = [];
   const dataDir = realpathSync(mkdtempSync(join(tmpdir(), "sbb-gm-")));
@@ -149,7 +149,11 @@ export async function bootPlugin(socket: string | null) {
         list: async () => ({ plugins }),
         enable: async () => ({}),
         disable: async () => ({}),
-        install: async (a: { source: string }) => (installs.push(a.source), { id: "demo", version: "1.0.0", status: "disabled", statusDetail: null }),
+        install: async (a: { source: string }) => {
+          installs.push(a.source);
+          await opts.onInstall?.(a.source); // the core asks the guard and the hooks while installing
+          return { id: "demo", version: "1.0.0", status: "disabled", statusDetail: null };
+        },
       },
       system: { config: async () => ({ generalSettings: { telemetryEnabled: true }, primaryHostId: "h1" }) },
       environments: { get: async () => ({ hostId: "h1" }) },

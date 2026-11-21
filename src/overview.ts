@@ -245,6 +245,10 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
     );
     approvals = gs.approvals.map((a) => ({ id: a.id, contentHash: a.contentHash, pluginId: a.pluginId, version: a.version, source: a.source, sourceKind: a.sourceKind, gitCommit: null, npmIntegrity: null, via: a.via as ApprovalRow["via"], windowId: a.windowId, threadId: null, approvedAt: a.approvedAt, revokedAt: a.revokedAt, lastSeen: null, localHash: null }));
     queue = [];
+    // The guard's queue is the list; what this plugin knows (checks, thread) explains its entries.
+    // Proposals the core has not asked the guard about yet are listed after them, with negative ids (approving one installs it first).
+    const known = new Set<string>();
+    for (const g of gs.queue) known.add(await realpath(g.rootDir).catch(() => g.rootDir));
     for (const g of gs.queue) {
       const proposal = await proposalOf(d, g.rootDir, g.pluginId);
       const note = g.annotation?.findings as { reason?: unknown } | null | undefined;
@@ -267,6 +271,12 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
         firstSeen: g.firstSeen,
         lastSeen: g.lastSeen,
       });
+    }
+    for (const lq of d.store.listQueue(50)) {
+      if (lq.kind !== "proposal" || lq.status !== "held" || lq.contentHash !== null || lq.proposalId === null) continue;
+      const p = d.store.getProposal(lq.proposalId);
+      if (!p || known.has(await realpath(p.snapshotDir).catch(() => p.snapshotDir))) continue;
+      queue.push({ ...lq, id: -lq.id, reason: lq.reason ? `ещё не установлен (ядро не спрашивало сторожа): ${lq.reason}` : "ещё не установлен (ядро не спрашивало сторожа)" });
     }
   } else if (guarded) {
     windows = [];
