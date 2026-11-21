@@ -7,7 +7,7 @@ import {
 } from "../src/ux.ts";
 import { MISMATCH_HINT, bypassAllowed, isMismatch, mismatchText, quarantineCount, reasonKind } from "../src/ux.ts";
 import type { AwayEvent, PartLike, StatusInput } from "../src/ux.ts";
-import { EXCEPTIONS_EMPTY, EXCEPTIONS_HELP, RESET_NOTE, exceptionRows, exceptionsHeadline, FREQ_LIMIT, FREQ_QUIET_MS, FREQ_WINDOW_MS, approvalEventsOf, frequentHint, parseFreqAt, pickFrequent, FREQ_BUTTON, NO_RIGHTS_TEXT, STANDING_LABEL, protectedHeadline, protectedRow, sortProtected, standingOf, PARTS_HEADLINE, PARTS_HELP, PART_FRESH_NOTE, PART_NO_BACK, PART_STALE, drawableParts, humanError, isStalePart, partKeptNote, partNeedsFresh, partTitle } from "../src/ux.ts";
+import { STOPPED_EXPLAIN, aiScanEmptyText, windowAvailability, PART_BACK_FRESH_NOTE, resetConfirmText, resetRows, EXCEPTIONS_EMPTY, EXCEPTIONS_HELP, RESET_NOTE, exceptionRows, exceptionsHeadline, FREQ_LIMIT, FREQ_QUIET_MS, FREQ_WINDOW_MS, approvalEventsOf, frequentHint, parseFreqAt, pickFrequent, FREQ_BUTTON, NO_RIGHTS_TEXT, STANDING_LABEL, protectedHeadline, protectedRow, sortProtected, standingOf, PARTS_HEADLINE, PARTS_HELP, PART_FRESH_NOTE, PART_NO_BACK, PART_STALE, drawableParts, humanError, isStalePart, partKeptNote, partNeedsFresh, partTitle } from "../src/ux.ts";
 
 const none: StatusInput = { guardDown: false, red: [], yellow: [], alarms: [] };
 const ref = (anchor: string, tab: "status" | "more" = "status") => ({ anchor, tab, text: anchor });
@@ -407,7 +407,7 @@ describe("no bypass on a hash mismatch", () => {
 });
 
 describe("parts of a settings file", () => {
-  const part = (over: Partial<PartLike>): PartLike => ({ id: "0123456789abcdef", path: ["permissions", "allow"], kind: "elem-added", before: null, after: null, elem: "Bash(curl:*)", danger: null, restorable: true, ...over });
+  const part = (over: Partial<PartLike>): PartLike => ({ id: "0123456789abcdef", path: ["permissions", "allow"], kind: "elem-added", before: null, after: null, elem: "Bash(curl:*)", danger: null, backDanger: null, restorable: true, ...over });
   it("each part in plain words", () => {
     expect(partTitle(part({ path: ["permissions", "defaultMode"], kind: "key-added", after: "bypassPermissions", elem: null }))).toBe("Режим bypassPermissions: агент будет делать всё, не спрашивая вас");
     expect(partTitle(part({}))).toBe("Агенту разрешено без вопросов: «Bash(curl:*)»");
@@ -529,7 +529,7 @@ describe("how often the person approves", () => {
 
 describe("exceptions: one list", () => {
   const NOW = Date.UTC(2026, 10, 22, 12);
-  const part: PartLike = { id: "0123456789abcdef", path: ["permissions", "defaultMode"], kind: "key-added", before: null, after: "bypassPermissions", elem: null, danger: "bypassPermissions", restorable: true };
+  const part: PartLike = { id: "0123456789abcdef", path: ["permissions", "defaultMode"], kind: "key-added", before: null, after: "bypassPermissions", elem: null, danger: "bypassPermissions", backDanger: null, restorable: true };
   const input = {
     windows: [{ id: 3, pluginId: "notes", openedAt: NOW - 600_000, remainingSec: 1200 }],
     cfgWindows: [{ id: 1, openedAt: NOW - 3_000_000, scopeLabels: ["инструкции", "скиллы"], remainingSec: 61 }],
@@ -557,9 +557,44 @@ describe("exceptions: one list", () => {
     expect(exceptionRows(input, NOW).some((r) => r.key === "approval:9")).toBe(false);
     expect(exceptionRows(input, NOW, true).map((r) => r.key)).toEqual(["kept:5", "window:3", "cfgWindow:1", "approval:7", "source:github:me/*"]);
   });
+  it("a kept ban needs a code to take back, and a reset leaves it (it only takes back what tightens)", () => {
+    const ban: PartLike = { ...part, path: ["permissions", "deny"], kind: "elem-added", after: null, elem: "Bash(rm:*)", danger: null, backDanger: "убирает ограничение (permissions.deny)" };
+    const rows = exceptionRows({ ...input, kept: [...input.kept, { id: 6, rel: ".claude/settings.json", keptAt: NOW - 1000, danger: null, part: ban }] }, NOW);
+    const k = rows.find((r) => r.key === "kept:6")!;
+    expect(k.needsCode).toMatch(/permissions\.deny/);
+    expect(rows.find((r) => r.key === "kept:5")!.needsCode).toBeNull();
+    expect(resetRows(rows).some((r) => r.key === "kept:6")).toBe(false);
+    expect(resetRows(rows)).toHaveLength(rows.length - 1);
+    expect(resetConfirmText(rows)).toContain("Останется 1");
+    expect(resetConfirmText(rows.filter((r) => r.key !== "kept:6"))).not.toContain("Останется");
+  });
   it("nothing made: the empty line; the headline counts the list", () => {
     expect(exceptionRows({ windows: [], cfgWindows: [], approvals: [], sources: [], kept: [] }, NOW)).toEqual([]);
     expect(exceptionsHeadline(6)).toBe("Исключения (6)");
-    for (const t of [EXCEPTIONS_HELP, EXCEPTIONS_EMPTY, RESET_NOTE]) expect(t).not.toMatch(TECHNICAL_WORDS);
+    for (const t of [EXCEPTIONS_HELP, EXCEPTIONS_EMPTY, RESET_NOTE, PART_BACK_FRESH_NOTE]) expect(t).not.toMatch(TECHNICAL_WORDS);
+  });
+});
+
+describe("the leftover texts of the round-5 table", () => {
+  it("a yellow card with no known reason does not say «Защита не пропустила» (it can stand under a green headline)", () => {
+    const t = yellowText({ pluginId: "p", version: "1", level: "unknown", sourceLabel: "src", reason: "что-то своё", caps: [] });
+    expect(t.line).not.toMatch(/не пропустила/);
+    expect(t.line).toContain("ждёт вашего «да»");
+  });
+  it("the window note says why a window is not for this plugin, in plain words", () => {
+    const a = windowAvailability({ threadId: null, queueId: 1, sourceKind: "path", level: "own" });
+    const b = windowAvailability({ threadId: null, queueId: 1, sourceKind: "git", level: "unknown" });
+    for (const n of [a.note!, b.note!]) {
+      expect(n).toMatch(/Окно доверия тут не подходит/);
+      expect(n).not.toMatch(/Временное доверие недоступно|не из чата агента/);
+    }
+  });
+  it("the red status explains that nothing found has run", () => {
+    expect(STOPPED_EXPLAIN).toMatch(/не запущены/);
+    expect(STOPPED_EXPLAIN).not.toMatch(TECHNICAL_WORDS);
+  });
+  it("the AI scan line says whether it is off or just not run yet", () => {
+    expect(aiScanEmptyText(false)).toMatch(/выключен.*Подробно/);
+    expect(aiScanEmptyText(true)).toMatch(/ещё не запускался/);
   });
 });

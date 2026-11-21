@@ -28,7 +28,7 @@ import type { TrustMode } from "./src/guardlink";
 import {
   AWAY_KEY, DEFERRED_KEY, glossSegments, skillsSummary, doneMessage, approvedNote, uniqueSentences, humanError, approvedByText, canRestore, rejectedAtOf, rejectedByText, clockText, firstButtonAfter, sessionClosedText, sessionEndReason, slideIdle, type SessionCloseReason, capsWithPaths, redWhere, cardFoldId, cardKey, sessionBlockText, KEPT_KEY, MODE_DESCRIPTIONS, MODE_NAMES, SAVED_NARROWING, startTouchNote, WIZARD_KEY,
   aaguidName, approvalWhy, awayAlarms, awayInfoEvents, awaySince, capabilitySegments, cardColor, deferKey, detailLevel, groupAway, isBlockedEntry, isPasswordManager, pageStatus,
-  MISMATCH_HINT, EXCEPTIONS_EMPTY, EXCEPTIONS_HELP, RESET_NOTE, exceptionRows, exceptionsHeadline, type ExceptionRow, FREQ_BUTTON, FREQ_KEY, FREQ_NOT_NOW, FREQ_OFF_KEY, FREQ_SETTING_LABEL, approvalEventsOf, parseFreqAt, pickFrequent, type FreqHint, agentAlarmText, protectedHeadline, protectedRow, sortProtected, PARTS_HEADLINE, PARTS_HELP, PART_BACK, PART_FRESH_NOTE, PART_KEEP, PART_NO_BACK, drawableParts, isStalePart, partBackNote, partKeptNote, partNeedsFresh, partTitle, alarmCount, bypassAllowed, mismatchText, parseDeferred, redText, wizardNeeded, yellowText, GUARD_DOWN_TEXT,
+  MISMATCH_HINT, STOPPED_EXPLAIN, aiScanEmptyText, EXCEPTIONS_EMPTY, EXCEPTIONS_HELP, RESET_NOTE, exceptionRows, exceptionsHeadline, type ExceptionRow, FREQ_BUTTON, FREQ_KEY, FREQ_NOT_NOW, FREQ_OFF_KEY, FREQ_SETTING_LABEL, approvalEventsOf, parseFreqAt, pickFrequent, type FreqHint, agentAlarmText, protectedHeadline, protectedRow, sortProtected, PARTS_HEADLINE, PARTS_HELP, PART_BACK, PART_BACK_FRESH_NOTE, PART_FRESH_NOTE, REVOKE_CODE_NOTE, resetConfirmText, resetRows, PART_KEEP, PART_NO_BACK, drawableParts, isStalePart, partBackNote, partKeptNote, partNeedsFresh, partTitle, alarmCount, bypassAllowed, mismatchText, parseDeferred, redText, wizardNeeded, yellowText, GUARD_DOWN_TEXT,
   actionLabel, emphasize, agentAcceptProblem, agentsSectionTab, awaySeenMark, criticalAcceptTitle, manualRollback, criticalMeanings, decisionOf, deleteConfirmText, deletedNote,
   isCriticalDrift, launchProblem, moreVersionsText, planCards, proofHint, reconcileSelection, sameData, selectableDriftIds, sessionText, setFold,
   toggleId, trustButton, windowAvailability,
@@ -556,8 +556,8 @@ function BatchCard({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; refetch: () =
 const MODEL_STATUS: Record<string, string> = { clean: "чисто", flag: "флаг", refusal: "отказ", invalid: "невалидный ответ", timeout: "таймаут", error: "ошибка", unavailable: "недоступна" };
 
 /** Result of a scan next to the version it belongs to: not run / clean (date, models) / flags (what and where). */
-function ScanResultView({ scan, other }: { scan: ScanView | undefined; other?: string }) {
-  if (!scan) return <p className={`mt-1 ${muted}`}>ИИ-скан: не запускался</p>;
+function ScanResultView({ scan, other, enabled }: { scan: ScanView | undefined; other?: string; enabled: boolean }) {
+  if (!scan) return <p className={`mt-1 ${muted}`}>{aiScanEmptyText(enabled)}</p>;
   const asked = scan.models.filter((m) => m.status !== "unavailable").map((m) => m.label).join(", ");
   const head =
     scan.status === "running" ? "идёт…" : scan.status === "clean" ? `чисто (${when(scan.finishedAt ?? scan.startedAt)}, ${asked})` : scan.status === "suspect" ? `ПОДОЗРЕНИЕ (${when(scan.finishedAt ?? scan.startedAt)})` : `недоступен${scan.note ? `: ${scan.note}` : ""}`;
@@ -729,7 +729,7 @@ function AiCard({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; refetch: () => v
       </p>
       {ai.recent.length > 0 ? (
         <Fold id="ai-recent" className="mt-1" summary={`Последние сканы (${ai.recent.length})`}>
-          {ai.recent.map((r) => <ScanResultView key={r.id} scan={r} other={r.trigger} />)}
+          {ai.recent.map((r) => <ScanResultView key={r.id} scan={r} other={r.trigger} enabled={ai.settings.enabled} />)}
         </Fold>
       ) : null}
       <Msg error={act.error} ok={act.ok} />
@@ -1193,7 +1193,7 @@ function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; rpc: Re
       {q.reason ? <p className={`mt-1 ${blocked || unsafeDir ? "font-semibold text-red-700 dark:text-red-400" : muted}`}>{q.reason}</p> : null}
       {unsafeDir && held ? <p className="mt-1 text-red-600">Одобрить нельзя: пока в каталоге или выше может писать кто-то кроме пользователя сервера, его содержимое может измениться после проверки. Исправьте права (владелец — пользователь сервера, без записи для группы и остальных) или предложите плагин через <span className="font-mono">bb secure-bb propose</span>: снимок гейт хранит у себя.</p> : null}
       <ChecksView id={cardFoldId(q, "checks-q")} result={ov.queueChecks[q.id] ?? (q.contentHash ? ov.checks[q.contentHash] : undefined)} />
-      <ScanResultView scan={ov.ai.queueScans[q.id]} />
+      <ScanResultView scan={ov.ai.queueScans[q.id]} enabled={ov.ai.settings.enabled} />
       {held ? (
         <div className="mt-3 space-y-3">
           {blocked ? (
@@ -1309,7 +1309,7 @@ function PluginRow({ p, ov, rpc, refetch, registered, checks }: { p: PluginView;
       {!p.window ? <PluginWindowOpen p={p} ov={ov} rpc={rpc} refetch={refetch} /> : null}
       {p.pin ? <ChecksView id={`plugin-${p.id}`} result={checks[p.pin.contentHash]} /> : null}
       <PublicationLine ov={ov} pluginId={p.id} version={p.pin?.version ?? null} rpc={rpc} refetch={refetch} />
-      <ScanResultView scan={ov.ai.pluginScans[p.id]} other={ov.ai.pluginScans[p.id] ? (ov.ai.pluginScans[p.id]!.current ? "это закреплённая версия" : "не закреплённая версия") : undefined} />
+      <ScanResultView scan={ov.ai.pluginScans[p.id]} enabled={ov.ai.settings.enabled} other={ov.ai.pluginScans[p.id] ? (ov.ai.pluginScans[p.id]!.current ? "это закреплённая версия" : "не закреплённая версия") : undefined} />
       {ov.ai.settings.enabled ? (
         <div className="mt-1 flex flex-wrap items-center gap-3">
           <ScanButton ov={ov} target={{ pluginId: p.id }} rpc={rpc} refetch={refetch} />
@@ -1972,8 +1972,25 @@ function PartsPanel({ d, ov, rpc, refetch, canCode, pk }: { d: AgentDrift; ov: O
       partKeptNote(p, parts.length - 1),
     );
   };
-  const back = (p: SettingsPart) => void act.run(guarded(() => rpc.call("agents.rollbackPart", { id: d.id, partId: p.id, fileSha })), partBackNote(p));
-  const anyFresh = parts.some(partNeedsFresh);
+  // Without a code only a tightening; a return that makes the agent more dangerous (a rule the person removed, a ban) is asked the way «Оставить» is.
+  const back = (p: SettingsPart, by: "passkey" | "code" | "none") =>
+    void act.run(
+      guarded(async () => {
+        setTouching(null);
+        if (by === "passkey") {
+          const t = await touchFor(rpc, { kind: "agents.rollbackPart", ids: [d.id], partId: p.id, fileSha }, setTouching);
+          if (!t) throw new Error("касание не требуется");
+          const r = await rpc.call("agents.rollbackPart", { id: d.id, partId: p.id, fileSha, passkey: t.passkey });
+          setTouching(null);
+          return r;
+        }
+        const r = await rpc.call("agents.rollbackPart", { id: d.id, partId: p.id, fileSha, ...(by === "code" ? { code } : {}) });
+        if (by === "code") setCode("");
+        return r;
+      }),
+      partBackNote(p),
+    );
+  const anyFresh = parts.some((p) => partNeedsFresh(p) || p.backDanger !== null);
   return (
     <div className="mt-2 rounded-md border border-border p-2" data-agent-parts={d.id}>
       <p className="font-semibold">{PARTS_HEADLINE}</p>
@@ -1985,6 +2002,7 @@ function PartsPanel({ d, ov, rpc, refetch, canCode, pk }: { d: AgentDrift; ov: O
             <li key={p.id} className="rounded-md border border-border p-2" data-agent-part={p.id}>
               <p className="break-all">{partTitle(p)}</p>
               {fresh ? <p className="text-xs font-semibold text-red-800 dark:text-red-300">{PART_FRESH_NOTE} {p.danger}</p> : null}
+              {p.restorable && p.backDanger !== null ? <p className="text-xs font-semibold text-red-800 dark:text-red-300">{PART_BACK_FRESH_NOTE} {p.backDanger}</p> : null}
               <div className="mt-1 flex flex-wrap items-center gap-2">
                 {fresh && pk.has ? (
                   <button className={btnDanger} disabled={act.busy || pk.problem !== null} onClick={() => keep(p, "passkey")}>{PART_KEEP}: касанием</button>
@@ -1992,7 +2010,14 @@ function PartsPanel({ d, ov, rpc, refetch, canCode, pk }: { d: AgentDrift; ov: O
                 {fresh && !canCode ? null : (
                   <button className={fresh ? btnDanger : btn} disabled={act.busy || !ap.ready(code, fresh)} onClick={() => keep(p, "code")}>{PART_KEEP}{fresh && pk.has ? " кодом" : ""}</button>
                 )}
-                {p.restorable ? <button className={btnPrimary} disabled={act.busy} onClick={() => back(p)} data-agent-part-back>{PART_BACK}</button> : <span className={`text-xs ${muted}`}>{PART_NO_BACK}</span>}
+                {!p.restorable ? <span className={`text-xs ${muted}`}>{PART_NO_BACK}</span> : p.backDanger === null ? (
+                  <button className={btnPrimary} disabled={act.busy} onClick={() => back(p, "none")} data-agent-part-back>{PART_BACK}</button>
+                ) : (
+                  <>
+                    {pk.has ? <button className={btnDanger} disabled={act.busy || pk.problem !== null} onClick={() => back(p, "passkey")} data-agent-part-back>{PART_BACK}: касанием</button> : null}
+                    {canCode ? <button className={pk.has ? btn : btnDanger} disabled={act.busy || code.length !== 6} onClick={() => back(p, "code")} data-agent-part-back>{PART_BACK}{pk.has ? " кодом" : ""}</button> : null}
+                  </>
+                )}
               </div>
             </li>
           );
@@ -2002,7 +2027,7 @@ function PartsPanel({ d, ov, rpc, refetch, canCode, pk }: { d: AgentDrift; ov: O
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <CodeField value={code} onChange={setCode} />
           <CodeHint ov={ov} />
-          <span className={`text-xs ${muted}`}>{anyFresh ? "для «Оставить»; «Вернуть» кода не требует" : ap.session ? "или сессия подтверждения" : "для «Оставить»"}</span>
+          <span className={`text-xs ${muted}`}>{anyFresh ? "код нужен только там, где написано; остальные «Вернуть» кода не требуют" : ap.session ? "или сессия подтверждения" : "для «Оставить»"}</span>
         </div>
       ) : null}
       <TouchNote text={touching} />
@@ -2796,7 +2821,7 @@ function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onKeep, onTrustPen
           {detail.hashes && q.contentHash ? <p className="break-all font-mono text-xs">{q.contentHash}</p> : null}
           {caps.length > 0 ? <p className="text-xs">Возможности: <Emph text={caps.map((c) => capabilitySegments(c).map((x) => x.text).join("")).join("; ")} />.</p> : null}
           <ChecksView id={cardFoldId(q, "checks")} result={found} />
-          <ScanResultView scan={ov.ai.queueScans[q.id]} />
+          <ScanResultView scan={ov.ai.queueScans[q.id]} enabled={ov.ai.settings.enabled} />
           <ScanButton ov={ov} target={{ queueId: q.id }} rpc={rpc} refetch={refetch} />
           {red && bypassAllowed(ov.guard?.trust?.mode ?? null, q.reason) ? (
             <Fold id={cardFoldId(q, "bypass")} className="mt-2 rounded-md border border-red-300 p-2 dark:border-red-900" summaryClassName="cursor-pointer text-red-700 dark:text-red-400" summary="Всё равно разрешить…">
@@ -3080,6 +3105,8 @@ function ExceptionsTab({ ov, rpc, refetch, freqOff, onFreqOff }: { ov: Overview;
   const act = useCodeAction(refetch);
   const [day, setDay] = useState(false);
   const [confirm, setConfirm] = useState(false);
+  const [code, setCode] = useDraftCode("exceptions");
+  const pk = usePasskey(ov);
   const input = {
     windows: ov.windows.map((w) => ({ id: w.id, pluginId: w.pluginId, openedAt: w.openedAt, remainingSec: Math.max(0, Math.ceil((Math.min(w.expiresAt, w.hardExpiresAt) - now) / 1000)) })),
     cfgWindows: ov.watch.windows.map((w) => ({ id: w.id, openedAt: w.openedAt, scopeLabels: w.scopeLabels, remainingSec: Math.max(0, Math.ceil((Math.min(w.expiresAt, w.hardExpiresAt) - now) / 1000)) })),
@@ -3090,7 +3117,7 @@ function ExceptionsTab({ ov, rpc, refetch, freqOff, onFreqOff }: { ov: Overview;
   const all = exceptionRows(input, now);
   const rows = day ? exceptionRows(input, now, true) : all;
   // «Отозвать» of any kind only tightens: no code. Each calls the rpc that is its own.
-  const revoke = async (r: ExceptionRow): Promise<void> => {
+  const revoke = async (r: ExceptionRow, proof: { code?: string; passkey?: PasskeyAssertion } = {}): Promise<void> => {
     switch (r.revoke.kind) {
       case "window":
         await rpc.call("window.close", { windowId: r.revoke.id as number });
@@ -3105,14 +3132,15 @@ function ExceptionsTab({ ov, rpc, refetch, freqOff, onFreqOff }: { ov: Overview;
         await rpc.call("trust.remove", { entry: r.revoke.id as string } as never);
         break;
       case "kept":
-        await rpc.call("agents.revokeKept", { id: r.revoke.id as number });
+        await rpc.call("agents.revokeKept", { id: r.revoke.id as number, ...proof });
         break;
     }
   };
   const reset = () =>
     void act.run(async () => {
       // All of it only tightens: no touch. The mode stays (weakening it takes a touch, so a reset must not do it either).
-      for (const r of all) await revoke(r);
+      // Only what tightens: a kept ban would weaken the agent when taken back, so it stays for a code of its own.
+      for (const r of resetRows(all)) await revoke(r);
       setConfirm(false);
       return { note: "Сброшено: окна закрыты, одобрения и оставленные изменения отозваны, «мои источники» очищены. Режим не менялся." };
     });
@@ -3130,7 +3158,15 @@ function ExceptionsTab({ ov, rpc, refetch, freqOff, onFreqOff }: { ov: Overview;
                   <span className="break-words">{r.title}</span>
                   {r.detail ? <span className={`block text-xs ${muted}`}>{r.detail}</span> : null}
                 </span>
-                <button className={btn} disabled={act.busy} onClick={() => void act.run(async () => { await revoke(r); return { note: "Отозвано." }; })}>Отозвать</button>
+                {r.needsCode === null ? (
+                  <button className={btn} disabled={act.busy} onClick={() => void act.run(async () => { await revoke(r); return { note: "Отозвано." }; })}>Отозвать</button>
+                ) : (
+                  <span className="flex basis-full flex-wrap items-center gap-2">
+                    <span className="text-xs font-semibold text-red-800 dark:text-red-300">{REVOKE_CODE_NOTE} {r.needsCode}</span>
+                    {pk.has ? <button className={btnDanger} disabled={act.busy || pk.problem !== null} onClick={() => void act.run(async () => { const t = await touchFor(rpc, { kind: "agents.revokeKept", ids: [r.revoke.id as number] }, () => undefined); if (!t) throw new Error("касание не требуется"); await revoke(r, { passkey: t.passkey }); return { note: "Отозвано." }; })}>Отозвать касанием</button> : null}
+                    {!pk.keyOnly ? <><CodeField value={code} onChange={setCode} /><button className={btnDanger} disabled={act.busy || code.length !== 6} onClick={() => void act.run(async () => { await revoke(r, { code }); setCode(""); return { note: "Отозвано." }; })}>Отозвать кодом</button></> : null}
+                  </span>
+                )}
               </li>
             ))}
           </ul>
@@ -3145,7 +3181,7 @@ function ExceptionsTab({ ov, rpc, refetch, freqOff, onFreqOff }: { ov: Overview;
           <p>{RESET_NOTE}</p>
           {confirm ? (
             <div className="mt-2 flex flex-wrap items-center gap-2">
-              <span className="font-semibold">Точно? Отзовётся исключений: {all.length}.</span>
+              <span className="font-semibold">{resetConfirmText(all)}</span>
               <button className={btnDanger} disabled={act.busy} onClick={reset}>Да, сбросить</button>
               <button className={btn} onClick={() => setConfirm(false)}>Нет</button>
             </div>
@@ -3460,7 +3496,7 @@ function GatePage() {
         <h1 className="text-xl font-semibold">secure-bb</h1>
         <PinnedNotes />
         <TroubleshootBar until={ov.guard?.troubleshootUntil ?? 0} />
-        <StatusBar level={status.level} label={status.label} text={guardDown ? GUARD_DOWN_TEXT : status.first ? `Сначала: ${status.first.text}.` : "Всё, что нужно решить, решено."} onShow={status.first ? () => showProblem(status.first!) : null} />
+        <StatusBar level={status.level} label={status.label} text={guardDown ? GUARD_DOWN_TEXT : status.first ? `Сначала: ${status.first.text}.${status.level === "stopped" ? ` ${STOPPED_EXPLAIN}` : ""}` : "Всё, что нужно решить, решено."} onShow={status.first ? () => showProblem(status.first!) : null} />
         {countsLine(counts) ? <p className={`-mt-4 text-xs ${muted}`} data-secure-bb-counts>{countsLine(counts)}</p> : null}
         <div role="tablist" className="flex flex-wrap gap-1 border-b border-border">
           {(["status", "quarantine", "trust", "more"] as const).map((t) => (

@@ -61,7 +61,7 @@ import { scan as scanAgents, type FileKind, type Limits, type ScanResult } from 
 import { JSON_FILE, applyPathChange, watchedRel, type JsonKey } from "./restore.ts";
 import { stable } from "./agents-scan.ts";
 import { helperUp, sendRestore } from "./restore-client.ts";
-import { applyForward, partAction, partDanger, partRestorable, shownValue, splitSettings, viewPart, type JsonPart, type PartView } from "./json-parts.ts";
+import { applyForward, partAction, partDanger, partRestorable, rollbackDanger, shownValue, splitSettings, viewPart, type JsonPart, type PartView } from "./json-parts.ts";
 
 export type GuardErrorCode = "invalid" | "not_found" | "conflict" | "not_registered" | "invalid_code" | "invalid_passkey" | "expired" | "blocked" | "unknown_op" | "no_restore" | "unavailable" | "restore_failed";
 
@@ -352,7 +352,9 @@ export function isRoutineAction(a: Record<string, unknown>): boolean {
   switch (a.op) {
     case "approve":
       return a.acknowledgeBlock !== true;
+    // A window while the agents' settings are under a critical alarm is never routine: a fresh touch, with the warning in the description.
     case "open-window":
+      return a.alarm !== true;
     case "batch-approve":
       return true;
     case "touch":
@@ -996,9 +998,17 @@ export class Guard {
   private errText = (err: unknown): string => (err instanceof Error ? err.message : String(err)).slice(0, 200);
 
   /** Does this version pass by itself? If not, the note says why in plain words. The rule is all of: source own or known · mode lets it · an approved version from the same source · rights did not grow · no hard flag. */
+  /** A critical difference that is not part of the first baseline is open (the same fact the page's red bar and the hold of the agents use). */
+  private criticalAgentsOpen(): boolean {
+    if (this.agents === null) return false;
+    return this.db.prepare(`SELECT 1 FROM agent_drifts WHERE status = 'open' AND class = 'critical' AND initial = 0 LIMIT 1`).get() !== undefined;
+  }
+
   private sourceVerdict(req: DecideInput, ev: Evaluation | null, stopped: boolean): { pass: true; rights: Rights; detail: Record<string, unknown> } | { pass: false; note: string | null } {
     const no = (note: string | null) => ({ pass: false as const, note });
     if (stopped) return no(null); // the plugin's own check stopped this version for a human: its reason is in the queue already
+    // A critical difference in the agents' settings is open: an agent that may be swapped must not carry a version of an "own" plugin through. Only a human's decision lets it in.
+    if (this.criticalAgentsOpen()) return no("открыта критичная тревога по настройкам агентов: версии сами не проходят, пока вы её не разберёте");
     const mode = this.trustMode();
     const ident = identityOf(req.sourceKind, req.source);
     const { level, entry } = levelOf(ident, this.mySources(), this.trustCfg.known);
@@ -1619,7 +1629,7 @@ export class Guard {
       case "open-window": {
         const scope = a.scope;
         if (scope !== undefined && scope !== "tree" && scope !== "thread") throw new GuardError("invalid", "scope is tree or thread");
-        return { op: "open-window", pluginId: pluginIdOf(a.pluginId), minutes: a.minutes === undefined ? this.policy().windowMin : intOf(a.minutes, "minutes", 1, 1440), ...(scope !== undefined ? { scope } : {}) };
+        return { op: "open-window", pluginId: pluginIdOf(a.pluginId), minutes: a.minutes === undefined ? this.policy().windowMin : intOf(a.minutes, "minutes", 1, 1440), ...(scope !== undefined ? { scope } : {}), ...(this.criticalAgentsOpen() ? { alarm: true } : {}) };
       }
       case "policy": {
         if (typeof a.patch !== "object" || a.patch === null || Array.isArray(a.patch)) throw new GuardError("invalid", "patch is an object");
@@ -1655,8 +1665,13 @@ export class Guard {
         if (part && (danger !== null) !== a.danger) throw new GuardError("conflict", "the part is not what the page showed: look again");
         return { op: "agents-keep-part", id, partId, fileSha, danger: a.danger };
       }
+      // «Вернуть» / «Отозвать»: a touch only when the RESULT makes the agent more dangerous (the guard looks at what the file would say, not at the button's name).
+      case "agents-rollback-part":
+        return { op: "agents-rollback-part", id: intOf(a.id, "id", 1, Number.MAX_SAFE_INTEGER), partId: str(a.partId, "partId", 16, 16), fileSha: str(a.fileSha, "fileSha", 16, 16) };
+      case "agents-revoke-kept":
+        return { op: "agents-revoke-kept", id: intOf(a.id, "id", 1, Number.MAX_SAFE_INTEGER) };
       default:
-        throw new GuardError("invalid", "an action is approve, approve-trust, session-open, batch-approve, open-window, policy, touch, trust-mode, sources-add, agents-accept, agents-restore or agents-keep-part");
+        throw new GuardError("invalid", "an action is approve, approve-trust, session-open, batch-approve, open-window, policy, touch, trust-mode, sources-add, agents-accept, agents-restore, agents-keep-part, agents-rollback-part or agents-revoke-kept");
     }
   }
 
@@ -1684,7 +1699,7 @@ export class Guard {
         return `Одобрить пакетом ${items.length} ${items.length === 1 ? "элемент" : "элементов"} одним касанием (список зафиксирован у сторожа, хеш ${String(a.setHash).slice(0, 12)}…): ${items.slice(0, 8).map((i) => i.label).join("; ")}${items.length > 8 ? ` и ещё ${items.length - 8}` : ""}`;
       }
       case "open-window":
-        return `Открыть окно доверия для плагина «${String(a.pluginId)}» на ${String(a.minutes)} мин${a.scope === "tree" ? " (охват: весь тред со всеми сабтредами)" : a.scope === "thread" ? " (охват: только этот тред)" : ""}: любые версии этого плагина будут загружаться без касания`;
+        return `Открыть окно доверия для плагина «${String(a.pluginId)}» на ${String(a.minutes)} мин${a.scope === "tree" ? " (охват: весь тред со всеми сабтредами)" : a.scope === "thread" ? " (охват: только этот тред)" : ""}${a.alarm === true ? ": ВНИМАНИЕ — в настройках агентов открыта критичная тревога, агент мог быть подменён; окно пропустит любые версии этого плагина без касания" : ": любые версии этого плагина будут загружаться без касания"}`;
       case "policy": {
         const cur = this.policy();
         const parts = Object.entries(a.patch as Record<string, unknown>).map(([k, v]) => `${k}: ${String(cur[k as keyof Policy])} → ${String(v)}`);
@@ -1708,6 +1723,16 @@ export class Guard {
       case "agents-keep-part": {
         const { part, path } = this.partOf(Number(a.id), String(a.partId), String(a.fileSha));
         return `Оставить в настройках агента (${path}): ${this.partSentence(part)}. Это войдёт в одобренные настройки; остальное в файле решается отдельно${a.danger === true ? ". Это делает агента опаснее: нужно свежее касание" : ""}`;
+      }
+      case "agents-rollback-part": {
+        const { part, path } = this.partOf(Number(a.id), String(a.partId), String(a.fileSha));
+        return `Вернуть в настройках агента (${path}): ${this.partSentence(part)}. Это ослабляет агента (${rollbackDanger(part) ?? "?"}): нужно свежее касание`;
+      }
+      case "agents-revoke-kept": {
+        const k = this.db.prepare(`SELECT * FROM agent_kept WHERE id = ? AND revoked_at IS NULL`).get(Number(a.id)) as Raw | undefined;
+        if (!k) throw new GuardError("not_found", `no kept change #${String(a.id)}`);
+        const part = JSON.parse(String(k.part)) as JsonPart;
+        return `Отозвать оставленное в настройках агента (${String(k.path)}): ${this.partSentence(part)}. Отзыв ослабляет агента (${rollbackDanger(part) ?? "?"}): нужно свежее касание`;
       }
       case "agents-restore": {
         if (this.agents === null) throw new GuardError("invalid", "the agent watch is not configured at this guard");
@@ -2026,10 +2051,13 @@ export class Guard {
    * project) are put back, each by its own key; the rest of the file is not touched. The values come from the baseline's view of the file.
    */
   private jsonPlan(d: Raw, path: string): RestorePlan {
-    if (String(d.change) !== "changed") return { ok: false, reason: "общий файл состояния агента (.claude.json) целиком не создаётся и не удаляется: вернуть можно только вручную" };
-    const b = this.db.prepare(`SELECT * FROM agent_baseline WHERE path = ?`).get(path) as Raw | undefined;
-    const base = (b?.content as string | null | undefined) ?? null;
-    if (!b || base === null || sha256hex(base) !== String(b.sha256)) return { ok: false, reason: "эталон разделов MCP этого файла не сохранён: вернуть можно только вручную" };
+    if (String(d.change) === "removed") return { ok: false, reason: "общий файл состояния агента (.claude.json) целиком не создаётся: вернуть можно только вручную" };
+    // A file that appeared (nothing was approved): what is put back is "no MCP servers" — the same helper operation as for a changed file. The rest of the file
+    // (Claude Code's own state) is not touched, and the file itself is neither created nor deleted by the helper.
+    const added = String(d.change) === "added";
+    const b = added ? undefined : (this.db.prepare(`SELECT * FROM agent_baseline WHERE path = ?`).get(path) as Raw | undefined);
+    const base = added ? "{}" : ((b?.content as string | null | undefined) ?? null);
+    if (!added && (!b || base === null || sha256hex(base) !== String(b.sha256))) return { ok: false, reason: "эталон разделов MCP этого файла не сохранён: вернуть можно только вручную" };
     const view = (t: string | null): { mcp: unknown; projects: Record<string, unknown> } | null => {
       try {
         const o = t === null ? null : (JSON.parse(t) as { mcpServers?: unknown; projects?: Record<string, { mcpServers?: unknown }> });
@@ -2055,7 +2083,7 @@ export class Guard {
     for (const dir of new Set([...Object.keys(was.projects), ...Object.keys(now.projects)])) add(["projects", dir, "mcpServers"], was.projects[dir], now.projects[dir]);
     if (ops.length === 0) return { ok: false, reason: "в разделах MCP расхождения не видно (изменилась другая часть файла): вернуть можно только вручную" };
     if (ops.length > 50) return { ok: false, reason: "слишком много разделов для отката (больше 50): вернуть можно только вручную" };
-    return { ok: true, action: "json", content: null, sha: String(b.sha256), ops };
+    return { ok: true, action: "json", content: null, sha: added ? "0".repeat(64) : String(b!.sha256), ops };
   }
 
   private restorePlan(d: Raw): RestorePlan {
@@ -2186,6 +2214,9 @@ export class Guard {
     const path = String(k.path);
     if (!partRestorable(part)) throw new GuardError("no_restore", "эту часть помощник не возвращает: вернуть можно только вручную");
     if (!(await helperUp(socket, this.agents.restore?.timeoutMs))) throw new GuardError("unavailable", "помощник отката не отвечает (служба sbb-restore не запущена или сокет недоступен): ничего не записано");
+    // Taking back a kept ban (deny, ask, the sandbox) weakens the agent: a fresh touch, as for any other weakening.
+    const revokeDanger = rollbackDanger(part);
+    const factor = revokeDanger === null ? null : this.verifyFactor("agents.revokeKept", this.normalizeAction({ op: "agents-revoke-kept", id }), raw);
     this.agentsScan({ force: true });
     // The file as the guard sees it now: the open difference's hash, or the approved one when the file is as approved.
     const open = this.db.prepare(`SELECT * FROM agent_drifts WHERE path = ? AND status = 'open'`).get(path) as Raw | undefined;
@@ -2223,7 +2254,7 @@ export class Guard {
         }
       }
       this.db.prepare(`UPDATE agent_kept SET revoked_at = ? WHERE id = ?`).run(this.now(), id);
-      this.log("agents.revoke-kept", null, null, { kept: id, path, rel: String(k.rel), part: part.path.join("."), kind: part.kind, inFile });
+      this.log("agents.revoke-kept", null, null, { kept: id, path, rel: String(k.rel), part: part.path.join("."), kind: part.kind, inFile, ...(factor ? factorDetail(factor) : {}) });
     });
     this.agentsScan({ force: true });
     this.settleSemantic(path);
@@ -2263,11 +2294,14 @@ export class Guard {
     const { drift: d, part, danger } = this.partOf(id, partId, fileSha);
     if (!partRestorable(part)) throw new GuardError("no_restore", "эту часть помощник не возвращает: вернуть можно только весь файл");
     if (!(await helperUp(socket, this.agents.restore?.timeoutMs))) throw new GuardError("unavailable", "помощник отката не отвечает (служба sbb-restore не запущена или сокет недоступен): ничего не записано");
+    // Without a code only a tightening: when the result makes the agent more dangerous (a rule the owner removed comes back, a ban goes), a fresh touch is needed.
+    const backDanger = rollbackDanger(part);
+    const factor = backDanger === null ? null : this.verifyFactor("agents.rollbackPart", this.normalizeAction({ op: "agents-rollback-part", id, partId, fileSha }), raw);
     const a = partAction(part, "rollback");
     const path = String(d.path);
     const fileSha256 = String(d.new_sha);
     const ans = await sendRestore(socket, { op: "restore-json-path", path, fileSha256, pointer: part.path, action: a.action, ...(a.action === "delete" ? {} : { value: a.value }) }, this.agents.restore?.timeoutMs);
-    const detail = { drift: id, path, rel: String(d.rel), part: part.path.join("."), kind: part.kind, action: a.action, danger: danger !== null, was: fileSha256.slice(0, 16) };
+    const detail = { drift: id, path, rel: String(d.rel), part: part.path.join("."), kind: part.kind, action: a.action, danger: danger !== null, backDanger: backDanger !== null, ...(factor ? factorDetail(factor) : {}), was: fileSha256.slice(0, 16) };
     if (!ans.ok) {
       this.tx(() => this.log("agents.rollback-part.fail", null, null, { ...detail, error: ans.code, message: ans.message.slice(0, 200) }));
       // The file is not the one the part was worked out from: nothing was written and the page draws again.

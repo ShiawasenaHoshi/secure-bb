@@ -101,7 +101,9 @@ export type GuardAction =
   | { op: "sources-add"; entries: string[] }
   | { op: "agents-accept"; ids: number[] }
   | { op: "agents-restore"; id: number }
-  | { op: "agents-keep-part"; id: number; partId: string; fileSha: string; danger: boolean };
+  | { op: "agents-keep-part"; id: number; partId: string; fileSha: string; danger: boolean }
+  | { op: "agents-rollback-part"; id: number; partId: string; fileSha: string }
+  | { op: "agents-revoke-kept"; id: number };
 export interface GuardChallenge {
   challenge: string;
   allowCredentials: Array<{ type: "public-key"; id: string }>;
@@ -155,6 +157,8 @@ export interface SettingsPart {
   elem: string | null;
   /** Why keeping it makes the agent more dangerous (a fresh touch is needed), or null. */
   danger: string | null;
+  /** Why putting it back makes the agent more dangerous (a fresh touch is needed), or null (no code). */
+  backDanger: string | null;
   /** The helper can put it back. */
   restorable: boolean;
 }
@@ -308,9 +312,9 @@ export interface GuardPort {
   /** «Вернуть как было»: a touch for this difference; the guard puts back its own baseline through the restore helper. */
   agentsRestore(id: number, proof: GuardProof): Promise<AgentsRestoreResult>;
   /** «Вернуть» one part of a settings file: no touch (tightening). */
-  agentsRollbackPart(id: number, partId: string, fileSha: string): Promise<{ restored: true; resolved: boolean; remaining: number }>;
+  agentsRollbackPart(id: number, partId: string, fileSha: string, proof?: GuardProof): Promise<{ restored: true; resolved: boolean; remaining: number }>;
   /** «Отозвать» a part that was kept: out of the file and out of the approved text; no touch (tightening). */
-  agentsRevokeKept(id: number): Promise<{ revoked: true; inFile: boolean }>;
+  agentsRevokeKept(id: number, proof?: GuardProof): Promise<{ revoked: true; inFile: boolean }>;
   /** «Оставить» one part: a touch (a session for a part that does not make the agent more dangerous). */
   agentsKeepPart(id: number, partId: string, fileSha: string, danger: boolean, proof: GuardProof): Promise<{ kept: true; accepted: boolean; remaining: number }>;
 }
@@ -453,12 +457,12 @@ export class GuardLink implements GuardPort {
     const { ok: _ok, id: _id, ...rest } = await this.call({ op: "agents-restore", id, ...proofFields(proof) });
     return rest as unknown as AgentsRestoreResult;
   }
-  async agentsRollbackPart(id: number, partId: string, fileSha: string): Promise<{ restored: true; resolved: boolean; remaining: number }> {
-    const r = await this.call({ op: "agents-rollback-part", id, partId, fileSha });
+  async agentsRollbackPart(id: number, partId: string, fileSha: string, proof?: GuardProof): Promise<{ restored: true; resolved: boolean; remaining: number }> {
+    const r = await this.call({ op: "agents-rollback-part", id, partId, fileSha, ...(proof === undefined ? {} : proofFields(proof)) });
     return { restored: true, resolved: r.resolved === true, remaining: Number(r.remaining) };
   }
-  async agentsRevokeKept(id: number): Promise<{ revoked: true; inFile: boolean }> {
-    const r = await this.call({ op: "agents-revoke-kept", id });
+  async agentsRevokeKept(id: number, proof?: GuardProof): Promise<{ revoked: true; inFile: boolean }> {
+    const r = await this.call({ op: "agents-revoke-kept", id, ...(proof === undefined ? {} : proofFields(proof)) });
     return { revoked: true, inFile: r.inFile === true };
   }
   async agentsKeepPart(id: number, partId: string, fileSha: string, danger: boolean, proof: GuardProof): Promise<{ kept: true; accepted: boolean; remaining: number }> {

@@ -114,14 +114,29 @@ export function applyForward(base: string | null, p: JsonPart): string | null {
 export const partRestorable = (p: JsonPart): boolean => settingsPathAllowed(p.path);
 
 // ---- what makes the agent more dangerous ------------------------------------------------------------------------------------
+// The question is always about the RESULT of the action, not its name: «Оставить» makes the part part of what is approved; «Вернуть» and «Отозвать» make
+// the file say the opposite of the part. Whatever the result adds to what the agent can do (or takes away from what holds it back) needs a fresh touch.
+// A part is harmless only when it is on the short list below; anything else is dangerous by default.
 const FILE = "x/.claude/settings.json";
-/** The same rules as for the whole file, applied to this part alone: a reason in Russian, or null. */
+const SAFE_TOP = new Set(["model", "theme", "outputStyle", "cleanupPeriodDays", "includeCoAuthoredBy", "spinnerTipsEnabled"]);
+const NOT_LISTED = "этого ключа нет в списке безопасных: через него агент может запускать команды, подключать чужое или получать больше доступа";
+/** Does this part, as it stands (added or changed to its `after`, or the element added), only hold the agent back or touch looks? */
+function harmless(path: readonly string[], kind: PartKind, after: unknown): boolean {
+  const at = path.join(".");
+  if (SAFE_TOP.has(path[0]!) && path.length === 1) return true;
+  if ((at === "permissions.deny" || at === "permissions.ask") && kind === "elem-added") return true;
+  if (at === "permissions.disableBypassPermissionsMode" && (after === "disable" || after === true)) return true;
+  if (at === "sandbox.enabled" && after === true) return true;
+  return false;
+}
+/** Taking away what held the agent back: a ban, a question, the bypass lock, the sandbox. */
+function removesRestraint(path: readonly string[]): boolean {
+  const at = path.join(".");
+  return /^permissions\.(?:deny|ask)$/.test(at) || at === "permissions.disableBypassPermissionsMode" || at === "sandbox.enabled";
+}
+/** Why the part makes the agent more dangerous as the file would say it after the part is KEPT (the file as it is now), or null. Removals count only when they take a restraint away. */
 export function partDanger(p: JsonPart): string | null {
-  if (p.kind === "key-removed" || p.kind === "elem-removed") {
-    const key = p.path.join(".");
-    if (/^permissions\.(?:deny|ask)$/.test(key) || key === "permissions.disableBypassPermissionsMode" || key === "sandbox" || key.startsWith("sandbox.")) return `убирает ограничение (${key})`;
-    return null;
-  }
+  if (p.kind === "key-removed" || p.kind === "elem-removed") return removesRestraint(p.path) ? `убирает ограничение (${p.path.join(".")})` : null;
   const value = p.kind === "elem-added" ? [p.elem] : p.after;
   const doc: Record<string, unknown> = {};
   let cur = doc;
@@ -131,8 +146,26 @@ export function partDanger(p: JsonPart): string | null {
   });
   const a = analyze({ rel: FILE, kind: "claude-settings", change: "changed", prev: "{}", next: JSON.stringify(doc) });
   const bad = a.reasons.filter((r) => !isTightening(r));
-  return a.cls === "critical" && bad.length > 0 ? bad[0]! : null;
+  if (a.cls === "critical" && bad.length > 0) return bad[0]!;
+  return harmless(p.path, p.kind, p.after) ? null : `${NOT_LISTED} (${p.path.join(".")})`;
 }
+/** The part as it would be if the opposite were done: «Вернуть» turns an added thing into a removed one and back. */
+export function inversePart(p: JsonPart): JsonPart {
+  switch (p.kind) {
+    case "key-added":
+      return { ...p, kind: "key-removed", before: p.after, after: undefined };
+    case "key-removed":
+      return { ...p, kind: "key-added", after: p.before, before: undefined };
+    case "key-changed":
+      return { ...p, before: p.after, after: p.before };
+    case "elem-added":
+      return { ...p, kind: "elem-removed" };
+    case "elem-removed":
+      return { ...p, kind: "elem-added" };
+  }
+}
+/** Why putting this part back (or taking a kept part back) makes the agent more dangerous, or null: then it is a tightening and needs no code. */
+export const rollbackDanger = (p: JsonPart): string | null => partDanger(inversePart(p));
 
 // ---- what the page shows ---------------------------------------------------------------------------------------------------
 const SECRET_NAME = /token|secret|password|passwd|api[_-]?key|apikey|authorization|credential|private[_-]?key/i;
@@ -153,13 +186,16 @@ export interface PartView {
   before: string | null;
   after: string | null;
   elem: string | null;
-  /** Why this makes the agent more dangerous, or null. */
+  /** Why keeping it makes the agent more dangerous, or null. */
   danger: string | null;
+  /** Why putting it back makes the agent more dangerous (a fresh touch is needed), or null (no code). */
+  backDanger: string | null;
   /** The helper can put it back (the path is on its list). */
   restorable: boolean;
 }
 export function viewPart(p: JsonPart): PartView {
   const shown = (v: unknown): string | null => (v === undefined ? null : shownValue(p.path, v));
   const danger = partDanger(p);
-  return { id: p.id, path: p.path, kind: p.kind, before: shown(p.before), after: shown(p.after), elem: shown(p.elem), danger: danger === null ? null : maskSecrets(danger), restorable: partRestorable(p) };
+  const back = rollbackDanger(p);
+  return { id: p.id, path: p.path, kind: p.kind, before: shown(p.before), after: shown(p.after), elem: shown(p.elem), danger: danger === null ? null : maskSecrets(danger), backDanger: back === null ? null : maskSecrets(back), restorable: partRestorable(p) };
 }

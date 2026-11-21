@@ -860,16 +860,17 @@ export default async function plugin(bb: BbPluginApi) {
       };
     }),
     // One part of a settings file. «Вернуть» (theirs) tightens: no code. «Оставить» (mine): a touch; a session only for a part that is not dangerous (the guard checks the flag itself).
-    "agents.rollbackPart": wrap(async ({ id, partId, fileSha }) => {
+    "agents.rollbackPart": wrap(async ({ id, partId, fileSha, code, passkey }) => {
       if (!agents || !guardLink) throw new GateError("invalid", "вернуть часть файла можно только через сторожа");
-      const r = await guardLink.agentsRollbackPart(id, partId, fileSha);
+      // A code or a touch goes along when there is one; the guard decides whether this one needs it (a return that makes the agent more dangerous does).
+      const r = await guardLink.agentsRollbackPart(id, partId, fileSha, proofOf(code, passkey));
       await agents.refresh(false);
       changed();
       return { ok: true as const, resolved: r.resolved, remaining: r.remaining, note: r.resolved ? "Готово: возвращено, тревога снята" : "Готово: возвращено" };
     }),
-    "agents.revokeKept": wrap(async ({ id }) => {
+    "agents.revokeKept": wrap(async ({ id, code, passkey }) => {
       if (!agents || !guardLink) throw new GateError("invalid", "отозвать можно только через сторожа");
-      const r = await guardLink.agentsRevokeKept(id);
+      const r = await guardLink.agentsRevokeKept(id, proofOf(code, passkey));
       await agents.refresh(true);
       changed();
       return { ok: true as const, note: r.inFile ? "Отозвано: это ушло из файла настроек агента" : "Отозвано: в файле этого уже не было" };
@@ -1202,6 +1203,14 @@ export default async function plugin(bb: BbPluginApi) {
         case "agents.restore": {
           if (q.ids === undefined || q.ids.length !== 1) throw new GateError("invalid", "one difference id is needed");
           return out({ op: "agents-restore", id: q.ids[0]! });
+        }
+        case "agents.rollbackPart": {
+          if (q.ids === undefined || q.ids.length !== 1 || q.partId === undefined || q.fileSha === undefined) throw new GateError("invalid", "the difference, the part and the file hash are needed");
+          return out({ op: "agents-rollback-part", id: q.ids[0]!, partId: q.partId, fileSha: q.fileSha });
+        }
+        case "agents.revokeKept": {
+          if (q.ids === undefined || q.ids.length !== 1) throw new GateError("invalid", "the kept change id is needed");
+          return out({ op: "agents-revoke-kept", id: q.ids[0]! });
         }
         case "agents.keepPart": {
           if (q.ids === undefined || q.ids.length !== 1 || q.partId === undefined || q.fileSha === undefined || q.danger === undefined) throw new GateError("invalid", "the difference, the part, the file hash and the danger flag are needed");

@@ -400,7 +400,7 @@ export function yellowText(y: YellowInput): YellowText {
       line = `Плагин из ${y.level === "unknown" ? "источника" : who + " источника"} (${y.sourceLabel}), который вы ещё не разрешали.${can || " Особых прав он не просит."}`;
       break;
     default:
-      line = `Защита не пропустила плагин сама (${y.sourceLabel}).${can}`;
+      line = `Плагин из ${y.sourceLabel} ждёт вашего «да»: сам он не проходит, даже когда ничего опасного не видно.${can}`;
   }
   return { title: `«${y.pluginId}» ${y.version} ждёт вашего решения`, line: `${line}${tail}` };
 }
@@ -456,6 +456,8 @@ export function pageStatus(i: StatusInput): Status {
   return { level: "ok", label: "Защищено", count: 0, problems, first: null };
 }
 
+/** Under the red «Остановлено»: what it means for the person (nothing of the found has run). */
+export const STOPPED_EXPLAIN = "Эти плагины не запущены: то, что в них нашли, не выполнялось. Решите, что с ними делать.";
 /** The text under the status when the guard is down (the page must say what actually happens: everything unbuilt-in is held). */
 export const GUARD_DOWN_TEXT = "Защита не работает: она не отвечает. Новые плагины не загрузятся, а одобрить сейчас ничего нельзя. Что делать: на этой машине выполните «sbb-guard status».";
 
@@ -886,10 +888,10 @@ export function windowAvailability(i: WindowAvailInput): WindowAvail {
   if (i.sourceKind === "path") {
     return {
       available: false,
-      note: `Временное доверие недоступно: плагин взят из папки на компьютере, а не из чата агента. ${i.level === "own" ? "Ваш источник уже в доверенных: версии без новых прав проходят сами." : "Вместо него доверьте источник кнопкой «Разрешить и доверять источнику»: тогда версии без новых прав будут проходить сами."}`,
+      note: `Окно доверия тут не подходит: оно работает для плагинов, которые агент ставит из чата, а этот взят из папки на компьютере. ${i.level === "own" ? "Ваш источник уже в доверенных: версии без новых прав проходят сами." : "Вместо него доверьте источник кнопкой «Разрешить и доверять источнику»: тогда версии без новых прав будут проходить сами."}`,
     };
   }
-  return { available: false, note: "Временное доверие недоступно: плагин пришёл не из чата агента. Разрешайте версию или доверьте источник." };
+  return { available: false, note: "Окно доверия тут не подходит: оно работает для плагинов, которые агент ставит из чата, а этот пришёл иначе. Разрешите версию или доверьте источник." };
 }
 /**
  * «Открыть окно на N мин» on a plugin's own row. A window is bound to the thread an agent put the plugin in from, so it is possible only for a plugin with such a
@@ -1195,6 +1197,7 @@ const ERROR_TEXT: Array<[RegExp, string]> = [
   [/too many|blocked until|block/i, "Слишком много неверных кодов: ввод закрыт на час."],
   [/third-party plugins first|interface code could read/i, "Пока работают чужие плагины с интерфейсом, сессию открыть нельзя: они могли бы подсмотреть её."],
   [/directory that others can write/i, "Папка плагина доступна на запись другим пользователям: после проверки файлы можно подменить. Исправьте права или ставьте плагин другим способом."],
+  [/window needs a fresh|fresh touch.*alarm/i, "Пока открыта тревога по настройкам агентов, окно доверия открывается только со свежим кодом или касанием."],
   [/changed since it was shown|not in the difference|not what the page showed/i, "Файл изменился между показом и действием: ничего не записано, показано заново."],
   [/is already (approved|dismissed|accepted|reverted|superseded)|already approved/i, "Это уже решено: обновите страницу."],
   [/no such|not found|no review|no request|no difference/i, "Этого уже нет: обновите страницу."],
@@ -1550,6 +1553,8 @@ export interface PartLike {
   after: string | null;
   elem: string | null;
   danger: string | null;
+  /** Why putting it back makes the agent more dangerous (then it needs a fresh code or touch), or null. */
+  backDanger: string | null;
   restorable: boolean;
 }
 export const PART_KEEP = "Оставить";
@@ -1560,6 +1565,7 @@ export const PARTS_HELP = "«Оставить» — это моё: оно вой
 /** «Оставить» for a part that makes the agent more dangerous needs a fresh touch; for the rest a session is enough. */
 export const partNeedsFresh = (p: Pick<PartLike, "danger">): boolean => p.danger !== null;
 export const PART_FRESH_NOTE = "Это делает агента опаснее: чтобы оставить, нужен свежий код или касание.";
+export const PART_BACK_FRESH_NOTE = "Вернуть это значит ослабить агента: чтобы вернуть, нужен свежий код или касание.";
 export const PART_NO_BACK = "Эту часть по отдельности вернуть нельзя — только весь файл (кнопка ниже).";
 
 const q = (v: string | null): string => `«${v ?? ""}»`;
@@ -1606,12 +1612,12 @@ export interface CriticalEffects {
   sourcesStillPass: boolean;
   /** Versions already approved keep running. */
   approvedStillRun: boolean;
-  /** A window opened after the change works (with a touch, as always). */
-  newWindowsStillWork: boolean;
+  /** A window can be opened after the change only with a fresh code or touch (a session does not cover it), and the touch says why it is risky. */
+  newWindowsNeedFreshTouch: boolean;
   /** New messages to the agents are held only after «Остановить агентов» was pressed. */
   holdsAgentsOnlyAfterStop: boolean;
 }
-export const CRITICAL_EFFECTS: CriticalEffects = { closesEarlierWindows: true, sourcesStillPass: true, approvedStillRun: true, newWindowsStillWork: true, holdsAgentsOnlyAfterStop: true };
+export const CRITICAL_EFFECTS: CriticalEffects = { closesEarlierWindows: true, sourcesStillPass: false, approvedStillRun: true, newWindowsNeedFreshTouch: true, holdsAgentsOnlyAfterStop: true };
 export interface AgentAlarmText {
   /** What is blocked while it is open. */
   blocked: string;
@@ -1620,14 +1626,14 @@ export interface AgentAlarmText {
 }
 export function agentAlarmText(e: CriticalEffects = CRITICAL_EFFECTS): AgentAlarmText {
   const blocked: string[] = [];
+  const works: string[] = [];
   if (e.closesEarlierWindows) blocked.push("окна доверия, открытые до этого изменения, закрыты, а в чатах, где оно случилось, временное доверие не действует");
   if (!e.sourcesStillPass) blocked.push("новые версии плагинов сами не проходят (ни по источнику, ни по окнам): только вашим решением");
-  if (!e.newWindowsStillWork) blocked.push("новое окно доверия открыть нельзя");
+  else works.push("версии из ваших источников без новых прав проходят сами");
+  if (e.newWindowsNeedFreshTouch) blocked.push("новое окно доверия открывается только со свежим кодом или касанием, с предупреждением");
+  else works.push("новое окно доверия открыть можно");
   if (!e.approvedStillRun) blocked.push("одобренные плагины не запускаются");
-  const works: string[] = [];
-  if (e.sourcesStillPass) works.push("версии из ваших источников без новых прав проходят сами");
-  if (e.approvedStillRun) works.push("уже одобренные плагины работают");
-  if (e.newWindowsStillWork) works.push("новое окно доверия открыть можно");
+  else works.push("уже одобренные плагины работают");
   works.push(e.holdsAgentsOnlyAfterStop ? "агенты сами не остановлены: это делает кнопка «Остановить агентов» в карточке" : "новые сообщения агентам удерживаются");
   const cap = (t: string): string => t.charAt(0).toUpperCase() + t.slice(1);
   return { blocked: blocked.length > 0 ? `${cap(blocked.join("; "))}.` : "Ничего не заблокировано: это только сигнал.", works: `${cap(works.join("; "))}.` };
@@ -1660,6 +1666,9 @@ export interface ProtectedRow {
   version: string;
   approved: string;
 }
+export const AI_SCAN_OFF_TEXT = "ИИ-скан выключен: включить его можно на вкладке «Подробно», в разделе «Гейт плагинов — ИИ-скан».";
+export const AI_SCAN_NOT_YET_TEXT = "ИИ-скан: ещё не запускался (кнопка запуска — рядом).";
+export const aiScanEmptyText = (enabled: boolean): string => (enabled ? AI_SCAN_NOT_YET_TEXT : AI_SCAN_OFF_TEXT);
 export const NO_RIGHTS_TEXT = "права не определены (версию ещё не проверяли)";
 const RUNNING_STATUS = new Set(["running", "starting", "degraded"]);
 const HELD_STATUS_DETAIL = /waiting for activation guard|held by activation guard|held by secure-bb|удержан/i;
@@ -1786,6 +1795,8 @@ export interface ExceptionRow {
   at: number | null;
   /** What «Отозвать» takes back, by the id each rpc wants. */
   revoke: { kind: ExceptionKind; id: number | string };
+  /** Taking it back would make the agent more dangerous (a kept ban): then it needs a fresh code or touch, and a reset skips it. Why, or null. */
+  needsCode: string | null;
 }
 export interface ExceptionInput {
   windows: Array<{ id: number; pluginId: string; openedAt: number; remainingSec: number }>;
@@ -1798,11 +1809,11 @@ export const minutesLeft = (sec: number): string => `${Math.max(1, Math.ceil(sec
 /** Every exception the person made — windows, approvals, trusted sources, kept changes of the agents — in one list, newest first (sources, which have no time, last). */
 export function exceptionRows(i: ExceptionInput, now: number, onlyDay = false): ExceptionRow[] {
   const rows: ExceptionRow[] = [
-    ...i.windows.map((w): ExceptionRow => ({ key: `window:${w.id}`, kind: "window", title: `${EXCEPTION_LABEL.window}: плагин ${w.pluginId} — ещё ${minutesLeft(w.remainingSec)}`, detail: "новые версии проходят без вопросов, пока окно открыто", at: w.openedAt, revoke: { kind: "window", id: w.id } })),
-    ...i.cfgWindows.map((w): ExceptionRow => ({ key: `cfgWindow:${w.id}`, kind: "cfgWindow", title: `${EXCEPTION_LABEL.cfgWindow}: ${w.scopeLabels.join(", ")} — ещё ${minutesLeft(w.remainingSec)}`, detail: "изменения этих настроек bb проходят без вопросов, пока окно открыто", at: w.openedAt, revoke: { kind: "cfgWindow", id: w.id } })),
-    ...i.approvals.filter((a) => a.revokedAt === null).map((a): ExceptionRow => ({ key: `approval:${a.id}`, kind: "approval", title: `${EXCEPTION_LABEL.approval}: ${a.pluginId} ${a.version}`, detail: approvedByText(a, now), at: a.approvedAt, revoke: { kind: "approval", id: a.id } })),
-    ...i.kept.map((k): ExceptionRow => ({ key: `kept:${k.id}`, kind: "kept", title: `${EXCEPTION_LABEL.kept}: ${partTitle(k.part)}`, detail: `${k.rel}${k.danger ? `. Делает агента опаснее: ${k.danger}` : ""}`, at: k.keptAt, revoke: { kind: "kept", id: k.id } })),
-    ...i.sources.map((e): ExceptionRow => ({ key: `source:${e}`, kind: "source", title: `${EXCEPTION_LABEL.source}: ${friendlySource(e)}`, detail: "новые версии оттуда проходят без вопросов, пока плагин не попросит новых прав", at: null, revoke: { kind: "source", id: e } })),
+    ...i.windows.map((w): ExceptionRow => ({ key: `window:${w.id}`, kind: "window", title: `${EXCEPTION_LABEL.window}: плагин ${w.pluginId} — ещё ${minutesLeft(w.remainingSec)}`, detail: "новые версии проходят без вопросов, пока окно открыто", at: w.openedAt, revoke: { kind: "window", id: w.id }, needsCode: null })),
+    ...i.cfgWindows.map((w): ExceptionRow => ({ key: `cfgWindow:${w.id}`, kind: "cfgWindow", title: `${EXCEPTION_LABEL.cfgWindow}: ${w.scopeLabels.join(", ")} — ещё ${minutesLeft(w.remainingSec)}`, detail: "изменения этих настроек bb проходят без вопросов, пока окно открыто", at: w.openedAt, revoke: { kind: "cfgWindow", id: w.id }, needsCode: null })),
+    ...i.approvals.filter((a) => a.revokedAt === null).map((a): ExceptionRow => ({ key: `approval:${a.id}`, kind: "approval", title: `${EXCEPTION_LABEL.approval}: ${a.pluginId} ${a.version}`, detail: approvedByText(a, now), at: a.approvedAt, revoke: { kind: "approval", id: a.id }, needsCode: null })),
+    ...i.kept.map((k): ExceptionRow => ({ key: `kept:${k.id}`, kind: "kept", title: `${EXCEPTION_LABEL.kept}: ${partTitle(k.part)}`, detail: `${k.rel}${k.danger ? `. Делает агента опаснее: ${k.danger}` : ""}`, at: k.keptAt, revoke: { kind: "kept", id: k.id }, needsCode: k.part.backDanger })),
+    ...i.sources.map((e): ExceptionRow => ({ key: `source:${e}`, kind: "source", title: `${EXCEPTION_LABEL.source}: ${friendlySource(e)}`, detail: "новые версии оттуда проходят без вопросов, пока плагин не попросит новых прав", at: null, revoke: { kind: "source", id: e }, needsCode: null })),
   ];
   return rows
     .filter((r) => !onlyDay || r.at === null || now - r.at < 24 * 3_600_000)
@@ -1811,4 +1822,9 @@ export function exceptionRows(i: ExceptionInput, now: number, onlyDay = false): 
 export const exceptionsHeadline = (n: number): string => `Исключения (${n})`;
 export const EXCEPTIONS_HELP = "Всё, что вы разрешили в обход обычных вопросов. «Отозвать» — это ужесточение: кода не нужно, плагин или настройка снова спросит вас.";
 export const EXCEPTIONS_EMPTY = "Исключений нет: защита спрашивает про всё новое.";
-export const RESET_NOTE = "Закрывает все окна, отзывает одобрения и оставленные изменения агентов, очищает «мои источники». Это только ужесточение, касание не нужно. Плагины, у которых отозвано одобрение, перестанут загружаться, пока вы не решите заново. Режим не меняется.";
+/** What a reset takes back: everything that only tightens. What would weaken the agent when taken back (a kept ban) stays, and is taken back one by one, with a code. */
+export const resetRows = (rows: ExceptionRow[]): ExceptionRow[] => rows.filter((r) => r.needsCode === null);
+export const resetSkipped = (rows: ExceptionRow[]): number => rows.length - resetRows(rows).length;
+export const resetConfirmText = (rows: ExceptionRow[]): string => `Точно? Отзовётся исключений: ${resetRows(rows).length}.${resetSkipped(rows) > 0 ? ` Останется ${resetSkipped(rows)}: их отзыв ослабил бы агента, поэтому каждое отзывается отдельно, с кодом.` : ""}`;
+export const REVOKE_CODE_NOTE = "Отзыв ослабит агента (оставленный запрет вернётся к разрешённому): нужен свежий код или касание.";
+export const RESET_NOTE = "Закрывает все окна, отзывает одобрения и оставленные изменения агентов, очищает «мои источники». Это ужесточение, касание не нужно, кроме оставленных запретов: их отзыв ослабил бы агента, они остаются и отзываются по одному, с кодом. Плагины, у которых отозвано одобрение, перестанут загружаться, пока вы не решите заново. Режим не меняется.";

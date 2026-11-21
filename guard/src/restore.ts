@@ -379,7 +379,7 @@ export interface RestoreJsonPathRequest {
 const MAX_POINTER_DEPTH = 8;
 const FORBIDDEN_KEY = new Set(["__proto__", "constructor", "prototype"]);
 /** Top-level keys of a settings file that the helper edits, and (for `permissions`) which of its entries. Everything else is for «Вернуть всё». */
-const SETTINGS_TOP = new Set(["permissions", "hooks", "env", "enableAllProjectMcpServers", "enabledMcpjsonServers", "disabledMcpjsonServers", "apiKeyHelper", "sandbox", "dangerouslyDisableSandbox"]);
+const SETTINGS_TOP = new Set(["permissions", "hooks", "env", "enableAllProjectMcpServers", "enabledMcpjsonServers", "disabledMcpjsonServers", "apiKeyHelper", "sandbox", "dangerouslyDisableSandbox", "statusLine", "fileSuggestion", "otelHeadersHelper", "awsAuthRefresh", "awsCredentialExport", "gcpAuthRefresh", "policyHelper", "processWrapper", "sshHostCommands", "enabledPlugins", "extraKnownMarketplaces", "pluginConfigs", "allowedMcpServers", "forceLoginMethod", "forceLoginOrgUUID", "forceLoginGatewayUrl", "skipDangerousModePermissionPrompt", "modelOverrides", "model", "theme", "outputStyle", "cleanupPeriodDays", "includeCoAuthoredBy", "spinnerTipsEnabled"]);
 const PERMISSION_KEYS = new Set(["allow", "deny", "ask", "defaultMode", "additionalDirectories", "disableBypassPermissionsMode"]);
 /** Is this a path of a settings file the helper may change? A pure function: the guard uses it to say what can be split, the helper to refuse the rest. */
 export function settingsPathAllowed(pointer: readonly string[]): boolean {

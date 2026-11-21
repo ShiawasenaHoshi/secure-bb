@@ -1,5 +1,5 @@
 // The red bar says what a critical difference in the agents' settings blocks. It is built from CRITICAL_EFFECTS (src/ux.ts); here every flag is measured against a
-// real guard, so the text cannot stay as it is when the behaviour changes. (The spec asked for «новые версии сами не проходят»; the code does not do that: see the PR.)
+// real guard, so the text cannot stay as it is when the behaviour changes. (Since the review the guard really holds versions while a critical alarm is open: `decide` → sourceVerdict.)
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -63,12 +63,19 @@ async function measure(): Promise<CriticalEffects> {
   writeFileSync(join(own, "server.ts"), `${BASE}// a comment\n`);
   const next = await g.send(decideOf(own, "own", { version: "1.0.1" }));
   const sourcesStillPass = next.action === "proceed" && next.via === "source";
-  // a window opened now
+  // a window opened now: not by a session, only by a fresh code (and then it works)
+  const sess = g.guard.sessionOpen({ code: g.nextCode() });
+  let bySession = true;
+  try {
+    g.guard.openWindow({ pluginId: "fresh", minutes: 30, session: sess.token });
+  } catch {
+    bySession = false;
+  }
   g.guard.openWindow({ pluginId: "fresh", minutes: 30, code: g.nextCode() });
   const viaWindow = await g.send(decideOf(plugin(plugins, "fresh", BASE), "fresh"));
-  const newWindowsStillWork = viaWindow.action === "proceed" && viaWindow.via === "window";
+  const newWindowsNeedFreshTouch = !bySession && viaWindow.action === "proceed" && viaWindow.via === "window";
   // The hold of new messages to the agents is made by the plugin's `message.dispatch` hook, and only when AgentStopper.stoppedAt() is set (src/stop.ts `holding`).
-  return { closesEarlierWindows, sourcesStillPass, approvedStillRun, newWindowsStillWork, holdsAgentsOnlyAfterStop: true };
+  return { closesEarlierWindows, sourcesStillPass, approvedStillRun, newWindowsNeedFreshTouch, holdsAgentsOnlyAfterStop: true };
 }
 
 describe("the red bar tells the truth", () => {
@@ -78,14 +85,16 @@ describe("the red bar tells the truth", () => {
   it("the text is built from the effects: it says what is blocked and what still works", () => {
     const t = agentAlarmText();
     expect(t.blocked).toMatch(/окна доверия, открытые до этого изменения, закрыты/i);
-    expect(t.blocked).not.toMatch(/приостановлено|не проходят/);
-    expect(t.works).toMatch(/версии из ваших источников без новых прав проходят сами/i);
+    expect(t.blocked).toMatch(/новые версии плагинов сами не проходят \(ни по источнику, ни по окнам\): только вашим решением/i);
+    expect(t.blocked).toMatch(/окно доверия открывается только со свежим кодом/i);
+    expect(t.works).not.toMatch(/проходят сами/);
     expect(t.works).toMatch(/одобренные плагины работают/i);
     expect(t.works).toMatch(/Остановить агентов/);
   });
-  it("if the code ever stopped letting sources through, the text would say so (and could not claim the opposite)", () => {
-    const t = agentAlarmText({ ...CRITICAL_EFFECTS, sourcesStillPass: false });
-    expect(t.blocked).toMatch(/новые версии плагинов сами не проходят/);
-    expect(t.works).not.toMatch(/проходят сами/);
+  it("if the code ever let sources through again, the text would say so (and could not claim the opposite)", () => {
+    const t = agentAlarmText({ ...CRITICAL_EFFECTS, sourcesStillPass: true, newWindowsNeedFreshTouch: false });
+    expect(t.blocked).not.toMatch(/сами не проходят/);
+    expect(t.works).toMatch(/проходят сами/);
+    expect(t.works).toMatch(/окно доверия открыть можно/);
   });
 });

@@ -48,7 +48,7 @@ export const rpcContract = defineRpcContract({
   // Guard mode: a challenge bound to one action (the guard describes it in its own words), and registering a key (token from the console).
   "passkey.challenge": {
     input: s.object({
-      kind: s.oneOf(["approve", "approve.trust", "session.open", "batch.approve", "window.open", "policy", "touch", "agents.accept", "agents.restore", "agents.keepPart", "trust.mode", "trust.add", "trust.migrate"] as const),
+      kind: s.oneOf(["approve", "approve.trust", "session.open", "batch.approve", "window.open", "policy", "touch", "agents.accept", "agents.restore", "agents.keepPart", "agents.rollbackPart", "agents.revokeKept", "trust.mode", "trust.add", "trust.migrate"] as const),
       batchId: s.optional(s.string({ min: 1, max: 64 })),
       setHash: s.optional(s.string({ min: 64, max: 64 })),
       trustMode: s.optional(s.oneOf(["simple", "detailed", "strict"] as const)),
@@ -97,8 +97,8 @@ export const rpcContract = defineRpcContract({
   "agents.restore": { input: s.object({ id, ...factor }), output: s.json<{ ok: true; resolved: boolean; action: "write" | "delete" | "json"; note: string }>() },
   // One part of a settings file (the difference is split by the path inside the JSON). «Вернуть» (theirs): no code, tightening; «Оставить» (mine): a touch,
   // a session is enough only for a part that does not make the agent more dangerous. `fileSha`: what the page was shown; another file → a conflict, draw again.
-  "agents.rollbackPart": { input: s.object({ id, partId: s.string({ min: 16, max: 16 }), fileSha: s.string({ min: 16, max: 16 }) }), output: s.json<{ ok: true; resolved: boolean; remaining: number; note: string }>() },
-  "agents.revokeKept": { input: s.object({ id }), output: s.json<{ ok: true; note: string }>() },
+  "agents.rollbackPart": { input: s.object({ id, partId: s.string({ min: 16, max: 16 }), fileSha: s.string({ min: 16, max: 16 }), ...factor }), output: s.json<{ ok: true; resolved: boolean; remaining: number; note: string }>() },
+  "agents.revokeKept": { input: s.object({ id, ...factor }), output: s.json<{ ok: true; note: string }>() },
   "agents.keepPart": { input: s.object({ id, partId: s.string({ min: 16, max: 16 }), fileSha: s.string({ min: 16, max: 16 }), danger: s.boolean(), ...proof }), output: s.json<{ ok: true; accepted: boolean; remaining: number; note: string }>() },
   "agents.stop": { input: s.nullValue(), output: s.json<{ ok: true; stopped: number; failed: number; holdAvailable: boolean; note: string }>() },
   "watch.scan": { input: s.nullValue(), output: s.json<{ ok: true }>() },
