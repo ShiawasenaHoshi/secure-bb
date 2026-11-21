@@ -41,6 +41,8 @@ export interface PluginView {
   id: string;
   version: string;
   status: string;
+  /** The core's own words for the status (for `error`: why it did not start); null when it has none. */
+  statusDetail: string | null;
   enabled: boolean;
   source: string;
   /** Latest active approval = the pinned version. */
@@ -320,6 +322,7 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
       id: p.id,
       version: p.version,
       status: p.status,
+      statusDetail: p.statusDetail ?? null,
       enabled: p.enabled,
       source: p.source,
       pin: mine[0] ?? null,

@@ -15,6 +15,7 @@ import {
 } from "@get-bb/plugin-sdk";
 import { Alive } from "./src/alive.js";
 import { AgentWatchLink, type AgentThreadSource } from "./src/agents.js";
+import { agentAcceptProblem } from "./src/ux.js";
 import { GuardLink, GuardLinkError, guardSocketFromEnv, type GuardAction, type GuardPolicy, type GuardProof, type GuardQueueEntry, type PasskeyAssertion } from "./src/guardlink.js";
 import { MODE_RANK, normalizeEntry } from "./guard/src/trust.ts";
 import { buildExport, writeExport } from "./src/export.js";
@@ -111,6 +112,7 @@ export default async function plugin(bb: BbPluginApi) {
       provenance: p.provenance,
       enabled: p.enabled,
       status: p.status,
+      statusDetail: (p as unknown as { statusDetail?: string | null }).statusDetail ?? null,
       version: p.version,
       source: p.source,
       rootDir: p.rootDir,
@@ -769,6 +771,9 @@ export default async function plugin(bb: BbPluginApi) {
       if (ids.length === 0) throw new GateError("invalid", "нет расхождений для принятия");
       const proof = proofOf(code, passkey);
       if (proof === undefined) throw new GateError("invalid_code", "a code or a touch is needed: the guard checks it");
+      // The guard refuses it too (and is the one that counts); this only avoids sending a code that cannot be used.
+      const problem = agentAcceptProblem(ids, (await agents.refresh(false)).state?.drifts ?? []);
+      if (problem) throw new GateError("invalid", problem);
       const r = await guardLink.agentsAccept(ids, proof);
       await agents.refresh(false);
       changed();

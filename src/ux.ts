@@ -62,20 +62,68 @@ export function sourceLabel(sourceKind: string, source: string): string {
   return source.slice(0, 80);
 }
 
-interface CapLike {
+export interface CapLike {
   kind: string;
   detail: string[];
 }
-/** What a right means for a person. Hosts of the network right are named; the rest is one phrase. */
+/** A piece of a phrase; `red` marks the word that must catch the eye («все»). */
+export interface Segment {
+  text: string;
+  red?: boolean;
+}
+const ENV_PLAIN: Record<string, string> = {
+  HOME: "узнать путь к вашей домашней папке",
+  USER: "узнать имя вашего пользователя",
+  LOGNAME: "узнать имя вашего пользователя",
+  PATH: "узнать, в каких папках компьютер ищет программы",
+  SHELL: "узнать, какая у вас оболочка терминала",
+  LANG: "узнать язык системы",
+  TZ: "узнать часовой пояс",
+  PWD: "узнать, в какой папке он запущен",
+  TMPDIR: "узнать, где лежат временные файлы",
+  NODE_ENV: "узнать режим запуска (рабочий или отладочный)",
+};
+const SECRETISH = /TOKEN|KEY|SECRET|PASSW|CREDENTIAL|AUTH/i;
+/** One variable name → what reading it means. Secret-looking names say so; unknown ones are named. */
+export function envNamePhrase(name: string): string {
+  const known = ENV_PLAIN[name.toUpperCase()];
+  if (known) return known;
+  if (SECRETISH.test(name)) return `прочитать «${name}» (там обычно пароль или ключ)`;
+  return `прочитать переменную окружения «${name}»`;
+}
+/** Reading the environment, concretely: the names it asks for, or ALL of it (the word «все» is red). */
+function envSegments(detail: string[]): Segment[] {
+  const names = [...new Set(detail.filter((d) => !d.includes(":") || !/^[a-z_]+:/.test(d)).map((d) => d.replace(/^env:/, "")))];
+  if (names.length === 0 || names.includes("*")) return [{ text: "прочитать " }, { text: "все", red: true }, { text: " переменные окружения (там бывают пароли и токены)" }];
+  const parts = names.slice(0, 4).map(envNamePhrase);
+  return [{ text: parts.join("; ") + (names.length > 4 ? `; и ещё ${names.length - 4}` : "") }];
+}
+/** The network right, concretely: the hosts named in the code are named; with none named it says it can go anywhere. */
+function networkText(detail: string[]): string {
+  const hosts = detail.filter((d) => d.startsWith("host:")).map((d) => d.slice(5));
+  if (hosts.length === 0) return "выходить в интернет на любые адреса (какие именно, из кода не видно)";
+  return `обращаться по сети только к ${hosts.slice(0, 3).join(", ")}${hosts.length > 3 ? ", …" : ""} (других адресов в коде не найдено)`;
+}
+/** What a right means for a person, in pieces (so that «все» can be red). */
+export function capabilitySegments(c: CapLike): Segment[] {
+  switch (c.kind) {
+    case "env":
+      return envSegments(c.detail);
+    case "network":
+      return [{ text: networkText(c.detail) }];
+    default:
+      return [{ text: capabilityPhrase(c) }];
+  }
+}
+/** What a right means for a person. Hosts of the network right are named; the environment is named variable by variable, or «все»; the rest is one phrase. */
 export function capabilityPhrase(c: CapLike): string {
-  const hosts = c.detail.filter((d) => d.startsWith("host:")).map((d) => d.slice(5));
   switch (c.kind) {
     case "network":
-      return hosts.length > 0 ? `ходить в сеть (${hosts.slice(0, 3).join(", ")}${hosts.length > 3 ? ", …" : ""})` : "ходить в сеть";
+      return networkText(c.detail);
+    case "env":
+      return envSegments(c.detail).map((x) => x.text).join("");
     case "child_process":
       return "запускать программы на компьютере";
-    case "env":
-      return "читать переменные окружения (там бывают пароли и токены)";
     case "fs":
       return "читать и писать файлы";
     case "dynamic_code":
@@ -216,7 +264,7 @@ export function yellowText(y: YellowInput): YellowText {
     default:
       line = `Сторож не пропустил плагин сам (${y.sourceLabel}).${can}`;
   }
-  return { title: `«${y.pluginId}» ждёт вашего решения`, line: `${line}${tail}` };
+  return { title: `«${y.pluginId}» ${y.version} ждёт вашего решения`, line: `${line}${tail}` };
 }
 
 // ---- status ----------------------------------------------------------------------------------------------------------------
@@ -279,7 +327,7 @@ export interface AwayEvent {
   /** Which journal wrote it. In guard mode the guard's journal is the truth for decisions and the plugin's only adds alarms. */
   from: "guard" | "plugin";
 }
-export type AwayClass = "auto" | "window" | "approved" | "held" | "stopped" | "rejected" | "alarm";
+export type AwayClass = "auto" | "window" | "approved" | "held" | "stopped" | "rejected" | "deleted" | "alarm";
 const ALARM_KINDS = new Set(["window.taint", "watch.window.taint", "journal.alarm", "skills.alarm", "gate.gap", "hook.dead", "watch.rollback.failed", "agents.critical", "agents.taint"]);
 const detailOf = (e: AwayEvent): Record<string, unknown> => (e.detail !== null && typeof e.detail === "object" ? (e.detail as Record<string, unknown>) : {});
 
@@ -303,6 +351,8 @@ export function classifyAway(e: AwayEvent, guardMode: boolean): AwayClass | null
       return d.stop === true || /жёсткий флаг|заблокирован/.test(reason) ? "stopped" : "held";
     }
     case "dismissed":
+      // The person pressed «Удалить»: the summary says «удалён», not «отклонена».
+      return "deleted";
     case "reject":
       return "rejected";
     default:
@@ -318,7 +368,7 @@ export interface AwayGroup {
   last: number;
   text: string;
 }
-const emptyCounts = (): Record<AwayClass, number> => ({ auto: 0, window: 0, approved: 0, held: 0, stopped: 0, rejected: 0, alarm: 0 });
+const emptyCounts = (): Record<AwayClass, number> => ({ auto: 0, window: 0, approved: 0, held: 0, stopped: 0, rejected: 0, deleted: 0, alarm: 0 });
 
 const versions = (n: number): string => `${n} ${plural(n, "версия", "версии", "версий")}`;
 /** «4 версии figma-sync прошли сами, 1 остановлена». */
@@ -328,10 +378,12 @@ export function awayText(g: Pick<AwayGroup, "pluginId" | "counts">): string {
   const parts: string[] = [];
   if (c.auto > 0) parts.push(`${versions(c.auto)} ${name} ${c.auto % 10 === 1 && c.auto % 100 !== 11 ? "прошла сама" : "прошли сами"}`);
   if (c.window > 0) parts.push(`${versions(c.window)} ${name} ${c.window % 10 === 1 && c.window % 100 !== 11 ? "прошла" : "прошли"} в окне доверия`);
-  if (c.approved > 0) parts.push(`${c.approved} ${plural(c.approved, "версию", "версии", "версий")} ${name} одобрили вы`);
+  // Neutral: the journal does not always know who touched (a window, a source, a session), so it does not say «вы».
+  if (c.approved > 0) parts.push(`${versions(c.approved)} ${name} ${plural(c.approved, "одобрена", "одобрены", "одобрено")}`);
   if (c.held > 0) parts.push(`${c.held} ${plural(c.held, "версия ждёт", "версии ждут", "версий ждут")} вашего решения`);
   if (c.stopped > 0) parts.push(`${c.stopped} ${plural(c.stopped, "остановлена", "остановлены", "остановлено")}`);
   if (c.rejected > 0) parts.push(`${c.rejected} ${plural(c.rejected, "отклонена", "отклонены", "отклонено")}`);
+  if (c.deleted > 0) parts.push(`${versions(c.deleted)} ${name} ${plural(c.deleted, "удалена", "удалены", "удалено")}`);
   if (c.alarm > 0) parts.push(`${c.alarm} ${plural(c.alarm, "тревога", "тревоги", "тревог")}`);
   // "4 версии figma-sync прошли сами, 1 остановлена": the name stands once, with the first part; for the lone alarm of the system it stands alone.
   if (parts.length === 0) return "";
@@ -420,12 +472,22 @@ export function awaySince(stored: string | null, now: number): number {
   if (!Number.isFinite(t) || t <= 0 || t > now) return now - day;
   return t;
 }
+/**
+ * The time to remember at «Всё в порядке»: not before the newest event the person was shown. A journal's clock can run a little ahead of
+ * the page's, and an event stamped after «now» would come back at once as if it were new.
+ */
+export function awaySeenMark(events: AwayEvent[], now: number): number {
+  let t = now;
+  for (const e of events) if (Number.isFinite(e.ts) && e.ts > t) t = e.ts;
+  return t;
+}
 export const AWAY_KEY = "secure-bb.away.seenAt";
 export const DEFERRED_KEY = "secure-bb.deferred";
+export const KEPT_KEY = "secure-bb.kept";
 export const WIZARD_KEY = "secure-bb.wizard.done";
 
-/** Cards the person put aside («Решить позже»): remembered by the page only, so a card comes back if it is a different version. */
-export const deferKey = (pluginId: string, contentHash: string | null, id: number): string => `${pluginId}:${contentHash ?? `#${id}`}`;
+/** Cards the person put aside («Решить позже») or kept in quarantine: remembered by the page only. The key has the id of the queue entry: the same code held again later is a NEW entry and comes back as a new question (a stale mark of an earlier session must not show «Вы отложили» on a card nobody put aside). */
+export const deferKey = (pluginId: string, contentHash: string | null, id: number): string => `${pluginId}:${contentHash ?? "-"}:#${id}`;
 export function parseDeferred(raw: string | null): string[] {
   if (raw === null) return [];
   try {
@@ -482,4 +544,264 @@ export function suggestSources(plugins: Array<{ sourceKind?: string; source: str
     if (id) out.add(id);
   }
   return [...out].slice(0, 20);
+}
+
+// ---- one card per plugin; the person's decisions on cards --------------------------------------------------------------------
+/** What the page keeps about a card the person has acted on without the guard being asked. */
+export interface Decisions {
+  /** «Решить позже»: still unresolved (the status counts it), only folded away. */
+  deferred: string[];
+  /** «Оставить в карантине»: DECIDED. The plugin stays held at the guard, but the person has answered: it is not a question and not a red status. */
+  kept: string[];
+}
+export interface HeldLike {
+  id: number;
+  pluginId: string;
+  version: string;
+  contentHash: string | null;
+}
+export type CardDecision = "open" | "deferred" | "kept";
+export const decisionOf = (e: HeldLike, d: Decisions): CardDecision => {
+  const k = deferKey(e.pluginId, e.contentHash, e.id);
+  return d.kept.includes(k) ? "kept" : d.deferred.includes(k) ? "deferred" : "open";
+};
+/** Dotted versions compared by number («0.0.10» after «0.0.9»); what is not a number compares as text. Negative: a before b. */
+export function compareVersions(a: string, b: string): number {
+  const pa = a.replace(/^v/i, "").split(/[.+-]/);
+  const pb = b.replace(/^v/i, "").split(/[.+-]/);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] ?? "0";
+    const y = pb[i] ?? "0";
+    const nx = /^\d+$/.test(x);
+    const ny = /^\d+$/.test(y);
+    if (nx && ny) {
+      if (Number(x) !== Number(y)) return Number(x) - Number(y);
+    } else if (x !== y) return x < y ? -1 : 1;
+  }
+  return 0;
+}
+/** One plugin's card: the latest version is shown; the others wait folded away under it. */
+export interface PluginCard<E extends HeldLike> {
+  pluginId: string;
+  shown: E;
+  others: E[];
+  /** All of its versions that are unresolved (shown first). */
+  all: E[];
+}
+export interface CardPlan<E extends HeldLike> {
+  /** Cards to decide now (at least one open version). */
+  active: Array<PluginCard<E>>;
+  /** Cards folded away with «Решить позже» (every unresolved version of the plugin is deferred). */
+  later: Array<PluginCard<E>>;
+  /** Kept in quarantine: decided, not in the list and not in the status. */
+  kept: E[];
+  /** What the status counts: everything not decided (open and deferred). */
+  unresolved: E[];
+}
+/** From the held entries to the cards: ONE per plugin (the latest version; «ещё N версий ждут» for the rest). Kept entries leave the list and the status. */
+export function planCards<E extends HeldLike>(held: E[], d: Decisions): CardPlan<E> {
+  const kept: E[] = [];
+  const byPlugin = new Map<string, E[]>();
+  for (const e of held) {
+    if (decisionOf(e, d) === "kept") {
+      kept.push(e);
+      continue;
+    }
+    byPlugin.set(e.pluginId, [...(byPlugin.get(e.pluginId) ?? []), e]);
+  }
+  const latestFirst = (a: E, b: E): number => compareVersions(b.version, a.version) || b.id - a.id;
+  const active: Array<PluginCard<E>> = [];
+  const later: Array<PluginCard<E>> = [];
+  const unresolved: E[] = [];
+  for (const [pluginId, list] of byPlugin) {
+    const open = list.filter((e) => decisionOf(e, d) === "open").sort(latestFirst);
+    const deferred = list.filter((e) => decisionOf(e, d) === "deferred").sort(latestFirst);
+    const all = [...open, ...deferred];
+    unresolved.push(...all);
+    const card = { pluginId, shown: all[0]!, others: all.slice(1), all };
+    (open.length > 0 ? active : later).push(card);
+  }
+  return { active, later, kept, unresolved };
+}
+/** «ещё 1 версия ждёт» / «ещё 2 версии ждут» / «ещё 5 версий ждут». */
+export const moreVersionsText = (n: number): string => `ещё ${n} ${plural(n, "версия ждёт", "версии ждут", "версий ждут")}`;
+
+/** The action on a card names the version it is about. */
+export const actionLabel = (verb: string, pluginId: string, version: string): string => `${verb} ${pluginId} ${version}`;
+export const deleteConfirmText = (pluginId: string, version: string): string => `Удалить плагин ${pluginId} ${version}? Его можно будет вернуть из Карантина`;
+export const deletedNote = (pluginId: string, version: string): string => `Удалён: плагин ${pluginId} ${version}.`;
+
+// ---- trust window and «доверять источнику» on a card ----------------------------------------------------------------------------
+export interface WindowAvailInput {
+  /** The thread the version came from (a window covers a thread and its tree). */
+  threadId: string | null;
+  /** Negative: a proposal not yet installed. */
+  queueId: number;
+  sourceKind: string;
+  level: Level;
+}
+export interface WindowAvail {
+  available: boolean;
+  /** Why not, and what to do instead (shown on the card). */
+  note: string | null;
+}
+/** A trust window belongs to a plugin that an agent installs from a thread. A plugin from a folder has no such thread: say so, and say what to use instead. */
+export function windowAvailability(i: WindowAvailInput): WindowAvail {
+  if (i.threadId && i.queueId > 0) return { available: true, note: null };
+  if (i.sourceKind === "path") {
+    return {
+      available: false,
+      note: `Окно доверия для плагина из папки недоступно: оно открывается для плагина, который агент ставит из треда. ${i.level === "own" ? "Ваш источник уже в доверенных: версии без новых прав проходят сами." : "Вместо окна доверьте источник кнопкой «Разрешить и доверять источнику»: тогда версии без новых прав будут проходить сами."}`,
+    };
+  }
+  return { available: false, note: "Окно доверия недоступно: плагин пришёл не из треда. Одобряйте версию или доверьте источник." };
+}
+export interface TrustButtonInput {
+  entry: string | null;
+  level: Level;
+  queueId: number;
+}
+export interface TrustButton {
+  enabled: boolean;
+  /** Under the button: why it does nothing, or what it does. */
+  note: string | null;
+}
+/** «Разрешить и доверять источнику» is active only when it changes something: the source is not yet trusted and can be named. */
+export function trustButton(i: TrustButtonInput): TrustButton {
+  if (i.entry === null) return { enabled: false, note: "Этот источник нельзя занести в «мои источники» (не github и не папка на диске)." };
+  if (i.queueId < 0) return { enabled: false, note: "Плагин ещё не установлен: сначала разрешите версию." };
+  if (i.level === "own") return { enabled: false, note: "Ваш источник уже в доверенных: версии без новых прав проходят сами. Эта кнопка ничего бы не добавила." };
+  return { enabled: true, note: null };
+}
+
+// ---- after the approval: did it start? ------------------------------------------------------------------------------------------
+/** The core's `error` after an approval: the plugin is allowed but did not start. Null: nothing to add. */
+export function launchProblem(p: { status: string; statusDetail?: string | null }): string | null {
+  if (p.status !== "error") return null;
+  const why = (p.statusDetail ?? "").replace(/\s+/g, " ").trim();
+  return `Разрешён, но упал при запуске: ${why !== "" ? (why.length > 300 ? `${why.slice(0, 299)}…` : why) : "ядро не назвало причину"}`;
+}
+
+// ---- touches: what to enter, and the session paragraph -------------------------------------------------------------------------
+export const CODE_HINT = "6 цифр из приложения на телефоне (Google Authenticator и т. п.)";
+export const KEY_HINT = "приложите палец";
+/** The line next to the code field: a key if there is one (the code is the fallback), else the code's own words. */
+export function proofHint(i: { hasKey: boolean; keyOnly: boolean }): string {
+  if (i.hasKey) return i.keyOnly ? `${KEY_HINT[0]!.toUpperCase()}${KEY_HINT.slice(1)}.` : `${KEY_HINT[0]!.toUpperCase()}${KEY_HINT.slice(1)} или введите ${CODE_HINT}.`;
+  return `${CODE_HINT[0]!.toUpperCase()}${CODE_HINT.slice(1)}.`;
+}
+export const SESSION_LINE = "Открыть на 15 минут, чтобы не вводить код каждый раз";
+export interface SessionText {
+  /** The one line (always). */
+  line: string;
+  /** The rest, folded in «Простой» and open in the others; null: none. */
+  details: string;
+  foldDetails: boolean;
+}
+/** The session paragraph without «токен» and «хеш»: one line in «Простой», the details folded. */
+export function sessionText(mode: TrustMode | null, guard: boolean): SessionText {
+  const touch = guard ? "касанием" : "кодом";
+  const details = `Действует на этой странице: 15 минут после последнего действия, не дольше часа. Рутину (одобрить версию, пакет, открыть окно, принять расхождение, одобрить скилл) она покрывает без ${guard ? "касания" : "кода"}. Опасное — снятие блока, ослабление режима, добавление источника, расширение политики, критичные настройки агентов — всегда ${touch} заново. ${guard ? "Ключ сессии хранится только в памяти этой страницы. " : ""}Перезагрузка страницы закрывает сессию.`;
+  return { line: SESSION_LINE, details, foldDetails: mode === null || mode === "simple" };
+}
+
+// ---- agents: critical changes are accepted one by one --------------------------------------------------------------------------
+export interface DriftLike {
+  id: number;
+  class: string;
+  reasons: string[];
+}
+export const isCriticalDrift = (d: Pick<DriftLike, "class">): boolean => d.class === "critical";
+/** «Выбрать все» and the pack: never a critical difference. */
+export const selectableDriftIds = (drifts: Array<Pick<DriftLike, "id" | "class">>): number[] => drifts.filter((d) => !isCriticalDrift(d)).map((d) => d.id);
+/** The selection kept across a refresh: what is still there and not critical; nothing is added and nothing is lost by a refresh itself. */
+export function reconcileSelection(selected: number[], drifts: Array<Pick<DriftLike, "id" | "class">>): number[] {
+  const ok = new Set(selectableDriftIds(drifts));
+  return selected.filter((id) => ok.has(id));
+}
+/** The same check as the guard's, before a code is spent: null when the call may go. */
+export function agentAcceptProblem(ids: number[], drifts: Array<Pick<DriftLike, "id" | "class">>): string | null {
+  if (ids.length > 1 && ids.some((id) => drifts.find((d) => d.id === id)?.class === "critical")) return "критичное изменение принимается отдельно, не вместе с другими: у каждого своё касание";
+  return null;
+}
+const MEANINGS: Array<[RegExp, (m: RegExpExecArray) => string]> = [
+  [/permissions\.defaultMode: bypassPermissions/, () => "агент будет делать всё без вопросов к вам (режим bypassPermissions)"],
+  [/permissions\.defaultMode: acceptEdits/, () => "агент будет сам менять файлы, не спрашивая вас"],
+  [/permissions\.allow «Bash(?:\(\s*(?:\*|:\*|\*:\*)?\s*\))?»/, () => "агент сможет выполнять любые команды без спроса"],
+  [/permissions\.allow «[^»]*»: сеть/, () => "агент сможет ходить в сеть без спроса"],
+  [/permissions\.allow «[^»]*»: путь вне/, () => "агент сможет читать и менять файлы вне рабочей папки без спроса"],
+  [/permissions\.allow/, () => "агент сможет выполнять часть действий без спроса"],
+  [/permissions\.additionalDirectories/, () => "агент получит доступ к папке вне рабочей"],
+  [/^hooks/, () => "агент будет сам запускать команды при своих действиях (хуки)"],
+  [/^MCP-сервер ([^:]+): новый/, (m) => `агент получит новый внешний инструмент «${m[1]}» (MCP-сервер): он сможет выполнять действия, о которых bb не знает`],
+  [/^MCP-сервер ([^:]+): изменён/, (m) => `у внешнего инструмента «${m[1]}» (MCP-сервер) изменили запуск или адрес`],
+  [/^env [A-Z0-9_]*_BASE_URL/i, () => "запросы агента к модели пойдут на другой адрес: всё, что он отправляет, увидит владелец адреса"],
+  [/^env [A-Z0-9_]*_PROXY/i, () => "сеть агента пойдёт через прокси: всё, что он отправляет, увидит владелец прокси"],
+  [/^env NODE_OPTIONS/i, () => "в каждую запущенную агентом программу на Node подмешается чужой код"],
+  [/apiKeyHelper/, () => "ключ доступа агенту будет выдавать команда, которую запустят при каждом обращении"],
+  [/песочница отключена/, () => "агент будет работать без песочницы: ничто не ограничит его команды"],
+  [/скрипт хука/, () => "агент будет запускать этот скрипт сам"],
+  [/код расширения агента/, () => "агент будет выполнять этот код как своё расширение"],
+  [/адрес сервера модели/, () => "запросы агента к модели пойдут на другой адрес"],
+  [/approval_policy = "never"/, () => "агент будет делать всё без вопросов к вам"],
+  [/sandbox_mode = "danger-full-access"/, () => "агент получит полный доступ к компьютеру, без песочницы"],
+  [/network_access = true/, () => "агенту откроют доступ в сеть"],
+  [/MCP-сервер/, () => "агент получит внешний инструмент (MCP-сервер)"],
+  [/файл не разобран как JSON/, () => "файл нельзя прочитать как настройки: агент может понять его иначе, чем сторож"],
+];
+/** What each critical reason lets the agent do, in plain words; a reason with no text of its own is passed through. */
+export function criticalMeanings(reasons: string[]): string[] {
+  const out: string[] = [];
+  for (const r of reasons) {
+    let text: string | null = null;
+    for (const [re, f] of MEANINGS) {
+      const m = re.exec(r);
+      if (m) {
+        text = f(m);
+        break;
+      }
+    }
+    const t = text ?? r;
+    if (!out.includes(t)) out.push(t);
+  }
+  return out;
+}
+/** The title of one critical acceptance: exactly what is being accepted. «Принимая это, вы разрешаете: …». */
+export const criticalAcceptTitle = (reasons: string[]): string => {
+  const m = criticalMeanings(reasons);
+  return m.length === 0 ? "Принимая это, вы разрешаете агенту работать с новой настройкой" : `Принимая это, вы разрешаете: ${m.join("; ")}`;
+};
+
+/** Where the card of the agents' differences is shown: on the «Статус» tab while something critical or an alarm waits there, else in «Подробно». */
+export function agentsSectionTab(i: { critical: number; alarms: number }): TabId {
+  return i.critical > 0 || i.alarms > 0 ? "status" : "more";
+}
+
+// ---- stable state of folds and selections --------------------------------------------------------------------------------------
+/** A fold's state is kept by the element's id, so that a refresh (even one that rebuilds the list) leaves it as the person left it. */
+export function setFold(state: Record<string, boolean>, id: string, open: boolean): Record<string, boolean> {
+  return state[id] === open ? state : { ...state, [id]: open };
+}
+/** One checkbox changed: the others are not touched. */
+export function toggleId(ids: number[], id: number, on: boolean): number[] {
+  const has = ids.includes(id);
+  return on ? (has ? ids : [...ids, id]) : ids.filter((x) => x !== id);
+}
+/** Two overviews that differ only by the server's clock say the same: the page keeps the old object and draws nothing again. */
+export function sameData(a: unknown, b: unknown): boolean {
+  const strip = (x: unknown): string => JSON.stringify(x, (k, v) => (k === "now" ? undefined : v));
+  return strip(a) === strip(b);
+}
+
+/** A card's line, in pieces: the word «все» of «прочитать все переменные окружения» is red wherever the line says it. */
+export function emphasize(text: string): Segment[] {
+  const out: Segment[] = [];
+  const re = /(прочитать )(все)( переменные)/g;
+  let last = 0;
+  for (let m = re.exec(text); m !== null; m = re.exec(text)) {
+    out.push({ text: text.slice(last, m.index) + m[1]! }, { text: m[2]!, red: true });
+    last = m.index + m[1]!.length + m[2]!.length;
+  }
+  out.push({ text: text.slice(last) });
+  return out.filter((x) => x.text !== "");
 }

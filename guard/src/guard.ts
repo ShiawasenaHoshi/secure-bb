@@ -1617,6 +1617,7 @@ export class Guard {
       case "agents-accept": {
         if (this.agents === null) throw new GuardError("invalid", "the agent watch is not configured at this guard");
         const rows = this.openDrifts(a.ids as number[]);
+        this.criticalAlone(rows);
         const by = (c: string): number => rows.filter((r) => String(r.class) === c).length;
         const first = rows.filter((r) => Number(r.initial) === 1).length;
         const list = rows.slice(0, 5).map((r) => `${String(r.path)} (${String(r.change)}, ${String(r.class)})`).join("; ");
@@ -1917,7 +1918,7 @@ export class Guard {
     if (this.agents === null) throw new GuardError("invalid", "the agent watch is not configured at this guard");
     const ids = this.agentIds(raw.ids);
     // Everything that can be checked without a code is checked first, so that a spent code is not wasted on a refusal.
-    this.openDrifts(ids);
+    this.criticalAlone(this.openDrifts(ids));
     const factor = this.verifyFactor("agents.accept", this.normalizeAction({ op: "agents-accept", ids }), raw);
     return this.tx(() => {
       const rows = this.openDrifts(ids);
@@ -1934,6 +1935,15 @@ export class Guard {
       this.log("agents.accept", null, null, { count: rows.length, critical: by("critical"), instructions: by("instructions"), other: by("other"), initial: rows.filter((r) => Number(r.initial) === 1).length, drifts: rows.slice(0, 50).map((r) => ({ id: Number(r.id), path: String(r.path), change: String(r.change), class: String(r.class) })), ...factorDetail(factor) });
       return { accepted: rows.length };
     });
+  }
+
+  /**
+   * A critical difference (bypassPermissions, Bash(*), an MCP server, a hook, a *_BASE_URL…) is accepted ALONE: never in one call with another
+   * difference, so that "select all" cannot carry it in. It is also never covered by a session (`agents-accept` is not a routine action),
+   * so every critical one takes its own fresh touch whose description names exactly it.
+   */
+  private criticalAlone(rows: Raw[]): void {
+    if (rows.length > 1 && rows.some((r) => String(r.class) === "critical")) throw new GuardError("invalid", "a critical difference is accepted on its own, with its own fresh touch: not together with others");
   }
 
   private agentIds(v: unknown): number[] {

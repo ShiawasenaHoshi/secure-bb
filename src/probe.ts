@@ -14,6 +14,8 @@ export interface InstalledPluginLite {
   provenance: string;
   enabled: boolean;
   status: string;
+  /** What the core says about the status (for `error`: why the plugin did not start). */
+  statusDetail?: string | null;
   version: string;
   source: string;
   rootDir: string;

@@ -74,14 +74,14 @@ describe("plain words: the main line has no technical words", () => {
     for (const kind of ["network", "child_process", "env", "fs", "dynamic_code", "ui", "http_routes", "contribute_env", "host_artifact", "builtin_rpc", "server_access", "database", "brand-new"]) {
       expect(capabilityPhrase({ kind, detail: [] }), kind).not.toMatch(TECHNICAL_WORDS);
     }
-    expect(capabilityPhrase({ kind: "network", detail: ["host:api.figma.com", "module:node:https"] })).toBe("ходить в сеть (api.figma.com)");
+    expect(capabilityPhrase({ kind: "network", detail: ["host:api.figma.com", "module:node:https"] })).toBe("обращаться по сети только к api.figma.com (других адресов в коде не найдено)");
     expect(capabilityPhrases([{ kind: "env", detail: [] }, { kind: "fs", detail: [] }])).toHaveLength(2);
   });
   it("the yellow card names the plugin, what it can do, and that it does not run meanwhile", () => {
     const t = yellowText({ pluginId: "figma-sync", version: "1.2.0", level: "unknown", sourceLabel: "github.com/acme/figma", reason: "неизвестный источник", caps: [{ kind: "network", detail: ["host:api.figma.com"] }, { kind: "fs", detail: [] }] });
-    expect(t.title).toBe("«figma-sync» ждёт вашего решения");
+    expect(t.title).toBe("«figma-sync» 1.2.0 ждёт вашего решения");
     expect(t.line).toContain("github.com/acme/figma");
-    expect(t.line).toContain("ходить в сеть (api.figma.com)");
+    expect(t.line).toContain("обращаться по сети только к api.figma.com");
     expect(t.line).toContain("Пока вы не решите, он не запускается.");
     expect(`${t.title} ${t.line}`).not.toMatch(TECHNICAL_WORDS);
   });
@@ -161,9 +161,9 @@ describe("«Пока вас не было»", () => {
     expect(one.map((x) => x.text)).toEqual(["2 версии p прошли сами, 1 остановлена"]);
   });
   it("counts agree in number: 1 версия прошла, 5 версий прошли", () => {
-    expect(awayText({ pluginId: "p", counts: { auto: 1, window: 0, approved: 0, held: 0, stopped: 0, rejected: 0, alarm: 0 } })).toBe("1 версия p прошла сама");
-    expect(awayText({ pluginId: "p", counts: { auto: 5, window: 0, approved: 0, held: 2, stopped: 0, rejected: 3, alarm: 0 } })).toBe("5 версий p прошли сами, 2 версии ждут вашего решения, 3 отклонены");
-    expect(awayText({ pluginId: "p", counts: { auto: 21, window: 0, approved: 0, held: 0, stopped: 22, rejected: 0, alarm: 0 } })).toBe("21 версия p прошла сама, 22 остановлены");
+    expect(awayText({ pluginId: "p", counts: { auto: 1, window: 0, approved: 0, held: 0, stopped: 0, rejected: 0, deleted: 0, alarm: 0 } })).toBe("1 версия p прошла сама");
+    expect(awayText({ pluginId: "p", counts: { auto: 5, window: 0, approved: 0, held: 2, stopped: 0, rejected: 3, deleted: 0, alarm: 0 } })).toBe("5 версий p прошли сами, 2 версии ждут вашего решения, 3 отклонены");
+    expect(awayText({ pluginId: "p", counts: { auto: 21, window: 0, approved: 0, held: 0, stopped: 22, rejected: 0, deleted: 0, alarm: 0 } })).toBe("21 версия p прошла сама, 22 остановлены");
     expect(plural(11, "а", "б", "в")).toBe("в");
     expect(plural(12, "а", "б", "в")).toBe("в");
     expect(plural(101, "а", "б", "в")).toBe("а");
@@ -192,7 +192,8 @@ describe("«Пока вас не было»", () => {
     expect(c("hold", { note: "новое право: network" })).toBe("held");
     expect(c("hold", { stop: true })).toBe("stopped");
     expect(c("hold", { note: "жёсткий флаг: decode-eval" })).toBe("stopped");
-    expect(c("dismissed")).toBe("rejected");
+    expect(c("dismissed")).toBe("deleted");
+    expect(c("reject")).toBe("rejected");
     expect(c("agents.critical")).toBe("alarm");
     expect(c("totp.blocked")).toBeNull();
     expect(c("passkey.enrolled")).toBeNull();
@@ -205,7 +206,7 @@ describe("«Пока вас не было»", () => {
     expect(classifyAway(fromPlugin("journal.alarm"), true)).toBe("alarm");
     // Without a guard the plugin's journal is the one.
     expect(classifyAway(fromPlugin("approved.touch"), false)).toBe("approved");
-    expect(classifyAway(fromPlugin("dismissed"), false)).toBe("rejected");
+    expect(classifyAway(fromPlugin("dismissed"), false)).toBe("deleted");
     expect(classifyAway(g("approved.source", "p", 1), false)).toBeNull();
   });
   it("a plugin's blocked hold is «остановлена» without a guard", () => {
@@ -234,8 +235,10 @@ describe("«Пока вас не было»", () => {
     expect(AWAY_KEY).toMatch(/away/);
   });
   it("cards put aside: a key per version; garbage in storage is an empty list", () => {
-    expect(deferKey("p", "abc", 3)).toBe("p:abc");
-    expect(deferKey("p", null, 3)).toBe("p:#3");
+    expect(deferKey("p", "abc", 3)).toBe("p:abc:#3");
+    expect(deferKey("p", null, 3)).toBe("p:-:#3");
+    // the same code held again later is another entry: an old «отложено» does not carry over
+    expect(deferKey("p", "abc", 9)).not.toBe(deferKey("p", "abc", 3));
     expect(parseDeferred('["a","b",1,null]')).toEqual(["a", "b"]);
     expect(parseDeferred("{")).toEqual([]);
     expect(parseDeferred('{"a":1}')).toEqual([]);
@@ -320,13 +323,13 @@ describe("review fixes (PR 2, review)", () => {
     expect(groupAway([hold(1, "a")], T0, true, { p: { yellow: 0, red: 0 } })).toEqual([]);
   });
   it("away: endings follow the number", () => {
-    const c = (auto: number) => awayText({ pluginId: "p", counts: { auto, window: 0, approved: 0, held: 0, stopped: 0, rejected: 0, alarm: 0 } });
+    const c = (auto: number) => awayText({ pluginId: "p", counts: { auto, window: 0, approved: 0, held: 0, stopped: 0, rejected: 0, deleted: 0, alarm: 0 } });
     expect(c(1)).toBe("1 версия p прошла сама");
     expect(c(2)).toBe("2 версии p прошли сами");
     expect(c(5)).toBe("5 версий p прошли сами");
     expect(c(11)).toBe("11 версий p прошли сами");
     expect(c(21)).toBe("21 версия p прошла сама");
-    expect(awayText({ pluginId: "p", counts: { auto: 0, window: 1, approved: 0, held: 1, stopped: 0, rejected: 0, alarm: 0 } })).toBe("1 версия p прошла в окне доверия, 1 версия ждёт вашего решения");
+    expect(awayText({ pluginId: "p", counts: { auto: 0, window: 1, approved: 0, held: 1, stopped: 0, rejected: 0, deleted: 0, alarm: 0 } })).toBe("1 версия p прошла в окне доверия, 1 версия ждёт вашего решения");
   });
   it("a hash mismatch is red with its own words, not the default yellow", () => {
     expect(isMismatch(MISMATCH)).toBe(true);
@@ -347,7 +350,7 @@ describe("review fixes (PR 2, review)", () => {
     expect(reasonKind(null)).toBe("other");
     expect(y("режим «Строгий»: каждая версия ждёт вас")).toContain("Строгий");
     expect(y("нет одобренной версии этого плагина из этого источника")).toContain("ещё не разрешали");
-    expect(y("новое право: network", [{ kind: "network", detail: ["host:telemetry.example"] }])).toContain("ходить в сеть (telemetry.example)");
+    expect(y("новое право: network", [{ kind: "network", detail: ["host:telemetry.example"] }])).toContain("обращаться по сети только к telemetry.example");
     // «просит новое» and «особых прав не просит» never in one text
     for (const r of ["новое право: network", "неизвестный источник", "режим «Строгий»", "нет одобренной версии", null, "странное"]) {
       for (const caps of [[], [{ kind: "fs", detail: [] }]]) {
