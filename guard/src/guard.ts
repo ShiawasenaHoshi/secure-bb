@@ -4,7 +4,7 @@
 //
 // Two kinds of requests (design doc, "Сокет и протокол"):
 //  - without a secret (any process of the bb user can send them, including a harmful plugin, so they may
-//    decide nothing a human has not already decided): decide, state, lookup, annotate, close-window, revoke;
+//    decide nothing a human has not already decided): decide, state, lookup, annotate, close-window, revoke, dismiss (held entries only);
 //  - with a touch (a TOTP code): approve, open-window, policy, touch.
 // The TOTP secret is only ever written by `sbb-guard totp-register` on the console, and is never returned
 // by anything in this file.
@@ -492,11 +492,10 @@ export class Guard {
     });
   }
 
-  /** Drops a held entry. Needs a code like an approval does: it decides what the human sees. */
+  /** Drops a held entry: tightening (the version stays unapproved), so no code and no block after wrong codes, like revoke. Held entries only; the journal gets a record. */
   dismiss(raw: Record<string, unknown>): { ok: true } {
     const id = intOf(raw.requestId, "requestId", 1, Number.MAX_SAFE_INTEGER);
     const q = this.heldRequest(id);
-    this.verifyCode(`dismiss:${q.pluginId}`, raw.code);
     return this.tx(() => {
       this.resolveQueue(q.pluginId, q.contentHash, "dismissed");
       this.log("dismissed", q.pluginId, q.contentHash, { review: q.id, version: q.version });

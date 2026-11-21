@@ -207,6 +207,34 @@ describe("windows", () => {
   });
 });
 
+describe("dismiss: tightening, no code", () => {
+  it("drops a held entry without a code, even while wrong codes block approvals; the journal gets a record; the version is not approved", async () => {
+    g = await startGuard();
+    await g.send(decideReq({ contentHash: H1 }));
+    await g.send(decideReq({ contentHash: H2 }));
+    for (let i = 0; i < 5; i++) await g.send({ op: "approve", requestId: 1, code: "000000" });
+    expect(await g.send({ op: "approve", requestId: 1, code: g.code() })).toMatchObject({ ok: false, error: { code: "blocked" } });
+    expect((await g.send({ op: "dismiss", requestId: 1 })).ok).toBe(true); // no code, inside the block
+    const s = await g.send({ op: "state" });
+    expect(s.approvals).toHaveLength(0);
+    expect((s.journal.recent as any[]).some((j) => j.kind === "dismissed" && j.contentHash === H1)).toBe(true);
+    expect((await g.send({ op: "dismiss", requestId: 2, code: "123456" })).ok).toBe(true); // a code, if sent, is not needed and not checked
+    expect(await g.send(decideReq({ contentHash: H1 }))).toMatchObject({ action: "wait" }); // proposed again: held again
+  });
+
+  it("only held entries: approved, dismissed or unknown entries are refused", async () => {
+    g = await startGuard();
+    await g.send(decideReq({ contentHash: H1 }));
+    await g.send(decideReq({ contentHash: H2 }));
+    await g.send({ op: "approve", requestId: 1, code: g.code() });
+    expect(await g.send({ op: "dismiss", requestId: 1 })).toMatchObject({ ok: false, error: { code: "conflict" } });
+    expect((await g.send({ op: "state" })).approvals).toHaveLength(1); // the approval is untouched
+    expect((await g.send({ op: "dismiss", requestId: 2 })).ok).toBe(true);
+    expect(await g.send({ op: "dismiss", requestId: 2 })).toMatchObject({ ok: false, error: { code: "conflict" } });
+    expect(await g.send({ op: "dismiss", requestId: 99 })).toMatchObject({ ok: false, error: { code: "not_found" } });
+  });
+});
+
 describe("revoke and annotate", () => {
   it("revoke by approval id withdraws the version, needs no code, and the version is held again", async () => {
     g = await startGuard();

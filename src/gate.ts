@@ -875,9 +875,9 @@ export class Gate {
     return { installDir, pluginId: q.pluginId, enable: q.kind === "afterfact", proposalId: q.proposalId };
   }
 
-  dismissQueue(queueId: number, code: Proof): void {
+  /** Tightening: no proof, and no block after wrong codes (the owner must always be able to reject). The journal record stays. */
+  dismissQueue(queueId: number): void {
     const q = this.requireHeld(queueId);
-    this.touch(`dismiss:${q.pluginId}`, code);
     this.store.setQueueStatus(q.id, "dismissed");
     this.store.log("dismissed", q.pluginId, q.contentHash, { review: q.id });
   }

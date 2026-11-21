@@ -104,7 +104,8 @@ export interface GuardPort {
   hold(ctx: GuardHoldRequest, stop: boolean): Promise<void>;
   annotate(target: { requestId?: number; contentHash?: string }, findings: unknown): Promise<void>;
   approve(requestId: number, code: string): Promise<{ approval: GuardApproval }>;
-  dismiss(requestId: number, code: string): Promise<void>;
+  /** Tightening: no code. */
+  dismiss(requestId: number): Promise<void>;
   openWindow(pluginId: string, minutes: number | undefined, code: string): Promise<GuardWindow>;
   closeWindow(target: { windowId?: number; pluginId?: string }): Promise<void>;
   revoke(target: { approvalId?: number; pluginId?: string }): Promise<number>;
@@ -175,8 +176,8 @@ export class GuardLink implements GuardPort {
   async approve(requestId: number, code: string): Promise<{ approval: GuardApproval }> {
     return (await this.call({ op: "approve", requestId, code })) as unknown as { approval: GuardApproval };
   }
-  async dismiss(requestId: number, code: string): Promise<void> {
-    await this.call({ op: "dismiss", requestId, code });
+  async dismiss(requestId: number): Promise<void> {
+    await this.call({ op: "dismiss", requestId });
   }
   async openWindow(pluginId: string, minutes: number | undefined, code: string): Promise<GuardWindow> {
     const r = await this.call({ op: "open-window", pluginId, ...(minutes === undefined ? {} : { minutes }), code });

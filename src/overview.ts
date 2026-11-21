@@ -276,7 +276,7 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
       if (lq.kind !== "proposal" || lq.status !== "held" || lq.contentHash !== null || lq.proposalId === null) continue;
       const p = d.store.getProposal(lq.proposalId);
       if (!p || known.has(await realpath(p.snapshotDir).catch(() => p.snapshotDir))) continue;
-      queue.push({ ...lq, id: -lq.id, reason: lq.reason ? `ещё не установлен (ядро не спрашивало сторожа): ${lq.reason}` : "ещё не установлен (ядро не спрашивало сторожа)" });
+      queue.push({ ...lq, id: -lq.id, reason: lq.reason ? `не установлен: ${lq.reason.replace(/^заблокировано проверками/, "заблокирован проверками secure-bb")}` : "не установлен" });
     }
   } else if (guarded) {
     windows = [];

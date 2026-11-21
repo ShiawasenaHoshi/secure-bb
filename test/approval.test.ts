@@ -20,7 +20,7 @@ const MIN = 60_000;
 const EXPECTED: Record<string, RpcGroup> = {
   // routine (doc §1: одобрить удержанную версию, открыть/продлить окно, принять расхождение, одобрить скилл, принять эталон; + пакет)
   "queue.approve": "routine",
-  "queue.dismiss": "routine",
+  "queue.dismiss": "free",
   "window.open": "routine",
   "window.close": "free", // tightening: no code (threat model F8)
   "approval.revoke": "free",
@@ -203,7 +203,7 @@ describe("the approval session (§1)", () => {
     const fresh = await register(h);
     const held = [await hold(h, "a"), await hold(h, "b"), await hold(h, "c"), await hold(h, "d"), await hold(h, "e")];
     const token = await openSession(h, fresh);
-    const use = (i: number) => h.rpc("queue.dismiss", { id: held[i]!.id, session: token });
+    const use = (i: number) => h.rpc("queue.approve", { id: held[i]!.id, session: token });
     // Used at minute 14 and again at minute 28: it would be dead by then without sliding.
     tick(14 * MIN);
     await use(0);
@@ -224,7 +224,7 @@ describe("the approval session (§1)", () => {
     const { id } = await hold(h, "demo");
     const token = await openSession(h, fresh);
     tick(15 * MIN + 1000);
-    await expect(h.rpc("queue.dismiss", { id, session: token })).rejects.toThrow(/invalid or expired session/);
+    await expect(h.rpc("queue.approve", { id, session: token })).rejects.toThrow(/invalid or expired session/);
   });
 
   it("a wrong, unknown or expired token is a wrong code: the same counter, five in an hour block every approval", { timeout: 20_000 }, async () => {
@@ -234,13 +234,13 @@ describe("the approval session (§1)", () => {
     const token = await openSession(h, fresh);
     const before = failedAttempts(h);
     // two wrong codes + three wrong tokens = five
-    await expect(h.rpc("queue.dismiss", { id, code: "000000" })).rejects.toThrow();
-    await expect(h.rpc("queue.dismiss", { id, code: "000001" })).rejects.toThrow();
-    for (const bad of ["nope", token + "x", "A".repeat(43)]) await expect(h.rpc("queue.dismiss", { id, session: bad })).rejects.toThrow(/invalid or expired session/);
+    await expect(h.rpc("queue.approve", { id, code: "000000" })).rejects.toThrow();
+    await expect(h.rpc("queue.approve", { id, code: "000001" })).rejects.toThrow();
+    for (const bad of ["nope", token + "x", "A".repeat(43)]) await expect(h.rpc("queue.approve", { id, session: bad })).rejects.toThrow(/invalid or expired session/);
     expect(failedAttempts(h)).toBe(before + 5);
     // blocked: even the right token and the right code are refused now
-    await expect(h.rpc("queue.dismiss", { id, session: token })).rejects.toThrow(/blocked|too many/);
-    await expect(h.rpc("queue.dismiss", { id, code: fresh() })).rejects.toThrow(/blocked|too many/);
+    await expect(h.rpc("queue.approve", { id, session: token })).rejects.toThrow(/blocked|too many/);
+    await expect(h.rpc("queue.approve", { id, code: fresh() })).rejects.toThrow(/blocked|too many/);
     tick(61 * MIN);
     const second = await openSession(h, fresh);
     expect(second).not.toBe(token);
@@ -262,9 +262,9 @@ describe("the approval session (§1)", () => {
     const { id } = await hold(h, "demo");
     const first = await openSession(h, fresh);
     const second = await openSession(h, fresh);
-    await expect(h.rpc("queue.dismiss", { id, session: first })).rejects.toThrow(/invalid or expired session/);
+    await expect(h.rpc("queue.approve", { id, session: first })).rejects.toThrow(/invalid or expired session/);
     expect(await h.rpc("session.close")).toEqual({ ok: true });
-    await expect(h.rpc("queue.dismiss", { id, session: second })).rejects.toThrow(/invalid or expired session/);
+    await expect(h.rpc("queue.approve", { id, session: second })).rejects.toThrow(/invalid or expired session/);
     expect(await h.rpc("session.close")).toEqual({ ok: true }); // the same answer with nothing open
   });
 
@@ -335,7 +335,7 @@ describe("the approval session (§1)", () => {
     const { id } = await hold(h, "demo");
     const before = [(await h.harness.behavior.runCli(["status"])).stdout, (await h.harness.behavior.runCli(["log"])).stdout];
     const token = await openSession(h, fresh);
-    await h.rpc("queue.dismiss", { id, session: token });
+    await h.rpc("queue.approve", { id, session: token });
     const during = [(await h.harness.behavior.runCli(["status"])).stdout, (await h.harness.behavior.runCli(["log"])).stdout];
     await h.rpc("session.close");
     const after = [(await h.harness.behavior.runCli(["status"])).stdout, (await h.harness.behavior.runCli(["log"])).stdout];
@@ -423,8 +423,49 @@ describe("batch approval (§2)", () => {
     const h = await boot();
     const fresh = await register(h);
     const a = await hold(h, "alpha");
-    await h.rpc("queue.dismiss", { id: a.id, code: fresh() });
+    await h.rpc("queue.dismiss", { id: a.id });
     await expect(h.rpc("batch.prepare", { items: [{ kind: "queue", id: a.id }] })).rejects.toThrow(/nothing in the list/);
     await expect(h.rpc("batch.prepare", { items: [] })).rejects.toThrow(/nothing in the list/);
+  });
+});
+
+describe("rejecting needs no code (it only tightens)", () => {
+  it("queue.dismiss works without a code or session, and also while wrong codes block every approval", { timeout: 20_000 }, async () => {
+    const h = await boot();
+    const fresh = await register(h);
+    const a = await hold(h, "alpha");
+    const b = await hold(h, "beta");
+    for (let i = 0; i < 5; i++) await expect(h.rpc("queue.approve", { id: a.id, code: "000000" })).rejects.toThrow();
+    await expect(h.rpc("queue.approve", { id: a.id, code: fresh() })).rejects.toThrow(/blocked|too many/);
+    const attempts = failedAttempts(h);
+    await h.rpc("queue.dismiss", { id: a.id });
+    expect(failedAttempts(h)).toBe(attempts); // not a code attempt
+    const ov = await h.rpc<{ queue: Array<{ id: number; status: string }> }>("overview");
+    expect(ov.queue.find((q) => q.id === a.id)!.status).toBe("dismissed");
+    expect(ov.queue.find((q) => q.id === b.id)!.status).toBe("held");
+    // the journal keeps the record; the version stays unapproved
+    expect(h.bb.storage.database().prepare(`SELECT COUNT(*) AS n FROM log WHERE kind = 'dismissed'`).get()).toEqual({ n: 1 });
+    expect(await h.hook(a.ctx)).toMatchObject({ action: expect.stringMatching(/wait|reject/) });
+    // only a held entry: the second time it is refused
+    await expect(h.rpc("queue.dismiss", { id: a.id })).rejects.toThrow(/already dismissed/);
+  });
+
+  it("a harmful plugin in the process may dismiss (tightening) but still cannot approve without a code", { timeout: 20_000 }, async () => {
+    const h = await boot();
+    await register(h);
+    const a = await hold(h, "alpha");
+    const b = await hold(h, "beta");
+    // what any process with the API can do: no code, no session, an empty or a made-up one
+    for (const proof of [{}, { code: "" }, { session: "A".repeat(43) }]) await expect(h.rpc("queue.approve", { id: a.id, ...proof })).rejects.toThrow();
+    await expect(h.rpc("queue.approve", { id: a.id, acknowledgeBlock: true })).rejects.toThrow();
+    expect(await h.hook(a.ctx)).toMatchObject({ action: expect.stringMatching(/wait|reject/) });
+    await h.rpc("queue.dismiss", { id: b.id }); // allowed: the version simply stays out
+    expect(await h.hook(b.ctx)).toMatchObject({ action: expect.stringMatching(/wait|reject/) });
+    expect(h.bb.storage.database().prepare(`SELECT COUNT(*) AS n FROM approvals`).get()).toEqual({ n: 0 });
+  });
+
+  it("the table says so: dismiss is free, approve is not", () => {
+    expect(groupOf("queue.dismiss")).toBe("free");
+    expect(groupOf("queue.approve")).toBe("routine");
   });
 });

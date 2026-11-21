@@ -29,6 +29,8 @@ const btnPrimary =
   "rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50";
 const input = "w-28 rounded-md border border-border bg-background px-2 py-1.5 font-mono text-sm tracking-widest";
 const muted = "text-muted-foreground";
+const cardBlocked = "rounded-lg border-2 border-red-600 bg-red-50 p-4 text-sm text-red-950 dark:border-red-500 dark:bg-red-950/40 dark:text-red-100";
+const btnDanger = "rounded-md border border-red-600 bg-transparent px-3 py-1.5 text-sm text-red-700 hover:bg-red-100 disabled:opacity-50 dark:border-red-400 dark:text-red-300 dark:hover:bg-red-950";
 
 const minutes = (sec: number): string => (sec < 60 ? `${sec} с` : `${Math.ceil(sec / 60)} мин`);
 const when = (ms: number): string => new Date(ms).toLocaleString();
@@ -900,6 +902,11 @@ function DependenciesView({ result }: { result: CheckResult }) {
   );
 }
 
+/** A local proposal has a negative id inside; the person reads "предложение 4", not "#-4". */
+const queueLabel = (id: number): string => (id < 0 ? `предложение ${-id}` : `#${id}`);
+const isBlockedEntry = (q: QueueRow, found?: { findings: Array<{ severity: string }> }): boolean =>
+  /заблокирован(о)? проверками/.test(q.reason ?? "") || (found?.findings.some((f) => f.severity === "block") ?? false);
+
 function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void }) {
   const [code, setCode] = useState("");
   const act = useCodeAction(refetch);
@@ -908,7 +915,7 @@ function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; rpc: Re
   const unsafeDirNow = q.reason?.startsWith("каталог доступен на запись другим") ?? false;
   const ap = useApproval();
   const found = ov.queueChecks[q.id];
-  const blocked = (q.reason?.startsWith("заблокировано проверками") ?? false) || (found?.findings.some((f) => f.severity === "block") ?? false);
+  const blocked = isBlockedEntry(q, found);
   const [ack, setAck] = useState(false);
   // Lifting a block is dangerous: it needs a fresh code even with a session open.
   const liftingBlock = blocked && ack;
@@ -917,13 +924,13 @@ function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; rpc: Re
   // The directory can be changed by someone other than the server's user: no code approves it; fix the directory, then it is looked at again.
   const unsafeDir = q.reason?.startsWith("каталог доступен на запись другим") ?? false;
   return (
-    <div className={card}>
+    <div className={blocked && held ? cardBlocked : card}>
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h3 className="font-semibold">
-          #{q.id} · {q.pluginId} <span className={muted}>{q.version}</span>
+          {queueLabel(q.id)} · {q.pluginId} <span className={muted}>{q.version}</span>
         </h3>
-        <span className={muted}>
-          {held ? "держится" : q.status === "approved" ? "одобрено" : q.status === "stale" ? "устарело" : "отклонено"} · {when(q.firstSeen)}
+        <span className={blocked && held ? "font-semibold text-red-700 dark:text-red-400" : muted}>
+          {held ? (blocked ? "заблокировано" : "держится") : q.status === "approved" ? "одобрено" : q.status === "stale" ? "устарело" : "отклонено"} · {when(q.firstSeen)}
         </span>
       </div>
       <p className={`mt-1 break-all ${muted}`}>
@@ -933,30 +940,51 @@ function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; rpc: Re
         {q.kind === "proposal" && !q.contentHash ? " · предложен агентом, окно было закрыто" : ""}
       </p>
       {q.contentHash ? <p className={`break-all font-mono text-xs ${muted}`}>{q.contentHash}</p> : null}
-      {q.reason ? <p className={`mt-1 ${blocked || unsafeDir ? "font-semibold text-red-600" : muted}`}>{q.reason}</p> : null}
+      {q.reason ? <p className={`mt-1 ${blocked || unsafeDir ? "font-semibold text-red-700 dark:text-red-400" : muted}`}>{q.reason}</p> : null}
       {unsafeDir && held ? <p className="mt-1 text-red-600">Одобрить нельзя: пока в каталоге или выше может писать кто-то кроме пользователя сервера, его содержимое может измениться после проверки. Исправьте права (владелец — пользователь сервера, без записи для группы и остальных) или предложите плагин через <span className="font-mono">bb secure-bb propose</span>: снимок гейт хранит у себя.</p> : null}
       <ChecksView result={ov.queueChecks[q.id] ?? (q.contentHash ? ov.checks[q.contentHash] : undefined)} />
       <ScanResultView scan={ov.ai.queueScans[q.id]} />
       {held ? (
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          <RoutineCode value={code} onChange={setCode} dangerous={liftingBlock} />
-          <ScanButton ov={ov} target={{ queueId: q.id }} rpc={rpc} refetch={refetch} />
-          <button className={btnPrimary} disabled={disabled} onClick={() => void act.run(async () => { const r = await ap.routine(code, (proof) => rpc.call("queue.approve", { id: q.id, ...proof, acknowledgeBlock: ack }), liftingBlock); done(); setAck(false); return r; })}>
-            {blocked ? "Снять блок и одобрить" : "Одобрить версию"}
-          </button>
+        <div className="mt-3 space-y-3">
           {blocked ? (
-            <label className="flex items-center gap-1 text-xs">
-              <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} /> понимаю риск: проверки нашли жёсткий признак
-            </label>
-          ) : null}
-          {q.threadId && !blocked ? (
-            <button className={btn} disabled={disabled} onClick={() => void act.run(async () => { await ap.routine(code, (proof) => rpc.call("window.open", { queueId: q.id, ...proof })); done(); })}>
-              Открыть окно
-            </button>
-          ) : null}
-          <button className={btn} disabled={disabled} onClick={() => void act.run(async () => { await ap.routine(code, (proof) => rpc.call("queue.dismiss", { id: q.id, ...proof })); done(); })}>
-            Отклонить
-          </button>
+            <>
+              <div className="flex flex-wrap items-center gap-2">
+                <button className={btnPrimary} disabled={act.busy} onClick={() => void act.run(async () => { await rpc.call("queue.dismiss", { id: q.id }); })}>
+                  Отклонить
+                </button>
+                <span className={muted}>Без кода: отклонение только ужесточает.</span>
+                <ScanButton ov={ov} target={{ queueId: q.id }} rpc={rpc} refetch={refetch} />
+              </div>
+              <details className="rounded-md border border-red-300 p-2 dark:border-red-900">
+                <summary className="cursor-pointer text-red-700 dark:text-red-400">Всё равно одобрить (опасно)…</summary>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <RoutineCode value={code} onChange={setCode} dangerous />
+                  <label className="flex items-center gap-1 text-xs">
+                    <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} /> понимаю риск: проверки нашли жёсткий признак
+                  </label>
+                  <button className={btnDanger} disabled={disabled || !ack} onClick={() => void act.run(async () => { const r = await ap.routine(code, (proof) => rpc.call("queue.approve", { id: q.id, ...proof, acknowledgeBlock: ack }), true); done(); setAck(false); return r; })}>
+                    Снять блок и одобрить
+                  </button>
+                </div>
+              </details>
+            </>
+          ) : (
+            <div className="flex flex-wrap items-center gap-2">
+              <button className={btn} disabled={act.busy} onClick={() => void act.run(async () => { await rpc.call("queue.dismiss", { id: q.id }); })}>
+                Отклонить
+              </button>
+              <RoutineCode value={code} onChange={setCode} dangerous={false} />
+              <ScanButton ov={ov} target={{ queueId: q.id }} rpc={rpc} refetch={refetch} />
+              <button className={btnPrimary} disabled={disabled} onClick={() => void act.run(async () => { const r = await ap.routine(code, (proof) => rpc.call("queue.approve", { id: q.id, ...proof, acknowledgeBlock: false }), false); done(); return r; })}>
+                Одобрить версию
+              </button>
+              {q.threadId ? (
+                <button className={btn} disabled={disabled} onClick={() => void act.run(async () => { await ap.routine(code, (proof) => rpc.call("window.open", { queueId: q.id, ...proof })); done(); })}>
+                  Открыть окно
+                </button>
+              ) : null}
+            </div>
+          )}
         </div>
       ) : null}
       {held && !registered ? <p className={`mt-2 ${muted}`}>Сначала зарегистрируйте второй фактор.</p> : null}
@@ -1608,7 +1636,9 @@ function GatePage() {
   if (error && !ov) return <div className="p-6 text-destructive">Не удалось загрузить: {error}</div>;
   if (!ov) return <div className={`p-6 ${muted}`}>Загрузка…</div>;
   const registered = ov.totp.state === "locked" || ov.totp.state === "external";
-  const held = ov.queue.filter((q) => q.status === "held");
+  const heldAll = ov.queue.filter((q) => q.status === "held");
+  const held = heldAll.filter((q) => !isBlockedEntry(q, ov.queueChecks[q.id]));
+  const heldBlocked = heldAll.filter((q) => isBlockedEntry(q, ov.queueChecks[q.id]));
   const settled = ov.queue.filter((q) => q.status !== "held").slice(0, 10);
   return (
     <ApprovalContext.Provider value={approval}>
@@ -1626,8 +1656,14 @@ function GatePage() {
         <Section title="Защита этого bb"><StageCard ov={ov} /></Section>
         <Section title="Второй фактор"><Registration ov={ov} rpc={rpc} refetch={refetch} /></Section>
         {ov.guard ? <Section title={`Сторож решений${ov.guard.connected ? "" : " (не отвечает!)"}`}><GuardCard ov={ov} rpc={rpc} refetch={refetch} /></Section> : null}
-        <Section title={`Гейт плагинов — очередь (${held.length})`}>
-          {held.length === 0 ? <div className={`${card} ${muted}`}>Ничего не держится.</div> : held.map((q) => <QueueCard key={q.id} q={q} ov={ov} rpc={rpc} refetch={refetch} />)}
+        <Section title={`Гейт плагинов — очередь (${heldAll.length})`}>
+          {heldAll.length === 0 ? <div className={`${card} ${muted}`}>Ничего не держится.</div> : held.map((q) => <QueueCard key={q.id} q={q} ov={ov} rpc={rpc} refetch={refetch} />)}
+          {heldBlocked.length > 0 ? (
+            <div className="space-y-2 pt-2">
+              <h3 className="font-semibold text-red-700 dark:text-red-400">Заблокировано проверками ({heldBlocked.length})</h3>
+              {heldBlocked.map((q) => <QueueCard key={q.id} q={q} ov={ov} rpc={rpc} refetch={refetch} />)}
+            </div>
+          ) : null}
           {settled.length > 0 ? (
             <details>
               <summary className={`cursor-pointer ${muted}`}>Недавно рассмотренные ({settled.length})</summary>
