@@ -3,7 +3,7 @@
 // so it is testable without a server.
 import { readFileSync } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
-import { runChecks as defaultRunChecks, type CheckResult } from "./checks/index.js";
+import { CHECKS_VERSION, runChecks as defaultRunChecks, type CheckResult } from "./checks/index.js";
 import { SESSION_CAP_MS, SESSION_IDLE_MS, groupOf, hashToken, mintListProof, mintSessionProof, newToken, SessionProof, ListProof, type Proof, type RpcName } from "./approval.js";
 import { BLOCKED_REASON, bySeverity, capabilityTokens, localCheckKey, newTokens, summarize } from "./decision.js";
 import { describeIssues, serverIds, writableByOthers, type PermIssue } from "./perms.js";
@@ -78,7 +78,7 @@ export interface GateDeps {
   /** Directory snapshots live in (no trailing slash needed); only plugins inside it can use windows or touch-approved proposals. */
   snapshotsRoot: string;
   /** Deterministic plugin checks; injectable for tests. */
-  runChecks?: (dir: string) => Promise<CheckResult>;
+  runChecks?: (dir: string, opts?: { pluginId?: string }) => Promise<CheckResult>;
   /**
    * The registry stage of the dependency checks (stage 2.3), run after the offline checks:
    * adds publish-age findings. Must not throw (it reports what it could not verify as a finding).
@@ -382,7 +382,8 @@ export class Gate {
 
   private startCheck(key: string, pluginId: string, dir: string, logHash: string | null): Promise<CheckResult | null> {
     const stored = this.store.getCheck(key);
-    if (stored && !this.depsDueForRetry(stored)) return Promise.resolve(stored.result);
+    // A result made by an older analysis (it counted other things) is made again; until then the old one is what is shown.
+    if (stored && stored.result.v === CHECKS_VERSION && !this.depsDueForRetry(stored)) return Promise.resolve(stored.result);
     const running = this.checking.get(key);
     if (running) return running;
     const run = this.d.runChecks ?? defaultRunChecks;
@@ -390,11 +391,13 @@ export class Gate {
       try {
         let result: CheckResult;
         try {
-          result = await run(dir);
+          result = await run(dir, { pluginId });
         } catch {
-          result = await run(dir); // one retry
+          result = await run(dir, { pluginId }); // one retry
         }
         if (this.d.verifyDeps) result = await this.d.verifyDeps(result);
+        // What the gate ran now is of the current analysis (a result of a stand-in without the stamp too).
+        result = { ...result, v: result.v ?? CHECKS_VERSION };
         this.store.putCheck(key, pluginId, result);
         this.store.log("check", pluginId, logHash, {
           blocks: bySeverity(result, "block").length,

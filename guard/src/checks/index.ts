@@ -4,13 +4,14 @@
 import { posix, sep } from "node:path";
 import { analyze, parseSource, type FileFacts, type Site } from "./ast.ts";
 import { excerptOf, isCodeFile, isUrlSpec, packageDirOf, scanTree, type SourceFile } from "./files.ts";
-import { entryPoints, fileCandidates, resolveSpecifier, type GraphContext } from "./reach.ts";
+import { entryPoints, fileCandidates, pluginDirOf, resolveSpecifier, type GraphContext } from "./reach.ts";
 import { inventoryPackages, verifyInstalledPackages, type Integrity, type IntegrityEnv } from "../deps/integrity.ts";
 import { collectDependencies, nameFindings } from "../deps/collect.ts";
-import { CAPABILITY_KINDS, UNRESOLVED_HOST, type Capability, type CapabilityKind, type CheckResult, type Finding } from "./types.ts";
+import { FS_HOME, UI_CLICK_ANSWERS, UI_CLICK_GATE, UI_CLICK_NAV, UI_CLICK_OTHER } from "./sdk-rights.ts";
+import { CHECKS_VERSION, CAPABILITY_KINDS, UNRESOLVED_HOST, type Capability, type CapabilityKind, type CheckResult, type Finding } from "./types.ts";
 
 export type { Capability, CapabilityKind, CheckResult, Finding, Severity } from "./types.ts";
-export { CAPABILITY_KINDS } from "./types.ts";
+export { CAPABILITY_KINDS, CHECKS_VERSION } from "./types.ts";
 export type { Integrity, IntegrityEnv, ManifestCache, RegistryFetch } from "../deps/integrity.ts";
 export { memoryManifestCache } from "../deps/integrity.ts";
 
@@ -63,6 +64,11 @@ export interface CheckOptions {
    * the npm release itself: its content is not judged by heuristics. Without this (offline), every package is scanned.
    */
   integrity?: ReadonlyMap<string, Integrity>;
+  /**
+   * The id the core gave the plugin. In a repository of several plugins (`plugins/a`, `plugins/b`, each with its own package.json with a `bb` part) the
+   * plugin is the directory of that id: the checks start from ITS entry points, and the code of the neighbours, which it never loads, is not counted.
+   */
+  pluginId?: string;
 }
 
 /** Rules of text-level heuristics: they say nothing about a file the core never loads. */
@@ -86,21 +92,28 @@ export async function runChecks(dir: string, opts: CheckOptions = {}): Promise<C
   const perFile: Array<{ rel: string; facts: FileFacts }> = [];
 
   // package.json: the declared surfaces
-  const bbField = tree.rootPackage && typeof tree.rootPackage.bb === "object" && tree.rootPackage.bb ? (tree.rootPackage.bb as Record<string, unknown>) : {};
-  if (typeof bbField.app === "string") addCap(caps, "ui", `bb.app: ${bbField.app}`, "package.json", 0);
+  const sub = pluginDirOf(tree.packageJsons, opts.pluginId);
+  const rootPackage = sub === "" ? tree.rootPackage : (tree.packageJsons.get(`${sub}/package.json`) ?? null);
+  const inSub = (rel: string): boolean => sub === "" || rel === sub || rel.startsWith(`${sub}/`);
+  const bbField = rootPackage && typeof rootPackage.bb === "object" && rootPackage.bb ? (rootPackage.bb as Record<string, unknown>) : {};
+  if (typeof bbField.app === "string") addCap(caps, "ui", `bb.app: ${bbField.app}`, sub === "" ? "package.json" : `${sub}/package.json`, 0);
   for (const key of Object.keys(bbField)) if (/contentScripts?|composer/i.test(key)) addCap(caps, "ui", `bb.${key}`, "package.json", 0);
   if (bbField.host !== undefined) addCap(caps, "host_artifact", `bb.host: ${typeof bbField.host === "string" ? bbField.host : "declared"}`, "package.json", 0);
 
   // ---- what the core loads: entry points and everything they import ----------------------------------------
   const ctx: GraphContext = { files: tree.allFiles, packageJsons: tree.packageJsons };
-  const ep = entryPoints(tree.rootPackage, ctx);
   const posixOf = (rel: string): string => rel.split(sep).join("/");
+  // Entry points are read in the plugin's own directory, and put back under its path in the repository.
+  const subCtx: GraphContext = sub === "" ? ctx : { files: new Set([...tree.allFiles].filter((f) => f.startsWith(`${sub}/`)).map((f) => f.slice(sub.length + 1))), packageJsons: new Map() };
+  const ep0 = entryPoints(rootPackage, subCtx);
+  const under = (f: string): string => (sub === "" ? f : `${sub}/${f}`);
+  const ep = sub === "" ? ep0 : { entries: ep0.entries.map(under), dist: ep0.dist.map(under), distDerived: ep0.distDerived };
   const byRel = new Map<string, SourceFile>(tree.sources.map((x) => [posixOf(x.rel), x]));
   const codeFiles = [...byRel.keys()];
   // No entry point found (a tree without a manifest, a headless plugin): everything counts as loaded, as before.
   const everything = ep.entries.length === 0;
   const reached = new Set<string>();
-  const queue: string[] = everything ? [...codeFiles] : [...ep.entries];
+  const queue: string[] = everything ? codeFiles.filter(inSub) : [...ep.entries];
   const enqueue = (rel: string): void => {
     if (!reached.has(rel) && byRel.has(rel)) {
       reached.add(rel);
@@ -161,12 +174,12 @@ export async function runChecks(dir: string, opts: CheckOptions = {}): Promise<C
         const key = pd ?? "";
         if (!allOfPackage.has(key)) {
           allOfPackage.add(key);
-          for (const c of codeFiles) if (isOwn(c) === (pd === null) && (pd === null || packageDirOf(c) === pd) && !isVerifiedFile(c)) enqueue(c);
+          for (const c of codeFiles) if (isOwn(c) === (pd === null) && (pd === null ? inSub(c) : packageDirOf(c) === pd) && !isVerifiedFile(c)) enqueue(c);
         }
       }
     }
   }
-  const distDerived = (rel: string): boolean => ep.distDerived && rel.startsWith("dist/");
+  const distDerived = (rel: string): boolean => ep.distDerived && rel.startsWith(under("dist/"));
 
   // Plugin-wide rules: a secret path next to a network capability anywhere is the exfiltration shape.
   const anyNetwork = perFile.some((f) => f.facts.network);
@@ -185,6 +198,24 @@ export async function runChecks(dir: string, opts: CheckOptions = {}): Promise<C
   }
   // `env-passed` where the callee is a function of another file of this plugin that only reads named variables.
   resolveEnvPassed(perFile, findings);
+  // Pressing buttons of bb's page: an element looked up that the plugin did not draw, and a press on an element, anywhere in the plugin.
+  if (perFile.some((f) => f.facts.domLookups.length > 0)) {
+    for (const { rel, facts } of perFile) for (const p of facts.domPresses) addCap(caps, "ui_click", p.detail, rel, p.line);
+    if (caps.has("ui_click")) {
+      // Where it presses: by the selectors it looks elements up with, and the labels it knows. A target the code does not show is the worse one when it speaks of approving.
+      const targets = new Set(perFile.flatMap((f) => f.facts.domLookups.map((l) => l.target)));
+      if (perFile.some((f) => f.facts.answerText)) targets.add("answers");
+      if (targets.delete("unknown")) targets.add(perFile.some((f) => f.facts.approveText) ? "gate" : "other");
+      const detailOf = { answers: UI_CLICK_ANSWERS, nav: UI_CLICK_NAV, gate: UI_CLICK_GATE, other: UI_CLICK_OTHER } as const;
+      const site = caps.get("ui_click")!.sites[0]!;
+      for (const t of targets) if (t !== "unknown") addCap(caps, "ui_click", detailOf[t], site.file, site.line);
+    }
+  }
+  // Files: «your documents» are said only when the code reaches the person's own folders (home directory, Documents…); otherwise the files are not known.
+  if (caps.has("fs") && (perFile.some((f) => f.facts.homeRef) || [...(caps.get("env")?.detail ?? [])].some((d) => /^(env:)?(HOME|USERPROFILE|HOMEPATH)$/i.test(d)))) {
+    const site = caps.get("fs")!.sites[0]!;
+    addCap(caps, "fs", FS_HOME, site.file, site.line);
+  }
   // Literal hosts belong to the network capability.
   for (const { rel, facts } of perFile) {
     if (!anyNetwork) break;
@@ -238,7 +269,9 @@ export async function runChecks(dir: string, opts: CheckOptions = {}): Promise<C
     const fp = posixOf(f.file);
     const pd = packageDirOf(fp);
     if (pd === null) {
-      if (distDerived(fp) && !STRUCTURAL.has(f.rule)) ignore("dist", "build output of the plugin's source, which is checked itself", f);
+      // Another plugin of the same repository: its code is not loaded by this one, so it says nothing about this one.
+      if (!inSub(fp) && !reached.has(fp) && !STRUCTURAL.has(f.rule)) ignore("other plugins of the repository", "not part of this plugin", f);
+      else if (distDerived(fp) && !STRUCTURAL.has(f.rule)) ignore("dist", "build output of the plugin's source, which is checked itself", f);
       else counted.push(f);
       continue;
     }
@@ -255,7 +288,7 @@ export async function runChecks(dir: string, opts: CheckOptions = {}): Promise<C
 
   // What was left out of the analysis, and what the registry said about the copies in node_modules.
   if (!everything) {
-    const own = codeFiles.filter((c) => isOwn(c) && !reached.has(c));
+    const own = codeFiles.filter((c) => isOwn(c) && inSub(c) && !reached.has(c));
     const deps = codeFiles.filter((c) => !isOwn(c) && !reached.has(c) && !isVerifiedFile(c));
     if (own.length + deps.length > 0) {
       const sample = [...new Set(own.map((c) => c.split("/")[0]!))].slice(0, 5).join(", ");
@@ -285,7 +318,7 @@ export async function runChecks(dir: string, opts: CheckOptions = {}): Promise<C
   const sorted = [...uniq.values()].sort(
     (a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity] || (a.file < b.file ? -1 : a.file > b.file ? 1 : 0) || a.line - b.line || (a.rule < b.rule ? -1 : 1),
   );
-  return { findings: sorted, capabilities, stats: { files: tree.files, parsed, bytes: tree.bytes, ms: Date.now() - t0 }, dependencies, ...(caps.has("fs") && fsPaths.length > 0 ? { fsPaths } : {}), ...(caps.has("child_process") && (programs.length > 0 || programsUnknown) ? { programs, ...(programsUnknown ? { programsUnknown } : {}) } : {}), ...(credentials.length > 0 ? { credentials } : {}) };
+  return { v: CHECKS_VERSION, findings: sorted, capabilities, stats: { files: tree.files, parsed, bytes: tree.bytes, ms: Date.now() - t0 }, dependencies, ...(caps.has("fs") && fsPaths.length > 0 ? { fsPaths } : {}), ...(caps.has("child_process") && (programs.length > 0 || programsUnknown) ? { programs, ...(programsUnknown ? { programsUnknown } : {}) } : {}), ...(credentials.length > 0 ? { credentials } : {}) };
 }
 
 /**
@@ -293,7 +326,7 @@ export async function runChecks(dir: string, opts: CheckOptions = {}): Promise<C
  * (network through `env.fetch`, a cache of the tarballs' file hashes in `env.cache`). Anything that cannot be compared is
  * scanned as before. Never fails because of the network.
  */
-export async function runChecksVerified(dir: string, env: IntegrityEnv): Promise<CheckResult> {
+export async function runChecksVerified(dir: string, env: IntegrityEnv, pluginId?: string): Promise<CheckResult> {
   let integrity: Map<string, Integrity> | undefined;
   try {
     const packages = await inventoryPackages(dir);
@@ -301,7 +334,7 @@ export async function runChecksVerified(dir: string, env: IntegrityEnv): Promise
   } catch {
     integrity = undefined;
   }
-  return runChecks(dir, integrity ? { integrity } : {});
+  return runChecks(dir, { ...(integrity ? { integrity } : {}), ...(pluginId ? { pluginId } : {}) });
 }
 
 /** Plain-text report for `bb secure-bb check` and logs. */

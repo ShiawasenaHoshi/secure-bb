@@ -16,7 +16,23 @@ export type CapabilityKind =
   | "builtin_rpc"
   | "server_access"
   /** `bb.storage.database()` / `node:sqlite`: a database handle in the gate's own process and uid can reach other databases (ATTACH, extensions). */
-  | "database";
+  | "database"
+  /** `sdk.threads.timeline/output/search`, message and turn events: reads what is written in the person's conversations. */
+  | "sdk_read"
+  /** `sdk.threads.get/list`, `bb.events.on("thread.idle")`: titles and states of threads (when agents start and finish), not what is written in them. */
+  | "sdk_meta"
+  /** `sdk.threads.interactions.list/get`: sees which questions and permission requests the agents raise. */
+  | "sdk_questions"
+  /** `sdk.threads.spawn/stop/archive/fork/delete…`: starts, stops and removes agents. */
+  | "sdk_agents"
+  /** `sdk.threads.send/message/editMessage…`: writes into conversations as the person. */
+  | "sdk_send"
+  /** `sdk.threads.interactions.respond/resolve/cancel`: answers an agent's questions and permission requests. */
+  | "sdk_answer"
+  /** `sdk.system/plugins/providers/skills/projects/environments/hosts` setters: changes how bb is set up (installs and enables plugins, sets machine variables). */
+  | "sdk_settings"
+  /** Presses buttons of bb's page that the plugin did not draw (`document.querySelector(…).click()`, `dispatchEvent`, `requestSubmit`): the channel by which a plugin can press the gate's buttons too. */
+  | "ui_click";
 
 export const CAPABILITY_KINDS: readonly CapabilityKind[] = [
   "network",
@@ -31,6 +47,14 @@ export const CAPABILITY_KINDS: readonly CapabilityKind[] = [
   "builtin_rpc",
   "server_access",
   "database",
+  "sdk_read",
+  "sdk_meta",
+  "sdk_questions",
+  "sdk_agents",
+  "sdk_send",
+  "sdk_answer",
+  "sdk_settings",
+  "ui_click",
 ];
 
 export interface Capability {
@@ -89,7 +113,15 @@ export interface DependencyStats {
   registry: boolean;
 }
 
+/**
+ * The version of the analysis a result was made by. Results are stored by the content hash and shown for as long as the version lives, so a change of
+ * what the checks count (which directory of a repository, which calls are which right) must make the stored ones be made again: they carry this number.
+ */
+export const CHECKS_VERSION = 4;
+
 export interface CheckResult {
+  /** `CHECKS_VERSION` at the time; absent on results of the first checks. */
+  v?: number;
   findings: Finding[];
   capabilities: Capability[];
   stats: { files: number; parsed: number; bytes: number; ms: number };

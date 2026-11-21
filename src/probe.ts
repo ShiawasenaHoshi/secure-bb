@@ -37,7 +37,7 @@ export function isThirdParty(p: InstalledPluginLite): boolean {
   return p.provenance !== "builtin" && p.id !== "secure-bb";
 }
 /** The core says a plugin waits for a guard (ours): its code is not loaded, whatever else the status says. */
-const HELD_DETAIL = /waiting for activation guard|held by secure-bb|удержан/i;
+const HELD_DETAIL = /waiting for activation guard|held by activation guard|held by secure-bb|удержан/i;
 /** Is the plugin's code running now? By the core's STATUS (`enabled` is only the wish: a held plugin is enabled and does not run). */
 export const isRunning = (p: Pick<InstalledPluginLite, "status" | "statusDetail">): boolean => RUNNING.has(p.status) && !HELD_DETAIL.test(p.statusDetail ?? "");
 export const runningThirdParty = (plugins: InstalledPluginLite[]): string[] => plugins.filter((p) => isThirdParty(p) && isRunning(p)).map((p) => p.id);

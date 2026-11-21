@@ -37,8 +37,8 @@ import { memoryManifestCache, runChecks as runChecksPlain, runChecksVerified, ty
 /** What the guard's own checks may spend on comparing node_modules with the registry; the budget of one evaluation is {@link DEFAULT_BUDGET_MS}. */
 const INTEGRITY_DEADLINE_MS = 2500;
 const manifestCache = memoryManifestCache();
-const runChecksOffline = (dir: string): Promise<CheckResult> => runChecksPlain(dir);
-const runChecks = (dir: string): Promise<CheckResult> => runChecksVerified(dir, { fetch: globalThis.fetch as unknown as RegistryFetch, cache: manifestCache, deadlineMs: INTEGRITY_DEADLINE_MS });
+const runChecksOffline = (dir: string, o: { pluginId?: string } = {}): Promise<CheckResult> => runChecksPlain(dir, o.pluginId ? { pluginId: o.pluginId } : {});
+const runChecks = (dir: string, o: { pluginId?: string } = {}): Promise<CheckResult> => runChecksVerified(dir, { fetch: globalThis.fetch as unknown as RegistryFetch, cache: manifestCache, deadlineMs: INTEGRITY_DEADLINE_MS }, o.pluginId);
 import { readTree, TreeRefused, type TreeLimits } from "./tree-read.ts";
 import {
   brief,
@@ -294,7 +294,7 @@ export interface TrustConfig {
   /** Sources of the official catalog (`github:owner/name`, `github:owner/*`): the level "known". */
   knownSources?: string[];
   /** Tests: the checks of a plugin directory (default: the checks module of this tree, the one the plugin uses). */
-  checks?: (dir: string) => Promise<CheckResult>;
+  checks?: (dir: string, opts?: { pluginId?: string }) => Promise<CheckResult>;
   /** No network: the checks do not compare node_modules with the npm registry (`--offline`). */
   offline?: boolean;
   /** How long a version may be read before the guard gives up and queues it (default 3.5 s: the core waits 5). */
@@ -387,7 +387,7 @@ export interface ImportItem {
 type NewApproval = Omit<ApprovalRow, "id" | "approvedAt" | "revokedAt" | "sourceId" | "rights" | "why"> & { rights?: Rights | null; why?: string | null };
 
 export class Guard {
-  private readonly trustCfg: Required<Pick<TrustConfig, "pluginsRoots" | "budgetMs">> & { treeLimits?: TreeLimits } & { known: string[]; checks: (dir: string) => Promise<CheckResult> };
+  private readonly trustCfg: Required<Pick<TrustConfig, "pluginsRoots" | "budgetMs">> & { treeLimits?: TreeLimits } & { known: string[]; checks: (dir: string, opts?: { pluginId?: string }) => Promise<CheckResult> };
   private evalsRunning = 0;
   private evalTimes: number[] = [];
   private readonly db: DatabaseSync;
@@ -963,7 +963,7 @@ export class Guard {
       }
       try {
         if (tree.hash !== req.contentHash) return { ok: false, reason: "хеш каталога, посчитанный сторожем, не совпал с хешем из запроса" };
-        const res = await this.trustCfg.checks(tree.dir);
+        const res = await this.trustCfg.checks(tree.dir, { pluginId: req.pluginId });
         return { ok: true, hash: tree.hash, rights: rightsOf(res), blocks: hardFlags(res).map((f) => `${f.rule} ${f.file}${f.line ? `:${f.line}` : ""}`) };
       } finally {
         await tree.cleanup().catch(() => undefined);

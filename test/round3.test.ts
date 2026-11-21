@@ -108,14 +108,15 @@ describe("3. the key fact is in the main text", () => {
     expect(redWhere([{ kind: "env", detail: [] }])).toBeNull();
   });
   it("file rights: the paths when the code names them, else «любые файлы… ваши документы»", () => {
-    expect(capabilityPhrase({ kind: "fs", detail: ["fs"] })).toContain("любые файлы, к которым у bb есть доступ — в том числе ваши документы");
+    expect(capabilityPhrase({ kind: "fs", detail: ["fs", "home"] })).toContain("любые файлы, к которым у bb есть доступ — в том числе ваши документы");
+    expect(capabilityPhrase({ kind: "fs", detail: ["fs"] })).toBe("работать с файлами (какими именно — из кода не видно)");
     const p = capabilityPhrase({ kind: "fs", detail: ["fs"], paths: ["/Users/me/Clients"] });
     expect(p).toContain("/Users/me/Clients");
     expect(p).not.toContain("любые файлы");
     const caps = capsWithPaths({ capabilities: [{ kind: "fs", detail: ["fs"] }, { kind: "network", detail: [] }], fsPaths: ["/a/b"] });
     expect(caps[0]!.paths).toEqual(["/a/b"]);
     expect(caps[1]!.paths).toBeUndefined();
-    const y = yellowText({ pluginId: "h", version: "1", level: "own", sourceLabel: "из папки x", reason: "новое право: fs", caps: [{ kind: "fs", detail: ["fs"] }] });
+    const y = yellowText({ pluginId: "h", version: "1", level: "own", sourceLabel: "из папки x", reason: "новое право: fs", caps: [{ kind: "fs", detail: ["fs", "home"] }] });
     expect(y.line).toContain("в том числе ваши документы");
   });
   it("the checks read literal paths handed to file calls, and only show them (no new right)", async () => {
@@ -125,7 +126,8 @@ describe("3. the key fact is in the main text", () => {
     writeFileSync(join(dir, "src", "a.ts"), `import { readFileSync } from "node:fs";\nexport const x = readFileSync("/Users/me/Clients/list.txt", "utf8");\nexport const y = "/api/route";\n`);
     const r = await runChecks(dir);
     expect(r.fsPaths).toEqual(["/Users/me/Clients/list.txt"]);
-    expect(r.capabilities.find((c) => c.kind === "fs")!.detail).toEqual(["fs"]);
+    // The path is in the person's own folders (/Users/…): «home» says so; it is the same right, said more exactly.
+    expect(r.capabilities.find((c) => c.kind === "fs")!.detail).toEqual(["fs", "home"]);
   });
 });
 

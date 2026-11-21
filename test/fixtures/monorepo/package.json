@@ -1,0 +1,1 @@
+{ "name": "bb-plugins", "private": true, "workspaces": ["plugins/*"] }

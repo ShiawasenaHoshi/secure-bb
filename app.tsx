@@ -1,7 +1,7 @@
 // secure-bb — frontend: the secure-bb page (the plugin gate is a section of it) and an always-visible banner
 // for open trust windows. Plain React + host theme tokens; no vendored UI,
 // no third-party code (this bundle runs in bb's origin, so it stays minimal).
-import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useId, useMemo, useReducer, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { definePluginApp, useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import type { SecureBbRpc } from "./server";
@@ -28,12 +28,15 @@ import type { TrustMode } from "./src/guardlink";
 import {
   AWAY_KEY, DEFERRED_KEY, glossSegments, skillsSummary, doneMessage, approvedNote, uniqueSentences, humanError, approvedByText, canRestore, rejectedAtOf, rejectedByText, clockText, firstButtonAfter, sessionClosedText, sessionEndReason, slideIdle, type SessionCloseReason, capsWithPaths, redWhere, cardFoldId, cardKey, sessionBlockText, KEPT_KEY, MODE_DESCRIPTIONS, MODE_NAMES, SAVED_NARROWING, TOUCH_SLOW_MS, WIZARD_KEY,
   aaguidName, approvalWhy, awayAlarms, awayInfoEvents, awaySince, capabilitySegments, cardColor, deferKey, detailLevel, groupAway, isBlockedEntry, isPasswordManager, pageStatus,
-  MISMATCH_HINT, bypassAllowed, mismatchText, parseDeferred, quarantineCount, redText, touchWithHint, wizardNeeded, yellowText, GUARD_DOWN_TEXT,
+  MISMATCH_HINT, alarmCount, bypassAllowed, mismatchText, parseDeferred, redText, touchWithHint, wizardNeeded, yellowText, GUARD_DOWN_TEXT,
   actionLabel, emphasize, agentAcceptProblem, agentsSectionTab, awaySeenMark, criticalAcceptTitle, manualRollback, criticalMeanings, decisionOf, deleteConfirmText, deletedNote,
   isCriticalDrift, launchProblem, moreVersionsText, planCards, proofHint, reconcileSelection, sameData, selectableDriftIds, sessionText, setFold,
   toggleId, trustButton, windowAvailability,
 } from "./src/ux";
 import { isMismatch, riskHeadline, approveVerb, enabledWhat, agentConfigNote, scopeText, makeStub, stableOrder, layoutItems, friendlySource, WIZARD_SOURCES_TEXT, secondFactorText, AWAY_HIDE_LABEL, type Stub } from "./src/ux";
+import { checksSummary, countsLine, DEFER_STUB_RESTORE, DELETE_CONFIRM_BUTTONS, dropUnstamped, hasNoGuardRecord, makeDeferStub, NO_RECORD_FIX, NO_RECORD_HEADLINE, NO_RECORD_LINE, pageCounts, restoreNote, significantFindings, stampMark, withoutMark } from "./src/ux";
+import { capabilityPhrase } from "./src/ux";
+import { createDrafts } from "./src/drafts";
 import { isFoldOpen, openFold, toggleFold } from "./src/fold";
 import type { AwayEvent, CapLike, HeldNow, ProblemRef, TabId } from "./src/ux";
 
@@ -170,6 +173,22 @@ function PinnedNotes() {
       </div>
     </div>
   );
+}
+
+// What was typed in a code field lives OUTSIDE the components, by the id of the card: a refresh of the data, or a card that is built again, does not take it away.
+const drafts = createDrafts();
+function useDraftCode(key: string): [string, (v: string) => void] {
+  const [value, setValue] = useState<string>(() => drafts.get(key));
+  const set = useCallback(
+    (v: string) => {
+      drafts.set(key, v);
+      setValue(v);
+    },
+    [key],
+  );
+  // The same key may be drawn by a new component (the card was rebuilt): it takes the draft up again.
+  useEffect(() => setValue(drafts.get(key)), [key]);
+  return [value, set];
 }
 
 /** A one-shot action that needs a fresh TOTP code. `done` (a short phrase: «удалён плагин X 1.0») is announced as «Готово: …» where the cards are. */
@@ -383,7 +402,7 @@ function useApprovalSession(rpc: Rpc, refetch: () => void): { approval: Approval
 /** The strip at the top: open a session with one touch (a code, or a key at the guard), or see how long it lasts and lock it. */
 function SessionBar({ ov, rpc, session, open, lock, closed }: { ov: Overview; rpc: Rpc; session: SessionLocal | null; open: (proof: { code?: string; passkey?: PasskeyAssertion }, hour?: boolean) => Promise<void>; lock: () => Promise<void>; closed: SessionCloseReason | null }) {
   const now = useNow();
-  const proof = useProof(ov, rpc);
+  const proof = useProof(ov, rpc, "session");
   const act = useCodeAction(() => undefined);
   if (!proof.registered) return null;
   if (session) {
@@ -1012,31 +1031,45 @@ function QrSvg({ matrix }: { matrix: boolean[][] }) {
 function ChecksView({ id, result }: { id: string; result: CheckResult | undefined }) {
   if (!result) return <p className={`mt-2 text-xs ${muted}`}>Проверки ещё выполняются или не запускались для этой версии.</p>;
   const sev = (s: string) => (s === "block" ? "блок" : s === "review" ? "на ревью" : "инфо");
+  const lines = significantFindings(result.findings);
   return (
-    <Fold id={`checks-${id}`} className="mt-2" defaultOpen={result.findings.some((f) => f.severity === "block")} summary={`Проверки: ${result.findings.length === 0 ? "находок нет" : `${result.findings.length} находок`} · возможностей: ${result.capabilities.length}`}>
-      {result.findings.length > 0 ? (
+    <Fold id={`checks-${id}`} className="mt-2" defaultOpen={lines.some((l) => l.severity === "block")} summary={checksSummary(lines, result.capabilities.length)}>
+      {lines.length > 0 ? (
         <ul className="mt-1 list-disc pl-5">
-          {result.findings.map((f, i) => (
-            <li key={i} className="break-all">
-              <b>{sev(f.severity)}</b> {f.rule} · <span className="font-mono">{f.file}{f.line ? `:${f.line}` : ""}</span> · <span className="font-mono">{f.excerpt}</span>
+          {lines.map((l, i) => (
+            <li key={i}>
+              <b>{l.severity === "block" ? "Останавливает" : "Нужен взгляд"}:</b> {l.text}
+              {l.count > 1 ? ` (${l.count} мест)` : ""}
+              {l.where.length > 0 ? <span className={muted}> · {l.where.join(", ")}{l.count > l.where.length ? ", …" : ""}</span> : null}
             </li>
           ))}
         </ul>
-      ) : null}
+      ) : (
+        <p className={`mt-1 ${muted}`}>Ничего, что требовало бы взгляда.</p>
+      )}
       <p className="mt-1 font-semibold">Возможности</p>
       {result.capabilities.length === 0 ? (
         <p className={muted}>нет (безопасный класс)</p>
       ) : (
         <ul className="list-disc pl-5">
           {result.capabilities.map((c) => (
-            <li key={c.kind} className="break-all">
-              <span className="font-mono">{c.kind}</span>{c.detail.length ? `: ${c.detail.join(", ")}` : ""}
-              <span className={muted}> ({c.sites.slice(0, 3).map((s) => `${s.file}${s.line ? `:${s.line}` : ""}`).join(", ")}{c.sites.length > 3 ? ", …" : ""})</span>
-            </li>
+            <li key={c.kind}>{capabilityPhrase({ kind: c.kind, detail: c.detail })}</li>
           ))}
         </ul>
       )}
       <DependenciesView result={result} />
+      <Fold id={`checks-raw-${id}`} className="mt-2" summaryClassName={`cursor-pointer text-xs ${muted}`} summary="Для разработчика: сырые данные проверок">
+        <ul className="mt-1 list-disc pl-5 text-xs">
+          {result.findings.map((f, i) => (
+            <li key={i} className="break-all">
+              <b>{sev(f.severity)}</b> {f.rule} · <span className="font-mono">{f.file}{f.line ? `:${f.line}` : ""}</span> · <span className="font-mono">{f.excerpt}</span>
+            </li>
+          ))}
+          {result.capabilities.map((c) => (
+            <li key={`cap-${c.kind}`} className="break-all"><span className="font-mono">{c.kind}</span>{c.detail.length ? `: ${c.detail.join(", ")}` : ""}</li>
+          ))}
+        </ul>
+      </Fold>
     </Fold>
   );
 }
@@ -1867,7 +1900,8 @@ function DriftCard({ d, picked, onPick, threads, marked, accept }: { d: AgentDri
 
 /** One critical difference: what accepting it lets the agent do, and its own fresh touch (a session does not cover it, and neither does a pack). */
 function CriticalAccept({ d, ov, rpc, refetch, canCode, pk }: { d: AgentDrift; ov: Overview; rpc: Rpc; refetch: () => void; canCode: boolean; pk: PasskeyState }) {
-  const [code, setCode] = useState("");
+  const [code, setCode] = useDraftCode(`drift:${d.id}`);
+  const ap = useApproval();
   const [touching, setTouching] = useState<string | null>(null);
   const act = useCodeAction(refetch);
   const title = criticalAcceptTitle(d.reasons);
@@ -1941,6 +1975,7 @@ function CriticalAccept({ d, ov, rpc, refetch, canCode, pk }: { d: AgentDrift; o
             ) : null}
             <CodeHint ov={ov} />
           </div>
+          {restoreNote(ap.session !== null) ? <p className="mt-1 text-xs font-semibold" data-agent-restore-fresh={d.id}>{restoreNote(ap.session !== null)}</p> : null}
         </div>
       ) : (
         <p className="mt-2 text-xs" data-agent-no-restore={d.id}>Автоматически вернуть этот файл нельзя{d.restorable && !d.restorable.ok ? `: ${d.restorable.reason}` : ""}</p>
@@ -2366,10 +2401,11 @@ interface ProofHook {
   /** Runs an action with a touch (a key, if there is one and no code typed) or a code (or a session, for a routine action). */
   run: <T>(query: TouchQuery, call: (proof: AnyProof) => Promise<T>, o?: { routine?: boolean; dangerous?: boolean }) => Promise<T>;
 }
-function useProof(ov: Overview, rpc: Rpc): ProofHook {
+function useProof(ov: Overview, rpc: Rpc, draftKey?: string): ProofHook {
   const ap = useApproval();
   const pk = usePasskey(ov);
-  const [code, setCode] = useState("");
+  const ownKey = useId();
+  const [code, setCode] = useDraftCode(draftKey ?? ownKey);
   const [touching, setTouching] = useState<string | null>(null);
   const registered = ov.totp.state === "locked" || ov.totp.state === "external";
   // An open session covers a routine action: no touch and no code (with a key too). The dangerous kind of an action never uses it.
@@ -2512,7 +2548,7 @@ interface ReviewProps {
 /** Yellow «Проверьте» (a new right or an unknown source) and red «Остановлено» (a hard flag). Every action on it is about THIS version, and says so. */
 function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onKeep, onTrustPending, slotted = true, fresh = false }: ReviewProps) {
   const act = useCodeAction(refetch, { pin: true, ...(slotted ? { slot: { key: q.pluginId, elId: `sbb-card-${q.id}` } } : {}) });
-  const proof = useProof(ov, rpc);
+  const proof = useProof(ov, rpc, `card:${cardKey(q)}`);
   const [typed, setTyped] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const found = ov.queueChecks[q.id] ?? (q.contentHash ? ov.checks[q.contentHash] : undefined);
@@ -2532,7 +2568,9 @@ function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onKeep, onTrustPen
     : yellowText({ pluginId: q.pluginId, version: q.version, level: ux?.level ?? "unknown", sourceLabel: ux?.sourceLabel ?? q.source, reason: q.reason, caps });
   const approve = (acknowledgeBlock: boolean) =>
     proof.run({ kind: "approve", queueId: q.id, acknowledgeBlock }, (p) => rpc.call("queue.approve", { id: q.id, ...p, acknowledgeBlock } as never), { routine: true, dangerous: acknowledgeBlock });
-  const risk = riskHeadline(caps, (found?.findings ?? []).filter((f) => f.severity === "review").map((f) => f.rule));
+  // A version the guard has no record of (it loaded without the guard's check): nothing here can approve it, and a green «можно включить» would be a lie.
+  const noRecord = hasNoGuardRecord(q);
+  const risk = noRecord ? { level: "caution" as const, text: NO_RECORD_HEADLINE } : riskHeadline(caps, (found?.findings ?? []).filter((f) => f.severity === "review").map((f) => f.rule));
   const allowedWhat = enabledWhat(q.pluginId, q.version);
   const verb = approveVerb(risk);
   const configNote = agentConfigNote(found?.findings ?? []);
@@ -2557,13 +2595,13 @@ function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onKeep, onTrustPen
           <p className={`text-xs ${muted}`}>«{q.pluginId}» {q.version}{risk.level === "safe" ? ": можно включить" : ""}</p>
         </>
       )}
-      <p className="mt-1"><Emph text={text.line} /></p>
+      <p className="mt-1">{noRecord ? <>{NO_RECORD_LINE}{q.reason ? <> <span className={muted}>({q.reason.replace(/\.$/, "")}.)</span></> : null}</> : <Emph text={text.line} />}</p>
       {configNote && !red ? <p className="mt-1 text-xs">{configNote}</p> : null}
       <AuthorWhy why={ux?.why} />
       <Origin ux={ux} q={q} />
       {unsafeDir ? <p className="mt-1 font-semibold text-red-700 dark:text-red-400">Разрешить нельзя: в папке плагина или выше может писать кто-то кроме пользователя сервера, и после проверки файлы можно подменить. Исправьте права или предложите плагин через <span className="font-mono">bb secure-bb propose</span>.</p> : null}
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        {red ? null : (
+        {red || noRecord ? null : (
           <>
             <ProofField proof={proof} routine />
             <button className={btnPrimary} disabled={act.busy || blockedApprove} onClick={() => void act.run(async () => { await approve(false); return { note: approvedNote(q.pluginId, q.version) }; }, allowedWhat)}>
@@ -2572,14 +2610,17 @@ function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onKeep, onTrustPen
           </>
         )}
         {confirmDelete ? (
-          <>
-            <span className="font-semibold">{deleteConfirmText(q.pluginId, q.version)}</span>
-            <button className={btnDanger} disabled={act.busy} onClick={del}>Да, удалить</button>
-            <button className={btn} disabled={act.busy} onClick={() => setConfirmDelete(false)}>Нет</button>
-          </>
+          // The question on its own line, the two buttons under it on one line, always in the same order: «Да, удалить» does not move from card to card.
+          <div className="basis-full">
+            <p className="font-semibold">{deleteConfirmText(q.pluginId, q.version)}</p>
+            <div className="mt-2 flex flex-nowrap items-center gap-2">
+              <button className={`${btnDanger} whitespace-nowrap`} disabled={act.busy} onClick={del}>{DELETE_CONFIRM_BUTTONS[0]}</button>
+              <button className={`${btn} whitespace-nowrap`} disabled={act.busy} onClick={() => setConfirmDelete(false)}>{DELETE_CONFIRM_BUTTONS[1]}</button>
+            </div>
+          </div>
         ) : (
           <>
-            <button className={red ? btnPrimary : btn} disabled={act.busy} onClick={() => setConfirmDelete(true)}>{actionLabel("Удалить", q.pluginId, q.version)}</button>
+            <button className={red || noRecord ? btnPrimary : btn} disabled={act.busy} onClick={() => setConfirmDelete(true)}>{noRecord ? `${NO_RECORD_FIX}: ${q.pluginId} ${q.version}` : actionLabel("Удалить", q.pluginId, q.version)}</button>
             {red ? (
               <button className={btn} disabled={act.busy} onClick={() => onKeep(q)} title="Плагин остаётся в карантине, не запущен; карточка уходит из «Ждут решения», красный статус снимается">Оставить в карантине</button>
             ) : (
@@ -2617,7 +2658,7 @@ function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onKeep, onTrustPen
           </div>
         </Fold>
       ) : null}
-      <Fold id={cardFoldId(q, "tech")} className="mt-2" defaultOpen={detail.expanded} summary={red ? "Подробности" : "Технические подробности"}>
+      <Fold id={cardFoldId(q, "tech")} className="mt-2" defaultOpen={detail.expanded || risk.look === true} summary={red ? "Подробности" : "Технические подробности"}>
         <div className="mt-2 space-y-1">
           {red ? <p className={`text-xs ${muted}`}>{scopeText(q.version)}</p> : null}
           <p className="break-all text-xs">{q.sourceKind}: {q.source} · версия {q.version}{q.trigger ? ` · ${q.trigger}` : ""}</p>
@@ -3046,8 +3087,10 @@ function GatePage() {
   // The link from `sbb-guard setup` (#enroll=TOKEN): taken once, from the fragment (it never went to a server), and the address bar is cleaned at once.
   const [enrollToken] = useState<string | null>(enrollTokenOnce);
   const [tab, setTab] = useState<TabId>(enrollToken !== null ? "more" : "status");
-  const [deferredKeys, setDeferredKeys] = useState<string[]>(() => parseDeferred(lsGet(DEFERRED_KEY)));
-  const [keptKeys, setKeptKeys] = useState<string[]>(() => parseDeferred(lsGet(KEPT_KEY)));
+  // Marks carry the time the person made them: a mark older than the entry belongs to an earlier data set (ids start again after a reset) and does not count.
+  // Marks of an older page, with no time on them, cannot be told from such ones: they are dropped once.
+  const [deferredKeys, setDeferredKeys] = useState<string[]>(() => dropUnstamped(parseDeferred(lsGet(DEFERRED_KEY))));
+  const [keptKeys, setKeptKeys] = useState<string[]>(() => dropUnstamped(parseDeferred(lsGet(KEPT_KEY))));
   const [seenAt, setSeenAt] = useState<string | null>(() => lsGet(AWAY_KEY));
   const [wizardDone, setWizardDone] = useState<boolean>(() => lsGet(WIZARD_KEY) !== null);
   const [pending, setPending] = useState<Array<{ entry: string; label: string }>>([]);
@@ -3102,20 +3145,25 @@ function GatePage() {
   const store = (key: string, list: string[]) => lsSet(key, JSON.stringify(list.slice(-500)));
   const onDefer = (q: QueueRow, on: boolean) => {
     const k = deferKey(q.pluginId, q.contentHash, q.id);
-    const next = on ? [...new Set([...deferredKeys, k])] : deferredKeys.filter((x) => x !== k);
+    const next = on ? [...withoutMark(deferredKeys, k), stampMark(k, Date.now())] : withoutMark(deferredKeys, k);
+    // «Решить позже»: a stub of the card's height stays where the card was («Отложено: X · Вернуть»), so that the next card does not slide under the cursor.
+    if (on) {
+      const height = document.getElementById(`sbb-card-${q.id}`)?.offsetHeight ?? 0;
+      setStubs((l) => [...l.filter((x) => x.key !== q.pluginId), makeDeferStub(q, height)]);
+    } else setStubs((l) => l.filter((x) => !(x.restore && x.key === q.pluginId)));
     setDeferredKeys(next);
     store(DEFERRED_KEY, next);
   };
   // «Оставить в карантине» is an answer: the entry is held at the guard as before, but it leaves «Ждут решения» and the status.
   const onKeep = (q: QueueRow) => {
     const k = deferKey(q.pluginId, q.contentHash, q.id);
-    const next = [...new Set([...keptKeys, k])];
+    const next = [...withoutMark(keptKeys, k), stampMark(k, Date.now())];
     setKeptKeys(next);
     store(KEPT_KEY, next);
     onDefer(q, false);
   };
   const onUnkeep = (q: QueueRow) => {
-    const next = keptKeys.filter((x) => x !== deferKey(q.pluginId, q.contentHash, q.id));
+    const next = withoutMark(keptKeys, deferKey(q.pluginId, q.contentHash, q.id));
     setKeptKeys(next);
     store(KEPT_KEY, next);
   };
@@ -3147,6 +3195,8 @@ function GatePage() {
   if ((ov.guard?.troubleshootUntil ?? 0) > ov.now) alarms.push({ anchor: "sbb-guard-alarm", tab: "status", text: "Включён режим отладки сторожа: он пропускает всё" });
   const guardDown = ov.guard !== undefined && !ov.guard.connected;
   const status = pageStatus({ guardDown, red: reds.map(refOf), yellow: yellows.map(refOf), alarms });
+  // Every number on the page comes from the one plan of cards.
+  const counts = pageCounts(plan, alarmCount(alarms), removedSkillsOf(ov).length);
   const showProblem = (p: ProblemRef) => {
     setTab(p.tab);
     const id = Number(p.anchor.replace("sbb-card-", ""));
@@ -3179,8 +3229,9 @@ function GatePage() {
     </div>
   );
   const agentsSection = ov.agents ? <Section id="sbb-agents" title={`Агенты: конфигурации и память${agentsAlarms > 0 || agentsCritical > 0 ? " (!)" : (ov.agents.state?.openTotal ?? 0) > 0 ? ` (${ov.agents.state?.openTotal})` : ""}`}><AgentsSection ov={ov} rpc={rpc} refetch={refetch} showDone={agentsTab !== "status"} /></Section> : null;
-  const tabCount: Record<TabId, string> = { status: status.count > 0 ? ` (${status.count})` : "", quarantine: quarantineCount(heldAll.length, removedSkillsOf(ov).length) > 0 ? ` (${quarantineCount(heldAll.length, removedSkillsOf(ov).length)})` : "", trust: "", more: "" };
-  const keptIds = new Set(plan.kept.map((q) => q.id));
+  const tabCount: Record<TabId, string> = { status: status.count > 0 ? ` (${status.count})` : "", quarantine: counts.quarantine > 0 ? ` (${counts.quarantine})` : "", trust: "", more: "" };
+  // What the person has answered or put aside is not «waiting» any more: «Пока вас не было» does not repeat it.
+  const keptIds = new Set([...plan.kept.map((q) => q.id), ...plan.later.flatMap((c) => c.all.map((q) => q.id))]);
   return (
     <DoneContext.Provider value={doneCtx}>
     <ApprovalContext.Provider value={approval}>
@@ -3191,6 +3242,7 @@ function GatePage() {
         <PinnedNotes />
         <TroubleshootBar until={ov.guard?.troubleshootUntil ?? 0} />
         <StatusBar level={status.level} label={status.label} text={guardDown ? GUARD_DOWN_TEXT : status.first ? `Сначала: ${status.first.text}.` : "Всё, что нужно решить, решено."} onShow={status.first ? () => showProblem(status.first!) : null} />
+        {countsLine(counts) ? <p className={`-mt-4 text-xs ${muted}`} data-secure-bb-counts>{countsLine(counts)}</p> : null}
         <div role="tablist" className="flex flex-wrap gap-1 border-b border-border">
           {(["status", "quarantine", "trust", "more"] as const).map((t) => (
             <button key={t} role="tab" aria-selected={tab === t} className={`rounded-t-md px-3 py-1.5 text-sm font-medium ${tab === t ? "border border-b-0 border-border bg-card" : "text-muted-foreground hover:bg-muted"}`} onClick={() => setTab(t)}>
@@ -3215,14 +3267,18 @@ function GatePage() {
             <div id="sbb-guard-alarm"><GuardAlarm ov={ov} /></div>
             <AgentsAlarm ov={ov} onShow={() => showProblem({ anchor: "sbb-agents", tab: agentsTab, text: "" })} />
             <WindowRows windows={ov.windows} cfgWindows={ov.watch.windows} rpc={rpc} refetch={refetch} />
-            <Section title={`Ждут решения вас${plan.active.length > 0 ? ` (${plan.active.length})` : ""}`}>
+            <Section title={`Ждут решения вас${counts.waiting > 0 ? ` (${counts.waiting})` : ""}`}>
               {activeItems.length === 0 ? <div className={`${card} ${muted}`}>Сейчас решать нечего.</div> : activeItems.map((it) => {
                 if (it.stub) {
                   const st = it.stub;
                   return (
                     <div key={`stub:${st.key}`} className="flex items-center justify-between gap-2 rounded-lg border-2 border-green-600/50 bg-green-50 p-4 text-sm font-semibold text-green-900 dark:bg-green-950/40 dark:text-green-100" style={{ minHeight: st.height }} data-secure-bb-stub>
                       <span>{st.text}</span>
-                      <button type="button" className={btn} onClick={() => setStubs((l) => l.filter((x) => x.key !== st.key))}>Скрыть</button>
+                      {st.restore ? (
+                        <button type="button" className={btn} onClick={() => { const r = st.restore!; const e = heldAll.find((x) => x.id === r.id); if (e) onDefer(e, false); else setStubs((l) => l.filter((x) => x.key !== st.key)); }}>{DEFER_STUB_RESTORE}</button>
+                      ) : (
+                        <button type="button" className={btn} onClick={() => setStubs((l) => l.filter((x) => x.key !== st.key))}>Скрыть</button>
+                      )}
                     </div>
                   );
                 }
@@ -3231,7 +3287,7 @@ function GatePage() {
               })}
             </Section>
             {plan.later.length > 0 ? (
-              <Fold id="deferred" summaryClassName="cursor-pointer font-semibold" summary={`Отложено (${plan.later.length})`}>
+              <Fold id="deferred" summaryClassName="cursor-pointer font-semibold" summary={`Отложено (${counts.deferred})`}>
                 <p className={`mt-1 text-xs ${muted}`}>Вы отложили эти карточки кнопкой «Решить позже». Плагины остаются в карантине и не запущены.</p>
                 <div className="mt-2 space-y-2">{laterOrder.order.map((k) => plan.later.find((c) => c.pluginId === k)).filter((c): c is NonNullable<typeof c> => c !== undefined).map((c) => renderCard(c, true))}</div>
               </Fold>

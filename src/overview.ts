@@ -11,6 +11,7 @@ import type { InstalledPluginLite } from "./probe.js";
 import { isThirdParty, runningThirdParty, sessionBlockersFromGuard, type SessionBlocker } from "./probe.js";
 import type { Availability, Scanner } from "./scan/scanner.js";
 import { scanView, type ScanView } from "./scan/view.js";
+import { dropShadowedLocal } from "./ux.js";
 import type { AiSettings } from "./scan/types.js";
 import { normalizeSettings } from "./sentinel/store.js";
 import type { Sentinel } from "./sentinel/sentinel.js";
@@ -304,7 +305,9 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
       });
     }
     // Versions that loaded without the core's hash: kept here (the guard cannot be asked about them), yellow, with their own plain reason.
-    for (const lq of d.store.listQueue(50)) if (lq.kind === "afterfact" && lq.status === "held" && lq.contentHash === null) queue.push({ ...lq, id: -lq.id });
+    // A page-side record of a version the guard already has its own entry for is not shown: the card is built from the guard's entry (one version, one card).
+    const localNoHash = d.store.listQueue(50).filter((lq) => lq.kind === "afterfact" && lq.status === "held" && lq.contentHash === null);
+    for (const lq of dropShadowedLocal(queue.filter((x) => x.kind === "hook"), localNoHash)) queue.push({ ...lq, id: -lq.id });
     for (const lq of d.store.listQueue(50)) {
       if (lq.kind !== "proposal" || lq.status !== "held" || lq.contentHash !== null || lq.proposalId === null) continue;
       const p = d.store.getProposal(lq.proposalId);

@@ -46,8 +46,9 @@ describe("6, 7. the first line says the essence of the risk", () => {
     expect(riskHeadline([cap("env")]).text).toBe("Может читать ваши пароли и токены");
     expect(riskHeadline([cap("env", "env:GITHUB_TOKEN")]).level).toBe("danger");
   });
-  it("files without named paths: documents", () => {
-    expect(riskHeadline([cap("fs", "node:fs")])).toEqual({ level: "danger", text: "Может читать и менять ваши документы" });
+  it("files without named paths: documents only where the code reaches the person's own folders", () => {
+    expect(riskHeadline([cap("fs", "node:fs", "home")])).toEqual({ level: "danger", text: "Может читать и менять ваши документы" });
+    expect(riskHeadline([cap("fs", "node:fs")])).toEqual({ level: "caution", text: "Работает с файлами (какими — из кода не видно)" });
   });
   it("files with named paths are a caution with the paths", () => {
     const r = riskHeadline([{ kind: "fs", detail: ["node:fs"], paths: ["a.json", "b.json", "c.json"] }]);

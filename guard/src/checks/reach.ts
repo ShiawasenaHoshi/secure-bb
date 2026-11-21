@@ -175,3 +175,22 @@ export function entryPoints(root: Record<string, unknown> | null, ctx: GraphCont
     });
   return { entries: [...entries].sort(), dist: dist.sort(), distDerived: derived };
 }
+
+const isPluginPackage = (p: Record<string, unknown> | undefined): boolean => p !== undefined && typeof p.bb === "object" && p.bb !== null;
+const idForm = (x: unknown): string => String(x ?? "").toLowerCase().replace(/^@[^/]+\//, "").replace(/^(bb-plugin-|bb-)/, "");
+/**
+ * Where the plugin lives in the tree the core hands over. A plugin's package.json (with a `bb` part) at the root: the root. Otherwise the tree is a
+ * repository of several plugins (`plugins/notify`, `plugins/agentation`…), and the plugin is the directory whose package.json is the one the core installed
+ * under `pluginId` (the directory's name, the package's name or `bb.id` equal to it); with no id, the only plugin there is. Anything else: "" (the whole tree).
+ */
+export function pluginDirOf(packageJsons: ReadonlyMap<string, Record<string, unknown>>, pluginId?: string): string {
+  if (isPluginPackage(packageJsons.get("package.json"))) return "";
+  const dirs = [...packageJsons]
+    .filter(([rel, p]) => rel.endsWith("/package.json") && !rel.split("/").includes("node_modules") && isPluginPackage(p))
+    .map(([rel, p]) => ({ dir: rel.slice(0, -"/package.json".length), pkg: p }));
+  if (dirs.length === 0) return "";
+  if (!pluginId) return dirs.length === 1 ? dirs[0]!.dir : "";
+  const want = idForm(pluginId);
+  const hit = dirs.filter(({ dir, pkg }) => [posix.basename(dir), pkg.name, (pkg.bb as Record<string, unknown>).id].some((x) => idForm(x) === want));
+  return hit.length === 1 ? hit[0]!.dir : "";
+}

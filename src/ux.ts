@@ -3,6 +3,7 @@
 //
 // Nothing here decides anything about plugins: approving and holding stay with the guard. These functions choose what to SHOW.
 import type { TrustMode } from "./guardlink.js";
+import { FS_HOME, UI_CLICK_ANSWERS, UI_CLICK_GATE, UI_CLICK_NAV } from "./checks/sdk-rights.js";
 
 // ---- modes ------------------------------------------------------------------------------------------------------------------
 export interface DetailLevel {
@@ -202,7 +203,9 @@ export function capabilityPhrase(c: CapLike): string {
     case "fs":
       return c.paths && c.paths.length > 0
         ? `читать и писать файлы (в коде названы: ${c.paths.slice(0, 3).join(", ")}${c.paths.length > 3 ? ", …" : ""}; остальное из кода не видно)`
-        : "читать и писать любые файлы, к которым у bb есть доступ — в том числе ваши документы";
+        : c.detail.includes(FS_HOME)
+        ? "читать и писать любые файлы, к которым у bb есть доступ — в том числе ваши документы (в коде есть ваша домашняя папка или «Документы»)"
+        : "работать с файлами (какими именно — из кода не видно)";
     case "dynamic_code":
       return "выполнять код, собранный на лету";
     case "ui":
@@ -219,6 +222,22 @@ export function capabilityPhrase(c: CapLike): string {
       return "получать расширенный доступ к серверу bb";
     case "database":
       return "хранить свои настройки и данные в bb";
+    case "sdk_read":
+      return "читать ваши переписки с агентами в bb (что вы и агенты пишете в тредах)";
+    case "sdk_meta":
+      return "знать названия и состояние ваших тредов (когда агенты начинают и заканчивают), но не то, что в них написано";
+    case "sdk_questions":
+      return "видеть, какие вопросы и запросы разрешений агенты задают";
+    case "sdk_agents":
+      return "запускать, останавливать и архивировать агентов";
+    case "sdk_send":
+      return "отправлять сообщения в ваши переписки от вашего имени";
+    case "sdk_answer":
+      return "отвечать на вопросы и запросы разрешений агентов за вас";
+    case "sdk_settings":
+      return "менять настройки bb: ставить и включать плагины, задавать переменные окружения";
+    case "ui_click":
+      return uiClickLine(c).phrase;
     default:
       return "использовать возможность «" + c.kind + "»";
   }
@@ -731,11 +750,28 @@ export interface HeldLike {
   pluginId: string;
   version: string;
   contentHash: string | null;
+  /** When the entry first appeared: a mark made BEFORE this is about an earlier entry of the same number (the data was reset), not about this one. */
+  firstSeen?: number;
 }
 export type CardDecision = "open" | "deferred" | "kept";
+/** A mark as the page stores it: the key, and when the person made it (`key@ms`). */
+export const stampMark = (key: string, at: number): string => `${key}@${Math.round(at)}`;
+/** The marks that stand for `key`: a stamped one counts only if it was made at or after `since` (when the entry appeared); an unstamped (older) one always counts. */
+export function hasMark(list: string[], key: string, since?: number): boolean {
+  return list.some((m) => {
+    if (m === key) return true;
+    if (!m.startsWith(`${key}@`)) return false;
+    const at = Number(m.slice(key.length + 1));
+    return !Number.isFinite(at) || since === undefined || at >= since;
+  });
+}
+/** The list without the marks of `key` (stamped or not). */
+export const withoutMark = (list: string[], key: string): string[] => list.filter((m) => m !== key && !m.startsWith(`${key}@`));
+/** The stored list with the old unstamped marks dropped: they cannot be told from a mark about an entry of an earlier data set. Only marks the person made on this version of the page stay. */
+export const dropUnstamped = (list: string[]): string[] => list.filter((m) => /@\d+$/.test(m));
 export const decisionOf = (e: HeldLike, d: Decisions): CardDecision => {
   const k = deferKey(e.pluginId, e.contentHash, e.id);
-  return d.kept.includes(k) ? "kept" : d.deferred.includes(k) ? "deferred" : "open";
+  return hasMark(d.kept, k, e.firstSeen) ? "kept" : hasMark(d.deferred, k, e.firstSeen) ? "deferred" : "open";
 };
 /** Dotted versions compared by number («0.0.10» after «0.0.9»); what is not a number compares as text. Negative: a before b. */
 export function compareVersions(a: string, b: string): number {
@@ -1210,12 +1246,49 @@ export interface Risk {
   level: RiskLevel;
   /** One plain line: the essence of what the plugin can do. */
   text: string;
+  /** The line sends the person to the technical part of the card: it is shown open then. */
+  look?: boolean;
 }
 const SAFE_KINDS = new Set(["ui", "database"]);
 /**
  * The first line of a card: what the worst thing the plugin can do means for a person. `caps` are the rights worth showing (`meaningfulCaps`);
  * `reviewRules` the rules of the checks that asked for a look (only `agent-config`, a folder of settings the plugin does not apply itself, does not spoil «безопасно»).
  */
+/** The rights of bb's own API and of pressing bb's buttons, worst first, each in the words of the card. */
+const SDK_LINES: Array<{ kind: string; danger: boolean; text: string }> = [
+  { kind: "sdk_answer", danger: true, text: "отвечает на вопросы агентов за вас" },
+  { kind: "ui_click", danger: false, text: "может нажимать элементы интерфейса bb" },
+  { kind: "sdk_send", danger: true, text: "отправляет сообщения от вашего имени" },
+  { kind: "sdk_agents", danger: true, text: "может запускать и останавливать агентов" },
+  { kind: "sdk_settings", danger: true, text: "меняет настройки bb" },
+  { kind: "sdk_read", danger: false, text: "читает ваши переписки в bb" },
+  { kind: "sdk_questions", danger: false, text: "видит, какие вопросы агенты задают" },
+  { kind: "sdk_meta", danger: false, text: "знает названия и состояние ваших тредов (когда агенты начинают и заканчивают)" },
+];
+/**
+ * What a plugin that presses elements of bb's page presses, by where its code goes for them: the buttons of an agent's question (answers for the
+ * person: red), the protection's own buttons or a target the code hides next to words of approval (red), a row or a link of the navigation (opens a thread
+ * or a section: soft yellow), anything else (yellow).
+ */
+export function uiClickLine(c: CapLike): { danger: boolean; text: string; phrase: string } {
+  const has = (d: string): boolean => c.detail.includes(d);
+  if (has(UI_CLICK_GATE)) return { danger: true, text: "может нажимать кнопки защиты secure-bb и «Разрешить» за вас", phrase: "нажимать кнопки защиты secure-bb и «Разрешить» за вас (кнопки защиты ещё требуют код, но плагин может нажать и их)" };
+  if (has(UI_CLICK_ANSWERS)) return { danger: true, text: "отвечает на вопросы агентов за вас (нажимает кнопки их виджета)", phrase: "отвечать на вопросы агентов за вас: плагин находит виджет вопроса на странице и нажимает «Next» или «Submit»" };
+  if (has(UI_CLICK_NAV) && !has("target:other")) return { danger: false, text: "открывает треды и разделы bb за вас", phrase: "открывать треды и разделы bb за вас (нажимает на строки списка и ссылки)" };
+  return { danger: false, text: "может нажимать элементы интерфейса bb", phrase: "нажимать элементы интерфейса bb за вас (какие именно — из кода видно не всегда)" };
+}
+/** The first line for a plugin that uses bb's own API or presses bb's buttons; null when it does neither. «Безопасно: только оформление» is never said of it. */
+export function sdkHeadline(caps: CapLike[]): Risk | null {
+  const mine = SDK_LINES.filter((l) => caps.some((c) => c.kind === l.kind));
+  if (mine.length === 0) return null;
+  const click = caps.find((c) => c.kind === "ui_click");
+  const lines = mine.map((l) => (l.kind === "ui_click" && click ? { ...l, danger: uiClickLine(click).danger, text: uiClickLine(click).text } : l));
+  const sendsOut = caps.some((c) => c.kind === "network");
+  const danger = lines.some((l) => l.danger) || (lines.some((l) => l.kind === "sdk_read") && sendsOut);
+  const shown = lines.slice(0, 3).map((l) => l.text);
+  const text = shown.join("; ") + (lines.length > 3 ? `; и ещё ${lines.length - 3}` : "");
+  return { level: danger ? "danger" : "caution", text: text.charAt(0).toUpperCase() + text.slice(1) };
+}
 export function riskHeadline(caps: CapLike[], reviewRules: string[] = []): Risk {
   const has = (k: string): CapLike | undefined => caps.find((c) => c.kind === k);
   // Other programs' logins come first and are said outright: that is more than any variable of the environment. Red when the plugin can also send it out.
@@ -1227,9 +1300,13 @@ export function riskHeadline(caps: CapLike[], reviewRules: string[] = []): Risk 
     if (names.length === 0 || names.includes("*") || names.some((n) => SECRETISH.test(n))) return { level: "danger", text: "Может читать ваши пароли и токены" };
   }
   const fs = has("fs");
-  if (fs && !(fs.paths && fs.paths.length > 0)) return { level: "danger", text: "Может читать и менять ваши документы" };
+  // «Ваши документы» only where the code reaches the person's own folders; files the code does not name are said as what they are: not known.
+  if (fs && !(fs.paths && fs.paths.length > 0) && fs.detail.includes(FS_HOME)) return { level: "danger", text: "Может читать и менять ваши документы" };
   if (has("server_access") || has("builtin_rpc")) return { level: "danger", text: "Может управлять самим bb: аккаунтом, подключениями, инструкциями" };
-  if (fs) return { level: "caution", text: `Может читать и менять файлы: ${fs.paths!.slice(0, 2).join(", ")}${fs.paths!.length > 2 ? ", …" : ""}` };
+  const sdk = sdkHeadline(caps);
+  if (sdk) return sdk;
+  if (fs && fs.paths && fs.paths.length > 0) return { level: "caution", text: `Может читать и менять файлы: ${fs.paths.slice(0, 2).join(", ")}${fs.paths.length > 2 ? ", …" : ""}` };
+  if (fs) return { level: "caution", text: "Работает с файлами (какими — из кода не видно)" };
   const child = has("child_process");
   if (child) {
     const names = [...new Set((child.programs ?? []).map(programName))];
@@ -1244,7 +1321,7 @@ export function riskHeadline(caps: CapLike[], reviewRules: string[] = []): Risk 
   }
   if (has("http_routes")) return { level: "caution", text: "Может открывать свои адреса на сервере bb" };
   if (env) return { level: "caution", text: "Может узнавать некоторые сведения о вашем компьютере (имя пользователя, язык)" };
-  if (caps.some((c) => !SAFE_KINDS.has(c.kind)) || reviewRules.some((r) => r !== "agent-config")) return { level: "caution", text: "Похоже на оформление, но в коде есть особенности: откройте «Подробнее»" };
+  if (caps.some((c) => !SAFE_KINDS.has(c.kind)) || reviewRules.some((r) => r !== "agent-config")) return { level: "caution", text: "Похоже на оформление, но в коде есть особенности: они перечислены в «Технических подробностях» ниже", look: true };
   return { level: "safe", text: "Безопасно: только оформление — ничего не читает" };
 }
 /** The main button of a yellow card: a harmless plugin is simply switched on. */
@@ -1263,6 +1340,8 @@ export interface Stub {
   key: string;
   text: string;
   height: number;
+  /** A stub of a card put aside: the entry to bring back («Вернуть»). Absent on the «Готово» stub of a decided card. */
+  restore?: { id: number; pluginId: string; version: string; contentHash: string | null };
 }
 export const MIN_STUB_HEIGHT = 56;
 export function makeStub(key: string, what: string, height: number): Stub {
@@ -1313,3 +1392,137 @@ export function secondFactorText(i: { codes: boolean; keys: number }): string {
   return "Второй фактор ещё не настроен.";
 }
 export const AWAY_HIDE_LABEL = "Понятно, скрыть";
+
+// ---- round 5 -------------------------------------------------------------------------------------------------------------------
+
+// ---- findings in a person's words ------------------------------------------------------------------------------------------------
+/** What a check that asks for a look says, in a sentence (the rules that stop a version have their own, in `RED`). */
+const REVIEW_TEXT: Record<string, string> = {
+  "dynamic-access": "код обращается к функциям по имени, собранному на лету: что именно он вызывает, из кода не видно",
+  "require-alias": "код подключает модули непрямым способом, который трудно проследить",
+  "module-load": "код подгружает модули внутренним способом bb",
+  "dynamic-constructor": "код создаёт функции из текста",
+  "global-proxy": "код подменяет глобальные объекты",
+  webassembly: "в плагине есть скомпилированный код (WebAssembly)",
+  "native-load": "плагин загружает готовую программу",
+  "unknown-builtin": "плагин использует системный модуль, которого проверки не знают",
+  "secret-path": "в коде упомянуты файлы с паролями или ключами",
+  "secret-literal": "в коде есть строка, похожая на пароль или ключ",
+  "secret-reference": "в коде упомянуты пароли или ключи",
+  "env-secret-network": "плагин читает переменные с паролями и умеет выходить в сеть",
+  "env-passed": "плагин передаёт все переменные окружения другой функции",
+  "parse-failed": "часть кода не удалось разобрать: проверить её нечем",
+  "limit-exceeded": "проверка не смогла просмотреть всё: файлов или кода слишком много",
+  "file-too-large": "один из файлов слишком большой, чтобы его проверить",
+  "executable-file": "в плагине лежит исполняемый файл",
+  "sdk-unclassified": "плагин обращается к частям bb, которых проверки не знают",
+  "bad-package-json": "описание плагина (package.json) составлено неправильно",
+  "workspace-dependency": "плагин зависит от соседней папки, а не от опубликованного пакета",
+  "dep-lookalike": "название одного из пакетов похоже на название известного: так подделывают пакеты",
+  "dep-modified": "один из пакетов отличается от того, что лежит в реестре npm",
+  "dep-name-mismatch": "название пакета не совпадает с тем, под которым он лежит",
+  "dep-young": "один из пакетов выпущен меньше трёх дней назад",
+  "external-script-link": "страница плагина подключает скрипт из интернета",
+  "injection-phrase": "в тексте есть фраза, которой пытаются управлять агентом",
+  "network-command": "в тексте есть команда, которая ходит в сеть",
+  "too-large": "файл слишком большой для проверки",
+};
+const NOT_SHOWN_RULES = new Set(["ignored-findings", "unreachable-files", "dep-content-unverified", "parse-note", "config-path", "shell-pipe-string", "agent-config"]);
+export interface FindingLine {
+  /** One sentence in Russian. */
+  text: string;
+  severity: "block" | "review";
+  /** Where, at most three places. */
+  where: string[];
+  /** How many places in all. */
+  count: number;
+}
+/**
+ * The findings a person is told of: only those that matter (a version is stopped, or a look is asked for), grouped by what they say, in Russian. What is only
+ * noted («info»), the book-keeping of the checks («not scanned»), and the raw rule names stay in the developer's fold.
+ */
+export function significantFindings(findings: Array<{ rule: string; severity: string; file: string; line: number }>): FindingLine[] {
+  const by = new Map<string, FindingLine>();
+  for (const f of findings) {
+    if ((f.severity !== "block" && f.severity !== "review") || NOT_SHOWN_RULES.has(f.rule)) continue;
+    const text = f.severity === "block" ? (RED[f.rule]?.title ?? RED_FALLBACK.title) : (REVIEW_TEXT[f.rule] ?? "проверка нашла особенность в коде");
+    const key = `${f.severity}|${text}`;
+    const e = by.get(key) ?? { text: text.charAt(0).toUpperCase() + text.slice(1), severity: f.severity, where: [], count: 0 };
+    e.count++;
+    const place = f.file ? `${f.file}${f.line ? `:${f.line}` : ""}` : "";
+    if (place !== "" && e.where.length < 3 && !e.where.includes(place)) e.where.push(place);
+    by.set(key, e);
+  }
+  return [...by.values()].sort((a, b) => (a.severity === b.severity ? b.count - a.count : a.severity === "block" ? -1 : 1));
+}
+/** The fold's summary on a card: what the findings come to, in the same terms as the card's colour. */
+export function checksSummary(lines: FindingLine[], capabilities: number): string {
+  const n = lines.reduce((x, l) => x + l.count, 0);
+  const things = lines.length === 0 ? "значимых находок нет" : `${n} ${plural(n, "находка", "находки", "находок")} (${lines.length} ${plural(lines.length, "вид", "вида", "видов")})`;
+  return `Проверки: ${things} · возможностей: ${capabilities}`;
+}
+
+// ---- one set of counts for the whole page ---------------------------------------------------------------------------------------
+export interface PageCounts {
+  /** Cards that wait for the person (open ones). Titles: «Ждут решения вас (N)». */
+  waiting: number;
+  /** Cards the person put aside themselves. «Отложено (N)». */
+  deferred: number;
+  /** The watchers' alarms (an alarm counts once per change). */
+  alarms: number;
+  /** What «Требует внимания (N)» and the tab «Статус (N)» say: waiting + deferred + alarms. */
+  attention: number;
+  /** Plugins held in quarantine (one per plugin, not per version): the tab «Карантин (N)». Kept, deferred and open ones, and removed skills. */
+  quarantine: number;
+  /** Kept in quarantine by the person: decided, not in the status. */
+  kept: number;
+}
+/** Every number on the page from ONE plan of cards, so that they cannot disagree. */
+export function pageCounts(plan: { active: unknown[]; later: unknown[]; kept: unknown[] }, alarms: number, removedSkills: number): PageCounts {
+  const waiting = plan.active.length;
+  const deferred = plan.later.length;
+  const kept = plan.kept.length;
+  return { waiting, deferred, alarms, attention: waiting + deferred + alarms, quarantine: waiting + deferred + kept + removedSkills, kept };
+}
+/** «Ждут вас: 14 · отложено: 1 · тревог: 2»: where the number of the status comes from. Empty when there is nothing to add up. */
+export function countsLine(c: PageCounts): string {
+  const parts = [c.waiting > 0 ? `ждут вас: ${c.waiting}` : "", c.deferred > 0 ? `отложено вами: ${c.deferred}` : "", c.alarms > 0 ? `тревог: ${c.alarms}` : ""].filter(Boolean);
+  return parts.length > 1 ? `Из чего число: ${parts.join(" · ")}.` : "";
+}
+
+// ---- «Решить позже» leaves a stub, not a hole ------------------------------------------------------------------------------------
+export interface DeferStubSource {
+  id: number;
+  pluginId: string;
+  version: string;
+  contentHash: string | null;
+}
+/** The stub that stands where a card was put aside: the card's height, «Отложено: X · Вернуть». The next card does not slide under the cursor. */
+export function makeDeferStub(q: DeferStubSource, height: number): Stub {
+  return { key: q.pluginId, text: `Отложено: ${q.pluginId} ${q.version}`, height: Number.isFinite(height) ? Math.max(MIN_STUB_HEIGHT, Math.round(height)) : MIN_STUB_HEIGHT, restore: { id: q.id, pluginId: q.pluginId, version: q.version, contentHash: q.contentHash } };
+}
+export const DEFER_STUB_RESTORE = "Вернуть";
+
+// ---- the delete question: one place, one order -----------------------------------------------------------------------------------
+/** The buttons of «Удалить плагин …?», in the order they are always drawn, on their own line under the question. */
+export const DELETE_CONFIRM_BUTTONS = ["Да, удалить", "Нет"] as const;
+
+// ---- a held version without a record at the guard ----------------------------------------------------------------------------------
+/** The page's own record of a version that loaded without the guard's check: it has no core hash, so it cannot be approved by hash. */
+export const hasNoGuardRecord = (q: { kind: string; contentHash: string | null }): boolean => q.kind === "afterfact" && q.contentHash === null;
+export const NO_RECORD_HEADLINE = "Эту версию нельзя разрешить здесь: защита её не проверяла";
+export const NO_RECORD_LINE = "Плагин загрузился в обход проверки, поэтому одобрить его по отпечатку нельзя. Исправляется так: удалите эту версию и поставьте плагин заново через «bb secure-bb propose» — тогда защита проверит его и карточка станет обычной.";
+export const NO_RECORD_FIX = "Удалить, чтобы поставить заново";
+/**
+ * In guard mode the card of a version comes from the guard's own record. A page-side record of the same version (it has no core hash) is dropped when
+ * the guard has one; otherwise two cards would stand for one version, and the one without the hash would say «Включить» where nothing can be enabled.
+ */
+export function dropShadowedLocal<T extends { pluginId: string; version: string }>(guardEntries: Array<{ pluginId: string; version: string }>, local: T[]): T[] {
+  const have = new Set(guardEntries.map((g) => `${g.pluginId}\0${g.version}`));
+  return local.filter((l) => !have.has(`${l.pluginId}\0${l.version}`));
+}
+
+// ---- restoring while a session is open --------------------------------------------------------------------------------------------
+/** Under «Вернуть как было»: a session does not cover it (it changes the agent's files), and the card says so. */
+export const RESTORE_FRESH_CODE = "Нужен свежий код: меняются файлы агента — сессия здесь не помогает.";
+export const restoreNote = (sessionOpen: boolean): string | null => (sessionOpen ? RESTORE_FRESH_CODE : null);
