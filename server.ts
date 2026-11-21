@@ -13,6 +13,7 @@ import {
   experimental_PluginRpcRefusal,
   type BbPluginApi,
 } from "@get-bb/plugin-sdk";
+import { Alive } from "./src/alive.js";
 import { BatchService, type BatchSource } from "./src/batch.js";
 import type { Proof } from "./src/approval.js";
 import { AfterFactScanner } from "./src/afterfact.js";
@@ -26,7 +27,8 @@ import { BLOCKED_REASON, bySeverity } from "./src/decision.js";
 import { Gate, GateError, UNSAFE_DIR_REASON, type HookCtx, type ThreadTree } from "./src/gate.js";
 import { buildOverview } from "./src/overview.js";
 import { collectProbe, isThirdParty, runningThirdParty, type InstalledPluginLite } from "./src/probe.js";
-import { formatReport, runChecks } from "./src/checks/index.js";
+import { runChecks } from "./src/checks/index.js";
+import { checkPathRefusal, checkSummary } from "./src/checkpath.js";
 import type { FetchLike } from "./src/deps/registry.js";
 import { verifyDependencies } from "./src/deps/verify.js";
 import { fileAnchor, agentLine, type JournalReport } from "./src/journal.js";
@@ -56,7 +58,8 @@ export type SecureBbRpc = typeof rpcContract;
 
 const SWEEP_MS = 15_000;
 const PAGE_PING_TTL_MS = 45_000;
-const AFTER_FACT_MS = 60_000;
+/** Plugins the hook did not vet are scanned this often: their code is already running, so every second counts. */
+const SCAN_TICK_MS = 5_000;
 const WATCH_MS = 60_000;
 const WATCH_DEBOUNCE_MS = 1_500;
 
@@ -198,14 +201,32 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   // ---- the hook ----------------------------------------------------------
+  // Registered exactly once. `on()` not throwing is not proof that the core will ever call the handler: a bb without the patch
+  // refuses it with a misleading message (its SDK reports "already registered" for a hook name it does not know), and another
+  // could accept any name silently. A plugin that runs has, on a bb that works, been through the hook first, so the handler
+  // records every plugin id it is asked about (`hookSeen`). The scanner below (every few seconds, in both modes) looks at the
+  // plugins that are running, enabled and that the hook never mentioned: on a bb with a working hook there are none; on one
+  // without it, each such plugin is held at once and the first of them declares the hook dead (`hookRegistered` turns false,
+  // with a journal record and an error in the plugin log, and the page says "after the fact").
   let hookRegistered = false;
+  const hookSeen = new Set<string>();
   try {
-    bb.experimental_hooks.on("plugin.activate", (ctx) => gate.decide(ctx as HookCtx));
+    bb.experimental_hooks.on("plugin.activate", (ctx) => {
+      hookSeen.add((ctx as HookCtx).pluginId);
+      return gate.decide(ctx as HookCtx);
+    });
     hookRegistered = true;
-    bb.log.info("plugin.activate hook registered: gating before load");
+    bb.log.info("plugin.activate hook registered: gating before load (confirmed per plugin when the core asks about it)");
   } catch (err) {
     bb.log.warn(`no plugin.activate hook in this bb; running after-the-fact (${err instanceof Error ? err.message : String(err)})`);
   }
+  const declareHookDead = (ids: string[]): void => {
+    if (!hookRegistered) return;
+    hookRegistered = false;
+    store.log("hook.dead", null, null, { plugins: ids.slice(0, 10), note: "the hook was accepted but never called for a running plugin; after-the-fact mode" });
+    bb.log.error(`plugin.activate was accepted but never called for ${ids.join(", ")}; treating this bb as having no hook (after the fact)`);
+    changed();
+  };
   const recheck = () => {
     if (hookRegistered) void bb.experimental_hooks.recheck("plugin.activate").catch((e) => bb.log.warn(`recheck failed: ${String(e)}`));
   };
@@ -237,6 +258,13 @@ export default async function plugin(bb: BbPluginApi) {
   // Every provider's approval card arrives as this one event. The handler only records and scores: it never answers a card.
   bb.events.on("interaction.pending", (payload) => sentinel.handle(payload));
 
+  const safeDataDir = (): string | null => {
+    try {
+      return bb.server.experimental_dataDir;
+    } catch {
+      return null;
+    }
+  };
   const probe = () =>
     collectProbe({
       hookRegistered,
@@ -290,8 +318,11 @@ export default async function plugin(bb: BbPluginApi) {
     return journalReport;
   };
   journal(true);
+  // The mark of life (threat model X3): written every tick; a gap at start, or bb's safe-mode, is an alarm on the page and a journal record.
+  const alive = new Alive({ store, now, safeMode: () => watchSource.safeMode().catch(() => null), log: (m) => bb.log.error(m) });
+  if ((await alive.start()) !== null) changed();
   const overview = () =>
-    buildOverview({ sentinel, scanner: aiScanner, publisher, store, gate, now, hookRegistered, listPlugins, probe, descendants: threads.descendants, watch, skills: skillGuard, journal: () => journal(), taintedThreads: () => store.taintedThreads(20) });
+    buildOverview({ alive, sentinel, scanner: aiScanner, publisher, store, gate, now, hookRegistered, listPlugins, probe, descendants: threads.descendants, watch, skills: skillGuard, journal: () => journal(), taintedThreads: () => store.taintedThreads(20) });
 
   // ---- after-the-fact mode ------------------------------------------------
   const scanner = new AfterFactScanner({
@@ -304,6 +335,9 @@ export default async function plugin(bb: BbPluginApi) {
     hashDir: hashTree,
     now,
     log: (m) => bb.log.warn(m),
+    // asked about by the hook since this start, or approved earlier (the plugin was reloaded and the in-memory set is empty)
+    vetted: (id) => hookRegistered && (hookSeen.has(id) || store.latestApproval(id) !== null),
+    onUnvetted: (ids) => declareHookDead(ids),
   });
 
   // ---- approving a held version (one code, a session, or one code for a whole list) ----------------------------------
@@ -431,13 +465,13 @@ export default async function plugin(bb: BbPluginApi) {
       changed();
       return { ok: true as const };
     }),
-    "window.close": wrap(({ windowId, code, session }) => {
-      gate.closeWindow(windowId, gate.proofFor("window.close", { code, session }));
+    "window.close": wrap(({ windowId }) => {
+      gate.closeWindow(windowId);
       changed();
       return { ok: true as const };
     }),
-    "approval.revoke": wrap(async ({ approvalId, code, session }) => {
-      const a = gate.revoke(approvalId, gate.proofFor("approval.revoke", { code, session }));
+    "approval.revoke": wrap(async ({ approvalId }) => {
+      const a = gate.revoke(approvalId);
       try {
         await bb.sdk.plugins.disable({ pluginId: a.pluginId });
       } catch (err) {
@@ -476,8 +510,8 @@ export default async function plugin(bb: BbPluginApi) {
       changed();
       return { ok: true as const };
     }),
-    "watch.window.close": wrap(async ({ windowId, code, session }) => {
-      await watch.closeWindow(windowId, gate.proofFor("watch.window.close", { code, session }));
+    "watch.window.close": wrap(async ({ windowId }) => {
+      await watch.closeWindow(windowId);
       changed();
       return { ok: true as const };
     }),
@@ -683,18 +717,24 @@ export default async function plugin(bb: BbPluginApi) {
           },
         }),
         check: cliCommand({
-          summary: "Run the checks on a plugin directory without installing it (dependencies are looked up on the npm registry by the server)",
+          summary: "Run the checks on a plugin directory without installing it; prints a summary only (details are for the page). Not for bb's own data or directories private to the server user",
           positionals: [{ name: "path", description: "Plugin directory on this machine", required: true }],
           options: {},
           async run(input, ctx) {
             const dir = resolvePath(ctx.cwd ?? process.cwd(), input.positionals.path);
+            // Runs as the server's user: not for bb's own data or what is private to that user (threat model F9). The reason stays in the log.
+            const refused = checkPathRefusal(dir, { dataDir: safeDataDir(), serverUid: typeof process.getuid === "function" ? process.getuid() : null });
+            if (refused !== null) {
+              store.log("check.refused", null, null, { reason: refused });
+              throw new PluginCliError("this directory cannot be checked from here", { code: "check_refused" });
+            }
             let result;
             try {
               result = await verifyDeps(await runChecks(dir));
             } catch (err) {
               throw new PluginCliError(`cannot check ${dir}: ${err instanceof Error ? err.message : String(err)}`, { code: "check_failed" });
             }
-            return { exitCode: 0, stdout: formatReport(result) };
+            return { exitCode: 0, stdout: checkSummary(result) };
           },
         }),
         watchman: cliCommand({
@@ -760,7 +800,23 @@ export default async function plugin(bb: BbPluginApi) {
           timer = setTimeout(fn, WATCH_DEBOUNCE_MS);
         };
       };
-      const scanAfterFact = () => void scanner.scan().then((d) => d.length && changed()).catch((e) => bb.log.error(String(e)));
+      const scanAfterFact = () =>
+        void scanner
+          .scan()
+          .then((d) => {
+            if (d.length > 0) {
+              bb.log.warn(`after the fact: disabled ${d.join(", ")}`);
+              changed();
+            }
+          })
+          .catch((e) => {
+            bb.log.error(`after-the-fact scan failed: ${String(e)}`);
+            try {
+              store.log("afterfact.error", null, null, { message: String(e instanceof Error ? e.message : e).slice(0, 300) });
+            } catch {
+              /* the journal must not hide the error above */
+            }
+          });
       const scanConfig = () =>
         void watch
           .scan()
@@ -778,6 +834,7 @@ export default async function plugin(bb: BbPluginApi) {
           event: "system:changed",
           callback: (event) => {
             if (!hookRegistered && event.changes?.includes("plugins-changed")) kickAfterFact();
+            if (event.changes?.includes("plugins-changed")) void gate.closeSessionsForThirdParty().then((r) => (r.length > 0 ? changed() : undefined)).catch((e) => bb.log.warn(`session guard failed: ${String(e)}`));
             if (event.changes?.includes("plugins-changed") || event.changes?.includes("config-changed")) kickConfig();
           },
         });
@@ -799,31 +856,55 @@ export default async function plugin(bb: BbPluginApi) {
       } catch (err) {
         bb.log.warn(`cannot subscribe to thread changes (windows are then checked once a tick): ${String(err)}`);
       }
+      // The baseline (what was here before us) is taken at once, in either mode, before anything can be installed behind our back:
+      // if the hook turns out to be dead later, whatever is not in it is new. It reads no code, so it is fast.
+      try {
+        await scanner.snapshotBaseline();
+      } catch (e) {
+        bb.log.error(`baseline failed: ${String(e)}`);
+      }
       if (!hookRegistered) kickAfterFact();
       kickConfig();
-      let lastScan = now();
       let lastWatch = now();
-      while (!signal.aborted) {
-        await sleep(SWEEP_MS, signal);
-        if (signal.aborted) break;
+      // Every task of a tick is isolated: one that throws (a sentinel call, a journal check) must not starve the others,
+      // the after-the-fact scan above all (it did, once: the scan came last in the tick).
+      const task = async (name: string, fn: () => unknown): Promise<void> => {
         try {
+          await fn();
+        } catch (err) {
+          bb.log.error(`${name} failed: ${String(err)}`);
+        }
+      };
+      let lastSlow = now();
+      while (!signal.aborted) {
+        // Short tick: a plugin the hook did not vet is already running and should be stopped within seconds.
+        await sleep(SCAN_TICK_MS, signal);
+        if (signal.aborted) break;
+        await task("scan of plugins the hook did not vet", async () => {
+          if ((await scanner.scan()).length > 0) changed();
+        });
+        if (now() - lastSlow < SWEEP_MS) continue;
+        lastSlow = now();
+        await task("heartbeat", () => alive.beat());
+        await task("window sweep", () => {
           if (gate.sweep() > 0) changed();
           if (gate.sweepSessions() > 0) changed();
           if (watch.sweep() > 0) changed();
+        });
+        await task("session guard", async () => {
+          if ((await gate.closeSessionsForThirdParty()).length > 0) changed();
+        });
+        await task("taint sweep", () => {
           if (gate.openWindows().length > 0 || watch.openWindows().length > 0) sweepTaint();
-          await sentinel.refreshOutcomes();
-          journal(now() - journalReport.checkedAt > 60_000);
-          if (!hookRegistered && now() - lastScan >= AFTER_FACT_MS) {
-            lastScan = now();
-            if ((await scanner.scan()).length > 0) changed();
-          }
+        });
+        await task("sentinel outcomes", () => sentinel.refreshOutcomes());
+        await task("journal", () => journal(now() - journalReport.checkedAt > 60_000));
+        await task("config scan", () => {
           if (now() - lastWatch >= WATCH_MS) {
             lastWatch = now();
             scanConfig();
           }
-        } catch (err) {
-          bb.log.error(`watch tick failed: ${String(err)}`);
-        }
+        });
       }
       unsubscribe?.();
       unsubscribeThreads?.();
@@ -831,6 +912,11 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   bb.onDispose(() => {
-    // The database handle is closed by the host; nothing else is held.
+    // The database handle is closed by the host; the only thing left is the note that this was an orderly stop.
+    try {
+      alive.stop();
+    } catch {
+      /* the database may already be closed */
+    }
   });
 }

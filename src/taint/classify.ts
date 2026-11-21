@@ -43,7 +43,17 @@ export const NOT_OBSERVED: readonly string[] = [
 
 const URL_RE = /\b(?:https?|ssh|git|ftp):\/\/\S+|\bgit@[\w.-]+:\S+/i;
 const GIT_REMOTE_VERBS = /\bgit\b(?:\s+-[-\w]+(?:[= ]\S+)?)*\s+(clone|fetch|pull|ls-remote|submodule\s+add|remote\s+add|remote\s+set-url)\b/i;
-const GH_REPO = /\bgh\s+(?:repo\s+(?:clone|fork)|pr\s+checkout|pr\s+diff|issue\s+view|release\s+download|api)\b/i;
+const GH_REPO = /\bgh\s+(?:repo\s+(?:clone|fork)|release\s+download|api)\b/i;
+/**
+ * What other people wrote: issues, pull requests, comments, discussions. Reading it is pollution even from a trusted
+ * repository: the repository is trusted, the text of whoever commented on it is not (threat model F10).
+ */
+const GH_PEOPLE_TEXT = /\bgh\s+(?:issue\s+(?:view|list|status|develop)|pr\s+(?:view|list|status|diff|checks|checkout)|discussion|search|gist\s+view)\b|--comments\b|\bgh\s+api\b[^|;&]*\b(?:issues|pulls|comments|discussions|reviews)\b/i;
+/** A command word that fetches from the network by itself, whatever the address looks like (`curl "$URL"`). */
+const WEB_BINS = new Set(["curl", "wget", "http", "https", "xh", "aria2c", "lynx", "w3m", "links"]);
+/** Interpreters that run code given on the command line: `node -e`, `python -c`, `perl -e`, `ruby -e`. */
+const INLINE_SCRIPT = /(?:^|[\s/])(?:node|nodejs|bun|deno|python[\d.]*|perl|ruby|php)\b(?:\s+-[-\w]+(?:=\S+)?)*?\s+(?:-e|-c|-E|-p|--eval|--print|-r)\b/;
+const NET_IN_SCRIPT = /\b(?:https?|wss?|ftp):\/\/|\b(?:fetch|urlopen|urllib|requests|httpx|aiohttp|http\.client|https?\.(?:get|request)|XMLHttpRequest|axios|net\.connect|socket|Net::HTTP|open-uri|LWP|URI\.open|curl_init|file_get_contents)\b/i;
 const SHELL_WEB = /\b(curl|wget|http|https|xh|aria2c)\b(?=[^|;&]*\b(?:https?:\/\/|ftp:\/\/))/i;
 const SKILL_INSTALL = /\bbb\s+skills?\s+install\b|\bnpx\s+(?:-y\s+)?skills(?:@\S+)?\s+add\b|\bskills\.sh\b/i;
 const SKILL_DIR = /(?:^|[\s/"'=])\.(?:claude|agents|bb)\/skills\b/;
@@ -51,6 +61,14 @@ const WRITE_VERB = /\b(cp|mv|ln|tee|rsync|unzip|tar|curl|wget|install|mkdir)\b|>
 
 const record = (v: unknown): Record<string, unknown> | null => (v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null);
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
+
+/** The program a simple command runs: leading `VAR=x`, `sudo`, `env`, `command`, `time`, `nohup` skipped, path stripped. */
+function commandWord(seg: string): string {
+  const words = seg.trim().split(/\s+/);
+  let i = 0;
+  while (i < words.length && (/^[A-Za-z_]\w*=/.test(words[i]!) || /^(sudo|env|command|time|nohup|exec|builtin)$/.test(words[i]!))) i++;
+  return (words[i] ?? "").replace(/^["'(]+|["')]+$/g, "").split("/").pop()!.toLowerCase();
+}
 
 function hostOf(url: string): string {
   try {
@@ -89,11 +107,17 @@ export function classifyItem(item: Record<string, unknown>, trustedRepos: readon
       if (SKILL_DIR.test(cmd) && WRITE_VERB.test(cmd)) return { kind: "skill", note: "запись в каталог скиллов" };
       // Repositories: per simple command, so `git clone <trusted> && git clone <foreign>` still taints.
       for (const seg of segments(cmd)) {
+        if (GH_PEOPLE_TEXT.test(seg)) return { kind: "repo", note: "gh: issue/PR/комментарии" };
         if (GH_REPO.test(seg) && !ghTrusted(seg, trustedRepos)) return { kind: "repo", note: "gh" };
         const git = GIT_REMOTE_VERBS.exec(seg);
         if (git && URL_RE.test(seg) && !gitAddressesTrusted(seg, trustedRepos)) return { kind: "repo", note: `git ${git[1]!.toLowerCase()}` };
       }
       if (SHELL_WEB.test(cmd)) return { kind: "web", note: "загрузка из shell" };
+      for (const seg of segments(cmd)) {
+        if (WEB_BINS.has(commandWord(seg))) return { kind: "web", note: "загрузка из shell" };
+        // The whole command is looked at, not the segment: `node -e "fetch('https://x'); a; b"` has `;` inside the quotes.
+        if (INLINE_SCRIPT.test(seg) && NET_IN_SCRIPT.test(cmd)) return { kind: "web", note: "скрипт с сетью (-e/-c)" };
+      }
       return null;
     }
     default:

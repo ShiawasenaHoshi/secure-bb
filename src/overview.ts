@@ -1,4 +1,5 @@
 // Builds the single view the Plugin Gate page renders (one RPC, one shape).
+import type { Alive, AliveView } from "./alive.js";
 import type { CheckResult } from "./checks/types.js";
 import { assess, type Assessment, type Probe } from "./detect.js";
 import type { Gate, TotpState } from "./gate.js";
@@ -91,6 +92,8 @@ export interface Overview {
   trustedRepos: string[];
   /** Stage 7: the sentinel (observation only). */
   sentinel: SentinelView;
+  /** Threat model X3: gaps in the gate's own running and bb's safe-mode. */
+  alive: AliveView;
 }
 const EMPTY_SKILLS: SkillsView = { baselineAt: null, lastScanAt: null, pinned: { total: 0, builtin: 0, baseline: 0, approved: 0 }, open: [], recent: [], trusted: [], blind: [], unchecked: [] };
 
@@ -122,6 +125,8 @@ export interface OverviewDeps {
   probe: () => Promise<Probe>;
   descendants: (threadId: string) => Promise<string[]>;
   journal?: () => JournalReport;
+  /** Absent in tests that do not touch the mark of life. */
+  alive?: Alive;
   taintedThreads?: () => Array<{ threadId: string; kinds: string[]; first: number; last: number }>;
 }
 
@@ -242,6 +247,7 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
     tainted: d.taintedThreads?.() ?? [],
     trustedRepos: d.store.trustedRepos(),
     sentinel: sentinelView(d),
+    alive: d.alive?.view() ?? { lastBeat: null, gaps: [], safeMode: null, safeModeSeen: false },
   };
 }
 

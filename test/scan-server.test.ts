@@ -81,9 +81,18 @@ async function boot(plugins: Installed[]) {
   return { bb, harness };
 }
 
+/** A second factor from an external file (as on stage 3): returns a function that yields a fresh code each call. Enabling the AI scan needs one. */
+function externalTotp(): (ahead?: number) => string {
+  const secret = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+  const file = join(tmp(), "totp.secret");
+  writeFileSync(file, `${secret}\n`, { mode: 0o600 });
+  process.env.BB_SECURE_BB_TOTP_FILE = file;
+  return (ahead = 0) => hotp(base32Decode(secret), stepAt(Date.now()) + ahead);
+}
+
 const saved = { ...process.env };
 afterEach(() => {
-  for (const k of ["BB_SECURE_BB_CLAUDE_BIN", "BB_SECURE_BB_CURSOR_BIN", "BB_SECURE_BB_CLAUDE_TOKEN_FILE", "ANTHROPIC_API_KEY", "GITHUB_TOKEN"]) {
+  for (const k of ["BB_SECURE_BB_TOTP_FILE", "BB_SECURE_BB_CLAUDE_BIN", "BB_SECURE_BB_CURSOR_BIN", "BB_SECURE_BB_CLAUDE_TOKEN_FILE", "ANTHROPIC_API_KEY", "GITHUB_TOKEN"]) {
     if (saved[k] === undefined) delete process.env[k];
     else process.env[k] = saved[k];
   }
@@ -140,8 +149,9 @@ describe("the AI scan through the server entry", () => {
     process.env.BB_SECURE_BB_CLAUDE_TOKEN_FILE = tokenFile;
     process.env.ANTHROPIC_API_KEY = "sk-ant-api-MUST-NOT-LEAK";
     process.env.GITHUB_TOKEN = "ghp_MUST_NOT_LEAK";
+    const code = externalTotp();
     const { harness } = await boot([installed(dir)]);
-    await harness.behavior.callRpc("ai.settings", { enabled: true });
+    await harness.behavior.callRpc("ai.settings", { enabled: true, code: code() });
     const started = (await harness.behavior.callRpc("ai.scan", { pluginId: "demo" })) as { ok: true; scan: number };
     expect(started.ok).toBe(true);
     const scan = await untilScanned(harness);
@@ -175,8 +185,9 @@ describe("the AI scan through the server entry", () => {
     writeFileSync(cli.answerFile, BAD);
     process.env.BB_SECURE_BB_CLAUDE_BIN = cli.bin;
     delete process.env.BB_SECURE_BB_CLAUDE_TOKEN_FILE;
+    const code = externalTotp();
     const { harness } = await boot([installed(dir)]);
-    await harness.behavior.callRpc("ai.settings", { enabled: true });
+    await harness.behavior.callRpc("ai.settings", { enabled: true, code: code() });
     await harness.behavior.callRpc("ai.scan", { pluginId: "demo" });
     const scan = await untilScanned(harness);
     expect(scan.status).toBe("suspect");
@@ -192,8 +203,9 @@ describe("the AI scan through the server entry", () => {
     const dir = pluginDir();
     process.env.BB_SECURE_BB_CLAUDE_BIN = join(tmp(), "no-such-claude");
     delete process.env.BB_SECURE_BB_CLAUDE_TOKEN_FILE;
+    const code = externalTotp();
     const { harness } = await boot([installed(dir)]);
-    await harness.behavior.callRpc("ai.settings", { enabled: true });
+    await harness.behavior.callRpc("ai.settings", { enabled: true, code: code() });
     const ov0 = (await harness.behavior.callRpc("overview", null)) as Ov;
     expect(ov0.ai.availability.claude.mode).toBe("unavailable");
     await harness.behavior.callRpc("ai.scan", { pluginId: "demo" });
@@ -210,31 +222,29 @@ describe("the AI scan through the server entry", () => {
     process.env.BB_SECURE_BB_CLAUDE_BIN = claude.bin;
     process.env.BB_SECURE_BB_CURSOR_BIN = cursor.bin;
     delete process.env.BB_SECURE_BB_CLAUDE_TOKEN_FILE;
+    const code = externalTotp();
     const { harness } = await boot([installed(dir)]);
-    await harness.behavior.callRpc("ai.settings", { enabled: true, secondModel: "gpt-5", second: true });
+    await harness.behavior.callRpc("ai.settings", { enabled: true, secondModel: "gpt-5", second: true, code: code() });
     await harness.behavior.callRpc("ai.scan", { pluginId: "demo" });
     const scan = await untilScanned(harness);
     expect(scan.status).toBe("suspect");
     expect(scan.models.map((m) => [m.label, m.status])).toEqual([["claude", "clean"], ["cursor-agent (gpt-5)", "flag"]]);
     const cap = JSON.parse(readFileSync(cursor.capture, "utf8")) as { argv: string[]; cwdEntries: string[] };
-    expect(cap.argv).toEqual(["-p", "--trust", "--mode", "ask", "--model", "gpt-5"]);
+    expect(cap.argv).toEqual(["-p", "--trust", "--mode", "ask", "--sandbox", "enabled", "--model", "gpt-5"]);
     expect(cap.cwdEntries).toEqual([]);
   });
 
-  it("switching an enabled option off needs the code over RPC; switching on does not", async () => {
-    // No third-party plugin is running, so the second factor can be registered the usual way.
+  it("switching an option on needs a code over RPC; switching it off does not", async () => {
+    const code = externalTotp();
     const { harness } = await boot([]);
-    await harness.behavior.callRpc("page.ping", null);
-    const begin = (await harness.behavior.callRpc("totp.begin", null)) as { secret: string };
-    // A step is never accepted twice: each use takes the next one (the check allows one step ahead).
-    const code = (ahead = 0) => hotp(base32Decode(begin.secret), stepAt(Date.now()) + ahead);
-    await harness.behavior.callRpc("totp.confirm", { code: code() });
-    await harness.behavior.callRpc("ai.settings", { enabled: true, autoFreeze: true, autoExternal: true });
-    await expect(harness.behavior.callRpc("ai.settings", { autoFreeze: false })).rejects.toThrow(/кода/);
-    await expect(harness.behavior.callRpc("ai.settings", { autoFreeze: false, code: "000000" })).rejects.toThrow();
-    const stillOn = (await harness.behavior.callRpc("overview", null)) as Ov;
-    expect(stillOn.ai.settings).toMatchObject({ enabled: true, autoFreeze: true, autoExternal: true });
-    await harness.behavior.callRpc("ai.settings", { autoFreeze: false, code: code(1) });
+    await expect(harness.behavior.callRpc("ai.settings", { enabled: true, autoFreeze: true, autoExternal: true })).rejects.toThrow(/кода/);
+    await expect(harness.behavior.callRpc("ai.settings", { enabled: true, code: "000000" })).rejects.toThrow();
+    const off = (await harness.behavior.callRpc("overview", null)) as Ov;
+    expect(off.ai.settings).toMatchObject({ enabled: false, autoFreeze: false, autoExternal: false });
+    await harness.behavior.callRpc("ai.settings", { enabled: true, autoFreeze: true, autoExternal: true, code: code() });
+    const on = (await harness.behavior.callRpc("overview", null)) as Ov;
+    expect(on.ai.settings).toMatchObject({ enabled: true, autoFreeze: true, autoExternal: true });
+    await harness.behavior.callRpc("ai.settings", { autoFreeze: false });
     const after = (await harness.behavior.callRpc("overview", null)) as Ov;
     expect(after.ai.settings).toMatchObject({ enabled: true, autoFreeze: false, autoExternal: true });
   });

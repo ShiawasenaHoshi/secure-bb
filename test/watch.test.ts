@@ -190,11 +190,10 @@ describe("watchdog: differences outside a window (spec §7)", () => {
     expect(h.watch.view().rollbackEnabled).toBe(false);
   });
 
-  it("switching rollback on needs a code; so does switching it off", () => {
-    expect(() => h.watch.setRollback(true, "000000")).toThrow(GateError);
-    expect(h.watch.rollbackEnabled()).toBe(false);
-    h.watch.setRollback(true, h.fresh());
+  it("switching rollback on needs no code (it tightens); switching it off needs one", () => {
+    h.watch.setRollback(true);
     expect(h.watch.rollbackEnabled()).toBe(true);
+    expect(() => h.watch.setRollback(false)).toThrow(GateError);
     expect(() => h.watch.setRollback(false, "000000")).toThrow(GateError);
     expect(h.watch.rollbackEnabled()).toBe(true);
     h.watch.setRollback(false, h.fresh());
@@ -454,12 +453,10 @@ describe("configuration trust window (spec §6)", () => {
     expect(h.bb.instructionsText).toBe("be careful");
   });
 
-  it("closing it by hand needs a code and takes the changes made so far", async () => {
+  it("closing it by hand needs no code and takes the changes made so far", async () => {
     const w = await h.watch.openWindow(["instructions"], h.fresh());
     h.bb.instructionsText = "last edit";
-    await expect(h.watch.closeWindow(w.id, "000000")).rejects.toThrow(GateError);
-    expect(h.watch.openWindows().length).toBe(1);
-    await h.watch.closeWindow(w.id, h.fresh());
+    await h.watch.closeWindow(w.id);
     expect(h.watch.openWindows()).toEqual([]);
     expect(open(h)).toEqual([]);
     h.bb.instructionsText = "after close";

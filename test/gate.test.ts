@@ -142,7 +142,7 @@ describe("hook decisions", () => {
     await h.gate.decide(ctx());
     h.gate.approveQueue(1, code());
     h.next();
-    h.gate.revoke(h.store.listApprovals()[0]!.id, code());
+    h.gate.revoke(h.store.listApprovals()[0]!.id);
     expect((await h.gate.decide(ctx())).action).toBe("wait");
   });
 
@@ -320,11 +320,9 @@ describe("trust windows", () => {
     expect(h.store.getWindow(w.id)!.expiresAt).toBe(w.expiresAt);
   });
 
-  it("closing a window needs a code and ends it immediately", async () => {
+  it("closing a window needs no code (it only tightens) and ends it immediately", async () => {
     const w = openFor("T1");
-    expect(() => h.gate.closeWindow(w.id, "000000")).toThrow(/invalid/);
-    h.next();
-    h.gate.closeWindow(w.id, code());
+    h.gate.closeWindow(w.id);
     expect(h.gate.openWindows()).toHaveLength(0);
     const s1 = await h.snapshot(1, "T1");
     expect((await h.gate.decide(snapCtx(s1.dir, 1))).action).toBe("wait");
@@ -456,7 +454,7 @@ describe("a snapshot is only trusted if its bytes match what was proposed (revie
     h.gate.approveQueue(queueFor(s.proposal.id, s.dir).id, code());
     await h.gate.decide(snapCtx(s.dir, 1, "sha256:core1"));
     h.next();
-    h.gate.revoke(h.store.activeApproval("sha256:core1")!.id, code());
+    h.gate.revoke(h.store.activeApproval("sha256:core1")!.id);
     expect((await h.gate.decide(snapCtx(s.dir, 1, "sha256:core1"))).action).toBe("wait");
     expect((await h.gate.decide(snapCtx(s.dir, 1, "sha256:core2"))).action).toBe("wait");
   });

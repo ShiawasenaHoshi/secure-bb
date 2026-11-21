@@ -117,11 +117,13 @@ export function assess(p: Probe): Assessment {
     p.thirdParty.length === 0 ? T.chk.thirdPartyNone : T.chk.thirdPartyList(p.thirdParty.join(", ")),
   );
 
+  const externalTotp = (p.env.BB_SECURE_BB_TOTP_FILE ?? "").trim() !== "";
   const s1 = p.hookRegistered;
   const s2 = s1 && guardOk;
   const s3 = s2 && uidKnown && !sameUid;
   const s4 = s3 && p.bind.loopbackOnly === true && telemetryOff === true && p.accountState === "signed-out" && connectBlocked && sensitiveOn.length === 0;
   const s5 = s4 && p.apiAuth === "enforced";
+  add("totp-file", T.totpFile.label, externalTotp ? "ok" : s3 ? "bad" : "warn", externalTotp ? T.totpFile.ok : T.totpFile.none);
   const stage = (s5 ? 5 : s4 ? 4 : s3 ? 3 : s2 ? 2 : s1 ? 1 : 0) as Assessment["stage"];
 
   const nextSteps: Record<number, string> = {
@@ -138,7 +140,8 @@ export function assess(p: Probe): Assessment {
     afterTheFact: !p.hookRegistered,
     checks,
     protects: T.protects[stage]!,
-    missing: T.missing[stage]!,
+    // From stage 3 on the second factor is what holds the lock, so a secret registered from the page is a shortcoming, not a detail.
+    missing: stage >= 3 && !externalTotp ? [...T.missing[stage]!, T.totpFile.missing] : T.missing[stage]!,
     nextStep: nextSteps[stage]!,
     honest: [...(stage < 3 ? [T.honestSameUser] : []), ...(!p.hookRegistered ? [T.honestAfterFact] : [])],
   };

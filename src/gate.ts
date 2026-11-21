@@ -234,6 +234,19 @@ export class Gate {
     if (this.store.closeSessions(reason) > 0) this.store.log("session.close", null, null, { reason });
   }
 
+  /**
+   * A session is only opened while no third-party plugin runs (its interface code shares the page's origin and could read the
+   * token). If one starts afterwards, the session is closed at once (threat model: an agent enables a plugin while a session
+   * is open). The interface of a plugin is not visible to us, so every running third-party plugin counts. Returns who ran.
+   */
+  async closeSessionsForThirdParty(): Promise<string[]> {
+    if (this.store.unclosedSessions().length === 0) return [];
+    const running = await this.d.thirdPartyRunning();
+    if (running.length === 0) return [];
+    this.closeSessions(`third-party plugin running: ${running.slice(0, 5).join(", ")}`);
+    return running;
+  }
+
   /** Background pass: closes sessions whose time is up. */
   sweepSessions(): number {
     let n = 0;
@@ -505,13 +518,16 @@ export class Gate {
         const why = fresh.length > 0 ? `новая возможность в окне: ${fresh.slice(0, 6).join(", ")}${fresh.length > 6 ? "…" : ""}` : reviews.length > 0 ? `проверки требуют ревью: ${summarize(reviews)}` : aiFlag!;
         return this.hold(ctx, proposal, why);
       }
-      if (reviews.length === 0 && result.capabilities.length === 0 && aiFlag === null) {
-        // Safe class (§5.2), our own immutable snapshot, clean checks: no touch needed.
+      const safe = reviews.length === 0 && result.capabilities.length === 0 && aiFlag === null;
+      if (safe && this.store.policy().autoSafe) {
+        // Safe class (§5.2), our own immutable snapshot, clean checks, and a human turned the pass on with a code: no touch needed.
         this.recordApproval(ctx, "auto", null, proposal);
         return { action: "proceed" };
       }
       const why =
-        result.capabilities.length > 0
+        safe
+          ? T.autoSafeOff
+          : result.capabilities.length > 0
           ? `вне безопасного класса: ${result.capabilities.map((c) => c.kind).join(", ")}`
           : reviews.length > 0
             ? `проверки требуют ревью: ${summarize(reviews)}`
@@ -642,6 +658,7 @@ export class Gate {
         via: "touch",
         windowId: null,
         threadId: q.threadId,
+        localHash: proposal?.localHash ?? null,
       });
       this.store.resolveQueueByHash(q.contentHash);
     }
@@ -671,13 +688,17 @@ export class Gate {
     return q;
   }
 
-  revoke(approvalId: number, code: Proof): ApprovalRow {
+  /**
+   * Withdraws an approval. This only tightens, so it needs no code and is not affected by the block after wrong codes
+   * (threat model F8): whoever can call the API must not be able to keep the human from revoking. Every approval of the
+   * version goes (by core hash and by reviewed-source hash), not just the row that was shown (F18).
+   */
+  revoke(approvalId: number): ApprovalRow {
     const a = this.store.getApproval(approvalId);
     if (!a || a.revokedAt !== null) throw new GateError("not_found", "no such active approval");
-    this.touch(`revoke:${a.pluginId}`, code);
-    this.store.revokeApproval(approvalId);
-    if (a.localHash) this.store.unpinProposals(a.pluginId, a.localHash);
-    this.store.log("revoked", a.pluginId, a.contentHash, { version: a.version });
+    const { revoked, localHashes } = this.store.revokeVersion(a);
+    for (const h of localHashes) this.store.unpinProposals(a.pluginId, h);
+    this.store.log("revoked", a.pluginId, a.contentHash, { version: a.version, approvals: revoked });
     return a;
   }
 
@@ -742,10 +763,10 @@ export class Gate {
     return w;
   }
 
-  closeWindow(windowId: number, code: Proof): void {
+  /** Closing a window only tightens: no code, and the block after wrong codes does not apply (threat model F8). */
+  closeWindow(windowId: number): void {
     const w = this.store.getWindow(windowId);
     if (!w || w.closedAt !== null) throw new GateError("not_found", "no such open window");
-    this.touch(`window.close:${w.pluginId}`, code);
     this.store.closeWindow(windowId, "closed");
     const pin = this.store.latestApproval(w.pluginId);
     this.store.log("window.close", w.pluginId, null, { windowId });
@@ -829,7 +850,8 @@ export class Gate {
       (next.scope === "tree" && cur.scope === "thread") ||
       next.cfgWindowMin > cur.cfgWindowMin ||
       next.cfgCapMin > cur.cfgCapMin ||
-      (next.cfgMode === "sliding" && cur.cfgMode === "fixed");
+      (next.cfgMode === "sliding" && cur.cfgMode === "fixed") ||
+      (next.autoSafe && !cur.autoSafe);
     if (widens) {
       if (code === undefined) throw new GateError("invalid_code", "widening the policy needs a code");
       this.touch("policy", code);
@@ -854,8 +876,8 @@ export class Gate {
 
   // ---- AI scan settings (stage 3, spec §8) -------------------------------------
   /**
-   * Changes the optional AI scan. Everything is off by default; switching something on needs no code
-   * (the module only adds suspicion), switching an enabled option off does: that is the direction that weakens the gate.
+   * Changes the optional AI scan. Everything is off by default. Switching anything ON needs a code: it sends plugin code to a
+   * cloud service (threat model F15). Switching an option OFF needs none: it only sends less (F8).
    */
   setAiSettings(patch: Partial<Omit<AiSettings, "freezePlugins">> & { freezePlugin?: { id: string; on: boolean } }, code: string | undefined): AiSettings {
     const cur = this.store.aiSettings();
@@ -873,18 +895,20 @@ export class Gate {
       if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id)) throw new GateError("invalid", "неверный id плагина");
       next.freezePlugins = on ? [...new Set([...next.freezePlugins, id])].sort() : next.freezePlugins.filter((x) => x !== id);
     }
-    const switchedOff =
-      (cur.enabled && !next.enabled) ||
-      (cur.autoFreeze && !next.autoFreeze) ||
-      (cur.autoExternal && !next.autoExternal) ||
-      (cur.second && !next.second) ||
-      cur.freezePlugins.some((id) => !next.freezePlugins.includes(id));
-    if (switchedOff) {
-      if (code === undefined) throw new GateError("invalid_code", "выключение включённой опции ИИ-скана требует кода");
+    // Where code goes: a new option, a new plugin on the freeze list, or another second model while the second model is on.
+    const switchedOn =
+      (!cur.enabled && next.enabled) ||
+      (!cur.autoFreeze && next.autoFreeze) ||
+      (!cur.autoExternal && next.autoExternal) ||
+      (!cur.second && next.second) ||
+      (next.second && next.secondModel !== cur.secondModel) ||
+      next.freezePlugins.some((id) => !cur.freezePlugins.includes(id));
+    if (switchedOn) {
+      if (code === undefined) throw new GateError("invalid_code", "включение ИИ-скана или его опции (код плагина уйдёт в облако) требует кода");
       this.touch("ai.settings", code);
     }
     this.store.setAiSettings(next);
-    this.store.log("ai.settings", null, null, { from: cur, to: next, touched: switchedOff });
+    this.store.log("ai.settings", null, null, { from: cur, to: next, touched: switchedOn });
     return next;
   }
 

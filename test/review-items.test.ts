@@ -44,6 +44,7 @@ class H {
     const db = new Database(":memory:");
     for (const s of MIGRATIONS) db.exec(s);
     this.store = new Store(db, () => this.t);
+    this.store.setPolicy({ autoSafe: true }); // these tests are about the safe class; the default (off) is tested in threat-fixes.test.ts
     this.gate = new Gate({ store: this.store, now: () => this.t, threads: { ancestors: async () => [], descendants: async () => [] }, thirdPartyRunning: async () => [], externalTotpFile: null, snapshotsRoot: this.snaps, unsafeDirs: async () => [], runChecks: async () => this.next, checkWaitMs: 200 });
   }
   async register() {

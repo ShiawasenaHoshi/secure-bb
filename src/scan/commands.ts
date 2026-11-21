@@ -119,7 +119,9 @@ export function cursorCommand(o: { prompt: string; cwd: string; model: string; s
     spec: {
       file: o.server[CURSOR_BIN_ENV]?.trim() || "cursor-agent",
       // --trust: headless cursor-agent refuses an untrusted workspace; ours is an empty directory made for this one run.
-      args: ["-p", "--trust", "--mode", "ask", "--model", o.model],
+      // --sandbox enabled: in `ask` mode it can still read files, and the code under review may tell it to read the gate's own
+      // (threat model F16); the sandbox keeps those reads inside the empty working directory.
+      args: ["-p", "--trust", "--mode", "ask", "--sandbox", "enabled", "--model", o.model],
       env: baseEnv(o.server),
       cwd: o.cwd,
       stdin: o.prompt,

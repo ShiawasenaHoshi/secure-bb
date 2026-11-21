@@ -146,12 +146,11 @@ describe("watchdog through the plugin surfaces", () => {
     expect(o.watch.drifts.filter((d) => d.status === "open").length).toBe(3);
   });
 
-  it("rollback on (with a code): disables the plugin, deletes the variable, restores the instructions", async () => {
+  it("rollback on (no code needed: it tightens): disables the plugin, deletes the variable, restores the instructions", async () => {
     const { harness, world } = await boot(dataDir);
     const code = await register(harness);
     await harness.behavior.callRpc("watch.acceptAll", { code: code() });
-    await expect(harness.behavior.callRpc("watch.rollbackMode", { enabled: true, code: "000000" })).rejects.toThrow();
-    await harness.behavior.callRpc("watch.rollbackMode", { enabled: true, code: code() });
+    await harness.behavior.callRpc("watch.rollbackMode", { enabled: true });
     world.builtinEnabled.connect = true;
     world.instructions = "evil";
     world.machineVars.push("EVIL");
@@ -161,7 +160,7 @@ describe("watchdog through the plugin surfaces", () => {
     expect((await ov(harness)).watch.drifts.every((d) => d.status === "rolled-back")).toBe(true);
   });
 
-  it("configuration window over RPC: banner data, change accepted without a code, closes by code", async () => {
+  it("configuration window over RPC: banner data, change accepted without a code, closes without a code", async () => {
     const { harness, world } = await boot(dataDir);
     const code = await register(harness);
     await harness.behavior.callRpc("watch.acceptAll", { code: code() });
@@ -174,7 +173,7 @@ describe("watchdog through the plugin surfaces", () => {
     const cli = await harness.behavior.runCli(["config"]);
     expect(cli.stdout).toContain("окно доверия «конфигурация»: инструкции, скиллы — ещё 10 мин");
     const windowId = ((await harness.behavior.callRpc("overview", null)) as unknown as { watch: { windows: Array<{ id: number }> } }).watch.windows[0]!.id;
-    await harness.behavior.callRpc("watch.window.close", { windowId, code: code() });
+    await harness.behavior.callRpc("watch.window.close", { windowId });
     expect((await ov(harness)).watch.windows).toEqual([]);
   });
 
