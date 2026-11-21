@@ -5,6 +5,7 @@ import {
   cleanWhy, deferKey, detailLevel, groupAway, isBlockedEntry, isPasswordManager, pageStatus, parseDeferred, plural, redText, sourceLabel, suggestSources, touchWithHint,
   wizardNeeded, yellowText, GUARD_DOWN_TEXT, SAVED_NARROWING,
 } from "../src/ux.ts";
+import { isMismatch, mismatchText, quarantineCount, reasonKind } from "../src/ux.ts";
 import type { AwayEvent, StatusInput } from "../src/ux.ts";
 
 const none: StatusInput = { guardDown: false, red: [], yellow: [], alarms: [] };
@@ -16,7 +17,7 @@ describe("status and the first problem", () => {
     expect(s).toMatchObject({ level: "ok", label: "Защищено", count: 0, first: null });
   });
   it("something waits: «Требует внимания (N)» counts every kind", () => {
-    const s = pageStatus({ ...none, red: [ref("r1")], yellow: [ref("y1"), ref("y2")], alarms: [ref("a1")] });
+    const s = pageStatus({ ...none, yellow: [ref("y1"), ref("y2")], alarms: [ref("a1"), ref("a2")] });
     expect(s.level).toBe("attention");
     expect(s.label).toBe("Требует внимания (4)");
     expect(s.count).toBe(4);
@@ -87,8 +88,8 @@ describe("plain words: the main line has no technical words", () => {
   it("a new right of a source of the owner says so, and a plugin without rights says that", () => {
     const own = yellowText({ pluginId: "p", version: "2", level: "own", sourceLabel: "github.com/me/p", reason: "новое право: network", caps: [{ kind: "network", detail: [] }] });
     expect(own.line).toContain("вашего источника");
-    expect(own.line).toContain("просит то, чего раньше не просила");
-    expect(yellowText({ pluginId: "p", version: "2", level: "known", sourceLabel: "x", reason: null, caps: [] }).line).toContain("Особых прав он не просит");
+    expect(own.line).toContain("просит новое, чего раньше не просил");
+    expect(yellowText({ pluginId: "p", version: "2", level: "unknown", sourceLabel: "x", reason: "неизвестный источник", caps: [] }).line).toContain("Особых прав он не просит");
   });
   it("modes, status texts and hints have no technical words either", () => {
     for (const m of ["simple", "detailed", "strict"] as const) expect(`${MODE_NAMES[m]} ${MODE_DESCRIPTIONS[m]}`).not.toMatch(TECHNICAL_WORDS);
@@ -143,9 +144,9 @@ describe("«Пока вас не было»", () => {
     expect(groups[0]!.counts).toMatchObject({ auto: 4, stopped: 1 });
   });
   it("counts agree in number: 1 версия прошла, 5 версий прошли", () => {
-    expect(awayText({ pluginId: "p", counts: { auto: 1, window: 0, approved: 0, held: 0, stopped: 0, rejected: 0, alarm: 0 } })).toBe("1 версия p прошла сами");
+    expect(awayText({ pluginId: "p", counts: { auto: 1, window: 0, approved: 0, held: 0, stopped: 0, rejected: 0, alarm: 0 } })).toBe("1 версия p прошла сама");
     expect(awayText({ pluginId: "p", counts: { auto: 5, window: 0, approved: 0, held: 2, stopped: 0, rejected: 3, alarm: 0 } })).toBe("5 версий p прошли сами, 2 версии ждут вашего решения, 3 отклонены");
-    expect(awayText({ pluginId: "p", counts: { auto: 21, window: 0, approved: 0, held: 0, stopped: 22, rejected: 0, alarm: 0 } })).toBe("21 версия p прошла сами, 22 остановлены");
+    expect(awayText({ pluginId: "p", counts: { auto: 21, window: 0, approved: 0, held: 0, stopped: 22, rejected: 0, alarm: 0 } })).toBe("21 версия p прошла сама, 22 остановлены");
     expect(plural(11, "а", "б", "в")).toBe("в");
     expect(plural(12, "а", "б", "в")).toBe("в");
     expect(plural(101, "а", "б", "в")).toBe("а");
@@ -274,5 +275,84 @@ describe("first run", () => {
     const id = (kind: string, source: string) => (kind === "git" ? `github:${source.slice(4)}` : kind === "path" ? source : null);
     expect(suggestSources([{ source: "git:a/b" }, { source: "git:a/b" }, { source: "path:/x" }, { source: "npm:q" }], id)).toEqual(["github:a/b", "path:/x"]);
     expect(suggestSources([], id)).toEqual([]);
+  });
+});
+
+describe("review fixes (PR 2, review)", () => {
+  const MISMATCH = "хеш каталога, посчитанный сторожем, не совпал с хешем из запроса";
+  it("counts: the status and the tab count what the person sees: cards and alarms, nothing else", () => {
+    const s = pageStatus({ ...none, red: [ref("r")], yellow: [ref("y1"), ref("y2")], alarms: [ref("a")] });
+    expect(s.count).toBe(4);
+    expect(s.label).toContain("(");
+    expect(pageStatus({ ...none, yellow: [ref("y1"), ref("y2")] }).label).toBe("Требует внимания (2)");
+    expect(quarantineCount(2, 1)).toBe(3);
+    expect(quarantineCount(0, 0)).toBe(0);
+  });
+  it("away: what waits is the current list, once per plugin, not once per journal record", () => {
+    const T0 = 1_000_000;
+    const hold = (dt: number, thread: string): AwayEvent => ({ ts: T0 + dt, kind: "hold", pluginId: "p", threadId: thread, detail: { note: "неизвестный источник" }, from: "guard" });
+    const events = [hold(1, "a"), hold(2, "a"), hold(3, "b"), { ts: T0 + 4, kind: "approved.source", pluginId: "p", threadId: "a", detail: {}, from: "guard" } as AwayEvent];
+    const groups = groupAway(events, T0, true, { p: { yellow: 3, red: 0 } });
+    const lines = groups.map((g) => g.text).join("\n");
+    expect(lines.match(/ждут вашего решения/g)).toHaveLength(1);
+    expect(lines).toContain("3 версии ждут вашего решения");
+    // no hold in the period: nothing is said about waiting, even if something waits from before
+    expect(groupAway([{ ts: T0 + 4, kind: "approved.source", pluginId: "p", detail: {}, from: "guard" }], T0, true, { p: { yellow: 3, red: 0 } })[0]!.text).toBe("1 версия p прошла сама");
+    // stopped follows the red cards of now
+    expect(groupAway([hold(1, "a")], T0, true, { p: { yellow: 0, red: 2 } })[0]!.text).toBe("2 остановлены");
+    expect(groupAway([hold(1, "a")], T0, true, { p: { yellow: 0, red: 0 } })).toEqual([]);
+  });
+  it("away: endings follow the number", () => {
+    const c = (auto: number) => awayText({ pluginId: "p", counts: { auto, window: 0, approved: 0, held: 0, stopped: 0, rejected: 0, alarm: 0 } });
+    expect(c(1)).toBe("1 версия p прошла сама");
+    expect(c(2)).toBe("2 версии p прошли сами");
+    expect(c(5)).toBe("5 версий p прошли сами");
+    expect(c(11)).toBe("11 версий p прошли сами");
+    expect(c(21)).toBe("21 версия p прошла сама");
+    expect(awayText({ pluginId: "p", counts: { auto: 0, window: 1, approved: 0, held: 1, stopped: 0, rejected: 0, alarm: 0 } })).toBe("1 версия p прошла в окне доверия, 1 версия ждёт вашего решения");
+  });
+  it("a hash mismatch is red with its own words, not the default yellow", () => {
+    expect(isMismatch(MISMATCH)).toBe(true);
+    expect(isMismatch("хеш каталога не совпал с хешем из запроса")).toBe(true);
+    expect(cardColor({ reason: MISMATCH, findings: [] })).toBe("red");
+    expect(reasonKind(MISMATCH)).toBe("mismatch");
+    const t = mismatchText("p", "1.0.0");
+    expect(t.line).toContain("Так бывает при подмене файлов. Не разрешайте, если не знаете причину.");
+    expect(`${t.title} ${t.line}`).not.toMatch(TECHNICAL_WORDS);
+    expect(t.line).not.toContain("просит");
+  });
+  it("yellow words follow the guard's reason and never contradict themselves", () => {
+    const y = (reason: string | null, caps: Array<{ kind: string; detail: string[] }> = []) => yellowText({ pluginId: "p", version: "1", level: "own", sourceLabel: "github.com/me/p", reason, caps }).line;
+    expect(reasonKind("новое право: network")).toBe("new-right");
+    expect(reasonKind("неизвестный источник")).toBe("unknown-source");
+    expect(reasonKind("режим «Строгий»: каждая версия ждёт вас")).toBe("strict");
+    expect(reasonKind("нет одобренной версии этого плагина из этого источника")).toBe("first-version");
+    expect(reasonKind(null)).toBe("other");
+    expect(y("режим «Строгий»: каждая версия ждёт вас")).toContain("Строгий");
+    expect(y("нет одобренной версии этого плагина из этого источника")).toContain("ещё не разрешали");
+    expect(y("новое право: network", [{ kind: "network", detail: ["host:telemetry.example"] }])).toContain("ходить в сеть (telemetry.example)");
+    // «просит новое» and «особых прав не просит» never in one text
+    for (const r of ["новое право: network", "неизвестный источник", "режим «Строгий»", "нет одобренной версии", null, "странное"]) {
+      for (const caps of [[], [{ kind: "fs", detail: [] }]]) {
+        const l = y(r, caps);
+        expect(l.includes("просит новое") && l.includes("Особых прав"), `${r}`).toBe(false);
+      }
+    }
+  });
+  it("the text speaks of the plugin, one gender in a paragraph", () => {
+    for (const r of ["новое право: network", "неизвестный источник", "режим «Строгий»", null]) {
+      const l = yellowText({ pluginId: "p", version: "1", level: "unknown", sourceLabel: "x", reason: r, caps: [{ kind: "fs", detail: [] }] }).line;
+      expect(l, String(r)).not.toMatch(/версия|она|просила/);
+    }
+    for (const rule of ["decode-eval", "env-dump"]) expect(redText([rule]).line).not.toMatch(/\bона\b|версия/);
+    expect(mismatchText("p", "1").line).not.toMatch(/\bона\b/);
+  });
+  it("a red card makes the whole status red and says how many are stopped", () => {
+    const s = pageStatus({ ...none, red: [ref("r1"), ref("r2")], yellow: [ref("y")] });
+    expect(s).toMatchObject({ level: "stopped", label: "Остановлено (2)", count: 3 });
+    expect(s.first?.anchor).toBe("r1");
+    expect(pageStatus({ ...none, yellow: [ref("y")] }).level).toBe("attention");
+    expect(pageStatus({ ...none, alarms: [ref("a")] }).level).toBe("attention");
+    expect(pageStatus({ guardDown: true, red: [ref("r")], yellow: [], alarms: [] }).level).toBe("down");
   });
 });

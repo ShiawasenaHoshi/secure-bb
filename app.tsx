@@ -27,9 +27,10 @@ import type { TrustMode } from "./src/guardlink";
 import {
   AWAY_KEY, DEFERRED_KEY, MODE_DESCRIPTIONS, MODE_NAMES, SAVED_NARROWING, TOUCH_SLOW_MS, WIZARD_KEY,
   aaguidName, awaySince, capabilityPhrases, cardColor, deferKey, detailLevel, groupAway, isBlockedEntry, isPasswordManager, pageStatus,
-  parseDeferred, redText, touchWithHint, wizardNeeded, yellowText, GUARD_DOWN_TEXT,
+  mismatchText, parseDeferred, quarantineCount, redText, touchWithHint, wizardNeeded, yellowText, GUARD_DOWN_TEXT,
 } from "./src/ux";
-import type { AwayEvent, ProblemRef, TabId } from "./src/ux";
+import { isMismatch } from "./src/ux";
+import type { AwayEvent, HeldNow, ProblemRef, TabId } from "./src/ux";
 
 // ---------------------------------------------------------------- helpers --
 
@@ -2120,6 +2121,7 @@ function ProofNotes({ proof }: { proof: ProofHook }) {
 const statusStyle = {
   ok: "border-green-600 bg-green-50 text-green-950 dark:border-green-500 dark:bg-green-950/40 dark:text-green-100",
   attention: "border-yellow-500 bg-yellow-50 text-yellow-950 dark:border-yellow-500 dark:bg-yellow-950/40 dark:text-yellow-100",
+  stopped: "border-red-600 bg-red-50 text-red-950 dark:border-red-500 dark:bg-red-950/40 dark:text-red-100",
   down: "border-red-600 bg-red-50 text-red-950 dark:border-red-500 dark:bg-red-950/40 dark:text-red-100",
 } as const;
 const cardYellow = "rounded-lg border-2 border-yellow-500 bg-yellow-50 p-4 text-sm text-yellow-950 dark:border-yellow-500 dark:bg-yellow-950/30 dark:text-yellow-50";
@@ -2144,17 +2146,13 @@ function Origin({ ux, q }: { ux: QueueUx | undefined; q: QueueRow }) {
   return (
     <p className={`mt-1 break-words ${muted}`}>
       Откуда:{" "}
-      {chain.length > 0 ? (
-        chain.map((t, i) => (
-          <span key={t.id}>
-            {i > 0 ? " → " : ""}
-            <button type="button" className="underline hover:no-underline" onClick={() => nav.toThread(t.id)}>{t.title ?? `тред ${t.id}`}</button>
-          </span>
-        ))
-      ) : (
-        <span>тред неизвестен</span>
-      )}
-      {" · "}
+      {chain.map((t, i) => (
+        <span key={t.id}>
+          {i > 0 ? " → " : ""}
+          <button type="button" className="underline hover:no-underline" onClick={() => nav.toThread(t.id)}>{t.title ?? `тред ${t.id}`}</button>
+        </span>
+      ))}
+      {chain.length > 0 ? " · " : ""}
       {ux?.sourceLabel ?? q.source}
       {ux ? ` (${ux.level === "own" ? "ваш источник" : ux.level === "known" ? "известный источник" : "неизвестный источник"})` : ""}
     </p>
@@ -2194,10 +2192,12 @@ function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onTrustPending }: 
   const unsafeDir = q.reason?.startsWith("каталог доступен на запись другим") ?? false;
   const caps = found?.capabilities ?? [];
   const red = color === "red";
-  const text = red
+  const text = isMismatch(q.reason)
+    ? mismatchText(q.pluginId, q.version)
+    : red
     ? (() => {
         const r = redText((found?.findings ?? []).filter((f) => f.severity === "block").map((f) => f.rule));
-        return { title: `Остановлено: ${r.title}`, line: `«${q.pluginId}» ${q.version}. ${r.line} Плагин не запущен.` };
+        return { title: `Остановлено: ${r.title}`, line: `Плагин «${q.pluginId}» ${q.version}. ${r.line} Плагин не запущен.` };
       })()
     : yellowText({ pluginId: q.pluginId, version: q.version, level: ux?.level ?? "unknown", sourceLabel: ux?.sourceLabel ?? q.source, reason: q.reason, caps });
   const approve = (acknowledgeBlock: boolean) =>
@@ -2214,7 +2214,7 @@ function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onTrustPending }: 
       <div className="mt-3 flex flex-wrap items-center gap-2">
         {red ? (
           <>
-            <button className={btnPrimary} disabled={act.busy} onClick={() => void act.run(async () => { await rpc.call("queue.dismiss", { id: q.id }); return { note: "Версия отклонена: она не будет загружена." }; })}>
+            <button className={btnPrimary} disabled={act.busy} onClick={() => void act.run(async () => { await rpc.call("queue.dismiss", { id: q.id }); return { note: "Плагин отклонён: он не будет загружен." }; })}>
               Удалить
             </button>
             <button className={btn} disabled={act.busy} onClick={() => onDefer(q, !deferred)}>{deferred ? "Вернуть в список" : "Оставить в карантине"}</button>
@@ -2225,7 +2225,7 @@ function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onTrustPending }: 
             <button className={btnPrimary} disabled={act.busy || blockedApprove} onClick={() => void act.run(() => approve(false))}>
               Разрешить эту версию
             </button>
-            <button className={btn} disabled={act.busy} onClick={() => void act.run(async () => { await rpc.call("queue.dismiss", { id: q.id }); return { note: "Версия отклонена." }; })}>
+            <button className={btn} disabled={act.busy} onClick={() => void act.run(async () => { await rpc.call("queue.dismiss", { id: q.id }); return { note: "Плагин отклонён." }; })}>
               Отклонить
             </button>
             <button className={btn} disabled={act.busy} onClick={() => onDefer(q, !deferred)}>{deferred ? "Вернуть в список" : "Решить позже"}</button>
@@ -2336,7 +2336,14 @@ function AwayCard({ ov, since, onSeen, onReview, canReview }: { ov: Overview; si
       return { ts: l.ts, kind: l.kind, pluginId: l.pluginId, threadId: typeof d.thread === "string" ? d.thread : l.pluginId ? (threadOf.get(l.pluginId) ?? null) : null, detail: l.detail, from: "plugin" as const };
     }),
   ];
-  const groups = groupAway(events, since, guardMode);
+  const heldNow: Record<string, HeldNow> = {};
+  for (const q of ov.queue) {
+    if (q.status !== "held") continue;
+    const h = (heldNow[q.pluginId] ??= { yellow: 0, red: 0 });
+    if (cardColor({ reason: q.reason, findings: ov.queueChecks[q.id]?.findings ?? [] }) === "red") h.red++;
+    else h.yellow++;
+  }
+  const groups = groupAway(events, since, guardMode, heldNow);
   if (groups.length === 0) return null;
   return (
     <div className={card} data-secure-bb-away>
@@ -2445,9 +2452,12 @@ function RemovedSkillRow({ q, ov, rpc, refetch }: { q: SkillQueueView; ov: Overv
   );
 }
 
+/** Removed skills, once each: the list of the «Карантин» tab and the number on it. */
+const removedSkillsOf = (ov: Overview): SkillQueueView[] => [...ov.skills.open, ...ov.skills.recent].filter((s, i, all) => s.state === "removed" && all.findIndex((x) => x.id === s.id) === i);
+
 function QuarantineTab({ ov, rpc, refetch, onTrustPending, onShowCard }: { ov: Overview; rpc: Rpc; refetch: () => void; onTrustPending: (entry: string, label: string) => void; onShowCard: (id: number) => void }) {
   const held = ov.queue.filter((q) => q.status === "held");
-  const skills = [...ov.skills.open, ...ov.skills.recent].filter((s, i, all) => s.state === "removed" && all.findIndex((x) => x.id === s.id) === i);
+  const skills = removedSkillsOf(ov);
   return (
     <div className="space-y-3">
       <p className={muted}>Здесь то, что стоит на паузе: плагины, которые не запущены, пока вы не решите, и удалённые скиллы. Ничего не потеряно: любую вещь можно вернуть.</p>
@@ -2643,9 +2653,8 @@ function GatePage() {
   if (ov.agents && ((ov.agents.state?.alarms ?? []).length > 0 || (ov.agents.state?.drifts ?? []).some((d) => d.class === "critical" && !d.initial))) alarms.push({ anchor: "sbb-agents", tab: "more", text: "Тревога наблюдателя за агентами" });
   if (ov.watch.drifts.some((d) => d.status === "open" || d.status === "rollback-failed")) alarms.push({ anchor: "sbb-watch", tab: "more", text: "Настройки bb изменились" });
   if (!registered) alarms.push({ anchor: "sbb-registration", tab: "more", text: "Второй фактор не настроен" });
-  const skillsOpen: ProblemRef[] = ov.skills.open.filter((x) => x.state === "held" || x.state === "alarm").map((x) => ({ anchor: "sbb-skills", tab: "more" as const, text: `скилл ${x.name}` }));
   const guardDown = ov.guard !== undefined && !ov.guard.connected;
-  const status = pageStatus({ guardDown, red: reds.map(refOf), yellow: [...yellows.map(refOf), ...skillsOpen], alarms });
+  const status = pageStatus({ guardDown, red: reds.map(refOf), yellow: yellows.map(refOf), alarms });
   const showProblem = (p: ProblemRef) => {
     setTab(p.tab);
     const id = Number(p.anchor.replace("sbb-card-", ""));
@@ -2666,7 +2675,7 @@ function GatePage() {
   const active = [...reds, ...yellows].filter((q) => !isDeferred(q));
   const later = [...reds, ...yellows].filter((q) => isDeferred(q));
   const cardProps = { ov, rpc, refetch, onDefer, onTrustPending: addPending };
-  const tabCount: Record<TabId, string> = { status: status.count > 0 ? ` (${status.count})` : "", quarantine: heldAll.length > 0 ? ` (${heldAll.length})` : "", trust: "", more: "" };
+  const tabCount: Record<TabId, string> = { status: status.count > 0 ? ` (${status.count})` : "", quarantine: quarantineCount(heldAll.length, removedSkillsOf(ov).length) > 0 ? ` (${quarantineCount(heldAll.length, removedSkillsOf(ov).length)})` : "", trust: "", more: "" };
   return (
     <ApprovalContext.Provider value={approval}>
     <div className="h-full overflow-y-auto">

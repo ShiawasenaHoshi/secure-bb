@@ -147,7 +147,30 @@ export interface ReviewEntry {
   findings: Array<{ rule: string; severity: string }>;
 }
 /** A hard flag, as the core says it (the reason of the held entry) or as the checks found it. */
-export const isBlockedEntry = (e: Pick<ReviewEntry, "reason" | "findings">): boolean => /заблокирован(о)? проверками/.test(e.reason ?? "") || /жёсткий флаг/.test(e.reason ?? "") || e.findings.some((f) => f.severity === "block");
+/** The guard read the directory itself and its count did not match the request's: files changed between the check and the load. */
+export const isMismatch = (reason: string | null): boolean => /не совпал с хешем/.test(reason ?? "");
+export const isBlockedEntry = (e: Pick<ReviewEntry, "reason" | "findings">): boolean => isMismatch(e.reason) || /заблокирован(о)? проверками/.test(e.reason ?? "") || /жёсткий флаг/.test(e.reason ?? "") || e.findings.some((f) => f.severity === "block");
+
+/** Why the guard held a version, as its own note says (the card's words follow this, not a default). */
+export type ReasonKind = "mismatch" | "unknown-source" | "new-right" | "strict" | "first-version" | "other";
+export function reasonKind(reason: string | null): ReasonKind {
+  const r = reason ?? "";
+  if (isMismatch(r)) return "mismatch";
+  if (/новое право|новое замечание/.test(r)) return "new-right";
+  if (/неизвестный источник|нельзя назвать своим/.test(r)) return "unknown-source";
+  if (/Строгий/.test(r)) return "strict";
+  if (/нет одобренной версии/.test(r)) return "first-version";
+  return "other";
+}
+
+/** A version whose code is not what the guard checked: red, with its own words. */
+export function mismatchText(pluginId: string, version: string): RedText {
+  return {
+    title: "Остановлено: код плагина не совпал с тем, что проверил сторож",
+    line: `Плагин «${pluginId}» ${version}: код не совпал с тем, что проверил сторож. Так бывает при подмене файлов. Не разрешайте, если не знаете причину. Плагин не запущен.`,
+    rule: null,
+  };
+}
 /** Red: a hard flag. Yellow: everything else that waits for a person (a new right, an unknown source). */
 export const cardColor = (e: Pick<ReviewEntry, "reason" | "findings">): CardColor => (isBlockedEntry(e) ? "red" : "yellow");
 
@@ -168,16 +191,32 @@ export interface YellowText {
 /** The yellow card: «figma-sync» ждёт вашего решения + what it can do + that it does not run meanwhile. */
 export function yellowText(y: YellowInput): YellowText {
   const phrases = capabilityPhrases(y.caps);
-  const can = phrases.length > 0 ? ` Он сможет: ${phrases.slice(0, 5).join("; ")}${phrases.length > 5 ? "; …" : ""}.` : " Особых прав он не просит.";
-  const from =
-    y.level === "unknown"
-      ? `Плагин из места, которое вы раньше не отмечали (${y.sourceLabel}).`
-      : `Новая версия из ${y.level === "own" ? "вашего" : "известного"} источника (${y.sourceLabel}), и она просит то, чего раньше не просила.`;
-  return { title: `«${y.pluginId}» ждёт вашего решения`, line: `${from}${can} Пока вы не решите, он не запускается.` };
+  const list = phrases.slice(0, 5).join("; ") + (phrases.length > 5 ? "; …" : "");
+  const can = phrases.length > 0 ? ` Он сможет: ${list}.` : "";
+  const who = y.level === "own" ? "вашего" : "известного";
+  const tail = " Пока вы не решите, он не запускается.";
+  let line: string;
+  switch (reasonKind(y.reason)) {
+    case "new-right":
+      line = `Плагин из ${who} источника (${y.sourceLabel}) просит новое, чего раньше не просил.${can || " Что именно, видно в подробностях."}`;
+      break;
+    case "unknown-source":
+      line = `Плагин из места, которое вы раньше не отмечали (${y.sourceLabel}).${can || " Особых прав он не просит."}`;
+      break;
+    case "strict":
+      line = `Режим «Строгий»: каждый плагин ждёт вас, даже из ${y.level === "unknown" ? "источника" : who + " источника"} (${y.sourceLabel}).${can}`;
+      break;
+    case "first-version":
+      line = `Плагин из ${y.level === "unknown" ? "источника" : who + " источника"} (${y.sourceLabel}), который вы ещё не разрешали.${can || " Особых прав он не просит."}`;
+      break;
+    default:
+      line = `Сторож не пропустил плагин сам (${y.sourceLabel}).${can}`;
+  }
+  return { title: `«${y.pluginId}» ждёт вашего решения`, line: `${line}${tail}` };
 }
 
 // ---- status ----------------------------------------------------------------------------------------------------------------
-export type StatusLevel = "ok" | "attention" | "down";
+export type StatusLevel = "ok" | "attention" | "stopped" | "down";
 export type ProblemKind = "guard" | "red" | "yellow" | "alarm";
 /** The page's tabs; a problem says which one holds its element. */
 export type TabId = "status" | "quarantine" | "trust" | "more";
@@ -217,6 +256,7 @@ export function pageStatus(i: StatusInput): Status {
   ];
   const first = problems[0] ?? null;
   if (i.guardDown) return { level: "down", label: "Защита не работает", count: problems.length, problems, first };
+  if (i.red.length > 0) return { level: "stopped", label: `Остановлено (${i.red.length})`, count: problems.length, problems, first };
   if (problems.length > 0) return { level: "attention", label: `Требует внимания (${problems.length})`, count: problems.length, problems, first };
   return { level: "ok", label: "Защищено", count: 0, problems, first: null };
 }
@@ -282,8 +322,8 @@ export function awayText(g: Pick<AwayGroup, "pluginId" | "counts">): string {
   const c = g.counts;
   const name = g.pluginId ?? "системы";
   const parts: string[] = [];
-  if (c.auto > 0) parts.push(`${versions(c.auto)} ${name} ${plural(c.auto, "прошла", "прошли", "прошли")} сами`);
-  if (c.window > 0) parts.push(`${versions(c.window)} ${name} ${plural(c.window, "прошла", "прошли", "прошли")} в окне доверия`);
+  if (c.auto > 0) parts.push(`${versions(c.auto)} ${name} ${c.auto % 10 === 1 && c.auto % 100 !== 11 ? "прошла сама" : "прошли сами"}`);
+  if (c.window > 0) parts.push(`${versions(c.window)} ${name} ${c.window % 10 === 1 && c.window % 100 !== 11 ? "прошла" : "прошли"} в окне доверия`);
   if (c.approved > 0) parts.push(`${c.approved} ${plural(c.approved, "версию", "версии", "версий")} ${name} одобрили вы`);
   if (c.held > 0) parts.push(`${c.held} ${plural(c.held, "версия ждёт", "версии ждут", "версий ждут")} вашего решения`);
   if (c.stopped > 0) parts.push(`${c.stopped} ${plural(c.stopped, "остановлена", "остановлены", "остановлено")}`);
@@ -298,7 +338,12 @@ export function awayText(g: Pick<AwayGroup, "pluginId" | "counts">): string {
 }
 
 /** Events since `since`, grouped by plugin and thread, the busiest (stopped, waiting, alarm) first. Journal order does not matter. */
-export function groupAway(events: AwayEvent[], since: number, guardMode: boolean): AwayGroup[] {
+export interface HeldNow {
+  /** Cards waiting (yellow) and stopped (red) right now: the lists the person sees. */
+  yellow: number;
+  red: number;
+}
+export function groupAway(events: AwayEvent[], since: number, guardMode: boolean, heldNow?: Record<string, HeldNow>): AwayGroup[] {
   const groups = new Map<string, AwayGroup>();
   const seen = new Set<string>();
   for (const e of events) {
@@ -319,12 +364,33 @@ export function groupAway(events: AwayEvent[], since: number, guardMode: boolean
     g.counts[cls]++;
     g.last = Math.max(g.last, e.ts);
   }
+  if (heldNow) {
+    // What waits is what the lists say now, once per plugin (on its latest group), and only where a hold happened in the period.
+    const byPlugin = new Map<string, AwayGroup[]>();
+    for (const g of groups.values()) if (g.pluginId !== null) byPlugin.set(g.pluginId, [...(byPlugin.get(g.pluginId) ?? []), g]);
+    for (const [plugin, list] of byPlugin) {
+      const sawHold = list.some((g) => g.counts.held + g.counts.stopped > 0);
+      const now = heldNow[plugin];
+      for (const g of list) {
+        g.counts.held = 0;
+        g.counts.stopped = 0;
+      }
+      if (sawHold && now) {
+        const latest = list.reduce((x, y) => (y.last > x.last ? y : x));
+        latest.counts.held = now.yellow;
+        latest.counts.stopped = now.red;
+      }
+    }
+  }
   const weight = (g: AwayGroup): number => (g.counts.stopped + g.counts.alarm > 0 ? 2 : g.counts.held > 0 ? 1 : 0);
   return [...groups.values()]
     .map((g) => ({ ...g, text: awayText(g) }))
     .filter((g) => g.text !== "")
     .sort((a, b) => weight(b) - weight(a) || b.last - a.last);
 }
+
+/** The number on the «Карантин» tab: what its two lists show. */
+export const quarantineCount = (heldPlugins: number, removedSkills: number): number => heldPlugins + removedSkills;
 
 /** From when "while you were away" counts: the moment of the last «Всё в порядке» the page saved, else a day back. Not a security value. */
 export function awaySince(stored: string | null, now: number): number {
