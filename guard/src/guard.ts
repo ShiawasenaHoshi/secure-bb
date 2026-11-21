@@ -135,7 +135,10 @@ export interface DecideInput {
   sourceKind: string;
   trigger: string;
 }
-export type Decision = { action: "proceed"; via: "approval" | "window" | "source" | "troubleshoot" } | { action: "wait"; reason: string; requestId: number | null };
+export type Decision =
+  | { action: "proceed"; via: "approval" | "window" | "source" | "troubleshoot" }
+  | { action: "wait"; reason: string; requestId: number | null }
+  | { action: "reject"; message: string };
 
 export interface ApprovalRow {
   id: number;
@@ -154,6 +157,8 @@ export interface ApprovalRow {
   sourceId: string | null;
   /** What the guard itself found in the version (the baseline for later versions of the same source), or null: not computed. */
   rights: Rights | null;
+  /** Why it was let in: the guard's own words (what a person reads in the version history). Null: an approval from before this was recorded. */
+  why: string | null;
 }
 export interface QueueRow {
   id: number;
@@ -187,6 +192,8 @@ export interface WindowRow {
 }
 
 type Raw = Record<string, unknown>;
+/** «касанием: <why the guard did not let it in by itself>» — the guard's note says it (new right, unknown source, strict mode…). */
+const touchWhy = (note: string | null): string => (note ? `касанием: ${note}` : "касанием: вы одобрили сами");
 const approvalOf = (r: Raw): ApprovalRow => ({
   id: Number(r.id),
   contentHash: String(r.content_hash),
@@ -202,6 +209,7 @@ const approvalOf = (r: Raw): ApprovalRow => ({
   revokedAt: r.revoked_at === null ? null : Number(r.revoked_at),
   sourceId: (r.source_id as string | null) ?? null,
   rights: parseRights(r.rights),
+  why: (r.why as string | null) ?? null,
 });
 const queueOf = (r: Raw): QueueRow => ({
   id: Number(r.id),
@@ -355,7 +363,7 @@ export interface ImportItem {
 }
 
 /** The approval to insert: the guard fills in the source id; the rights come from its own checks. */
-type NewApproval = Omit<ApprovalRow, "id" | "approvedAt" | "revokedAt" | "sourceId" | "rights"> & { rights?: Rights | null };
+type NewApproval = Omit<ApprovalRow, "id" | "approvedAt" | "revokedAt" | "sourceId" | "rights" | "why"> & { rights?: Rights | null; why?: string | null };
 
 export class Guard {
   private readonly trustCfg: Required<Pick<TrustConfig, "pluginsRoots" | "budgetMs">> & { treeLimits?: TreeLimits } & { known: string[]; checks: (dir: string) => Promise<CheckResult> };
@@ -666,12 +674,27 @@ export class Guard {
     const sourceId = identityOf(i.sourceKind, i.source)?.id ?? null;
     const rights = i.rights ?? null;
     const info = this.db
-      .prepare(`INSERT INTO approvals (content_hash, plugin_id, version, source, source_kind, git_commit, npm_integrity, via, window_id, approved_at, source_id, rights) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(i.contentHash, i.pluginId, i.version, i.source, i.sourceKind, i.gitCommit, i.npmIntegrity, i.via, i.windowId, this.now(), sourceId, rights === null ? null : JSON.stringify(rights));
-    return { ...i, rights, sourceId, id: Number(info.lastInsertRowid), approvedAt: this.now(), revokedAt: null };
+      .prepare(`INSERT INTO approvals (content_hash, plugin_id, version, source, source_kind, git_commit, npm_integrity, via, window_id, approved_at, source_id, rights, why) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(i.contentHash, i.pluginId, i.version, i.source, i.sourceKind, i.gitCommit, i.npmIntegrity, i.via, i.windowId, this.now(), sourceId, rights === null ? null : JSON.stringify(rights), i.why ?? null);
+    return { ...i, rights, sourceId, why: i.why ?? null, id: Number(info.lastInsertRowid), approvedAt: this.now(), revokedAt: null };
   }
   private resolveQueue(pluginId: string, contentHash: string, status: "approved" | "dismissed"): void {
-    this.db.prepare(`UPDATE queue SET status = ? WHERE content_hash = ? AND plugin_id = ? AND status = 'held'`).run(status, contentHash, pluginId);
+    // Approving a version also undoes an earlier rejection of it by the person («Вернуть»); a rejection itself touches held entries only.
+    const from = status === "approved" ? "('held', 'dismissed')" : "('held')";
+    this.db.prepare(`UPDATE queue SET status = ? WHERE content_hash = ? AND plugin_id = ? AND status IN ${from}`).run(status, contentHash, pluginId);
+  }
+
+  /** A version the person rejected (dismissed) and has not brought back: no approval covers it. The core asks again at every start; the answer is "no" without a new entry. */
+  private isRejected(pluginId: string, contentHash: string): boolean {
+    return this.db.prepare(`SELECT 1 FROM queue WHERE content_hash = ? AND plugin_id = ? AND status = 'dismissed' LIMIT 1`).get(contentHash, pluginId) !== undefined;
+  }
+
+  /** The repeated question about a rejected version goes to the journal once an hour per version, not at every ask. */
+  private logRepeatReject(pluginId: string, contentHash: string, version: string): void {
+    const key = `rejected_logged:${pluginId}:${contentHash}`;
+    if (Number(this.meta(key) ?? 0) > this.now() - HOUR_MS) return;
+    this.setMeta(key, String(this.now()));
+    this.log("reject.repeat", pluginId, contentHash, { version, note: "версия отклонена вами; плагин остаётся выключенным, пока вы не нажмёте «Вернуть» в Карантине" });
   }
 
   private parseDecide(raw: Record<string, unknown>): DecideInput {
@@ -713,7 +736,7 @@ export class Guard {
       .prepare(`INSERT INTO queue (content_hash, plugin_id, version, source, source_kind, root_dir, trigger, status, first_seen, last_seen, stop, note, rights) VALUES (?, ?, ?, ?, ?, ?, ?, 'held', ?, ?, ?, ?, ?)`)
       .run(req.contentHash, req.pluginId, req.version, req.source, req.sourceKind, req.rootDir, req.trigger, this.now(), this.now(), stop ? 1 : 0, why.note, rightsJson);
     const id = Number(info.lastInsertRowid);
-    this.db.prepare(`DELETE FROM queue WHERE status != 'held' AND NOT (status = 'dismissed' AND stop = 1) AND id NOT IN (SELECT id FROM queue ORDER BY id DESC LIMIT ?)`).run(MAX_QUEUE_ROWS);
+    this.db.prepare(`DELETE FROM queue WHERE status != 'held' AND status != 'dismissed' AND id NOT IN (SELECT id FROM queue ORDER BY id DESC LIMIT ?)`).run(MAX_QUEUE_ROWS);
     this.log("hold", req.pluginId, req.contentHash, { review: id, version: req.version, trigger: req.trigger, source: req.source, sourceKind: req.sourceKind, ...(why.note !== null ? { note: why.note } : {}), ...(stop ? { stop: true } : {}) });
     return { id, created: true };
   }
@@ -729,6 +752,11 @@ export class Guard {
       this.sweepInner();
       // Already approved by a human or imported: nothing to hold (a window's approval is withdrawn by `revoke` first).
       if (this.activeApproval(req.pluginId, req.contentHash, req.source)) return { requestId: null };
+      // Rejected by the person: no new entry (the rejection stands until «Вернуть»).
+      if (this.isRejected(req.pluginId, req.contentHash)) {
+        this.logRepeatReject(req.pluginId, req.contentHash, req.version);
+        return { requestId: null };
+      }
       return { requestId: this.upsertHeld(req, raw.stop === true).id };
     });
   }
@@ -759,11 +787,18 @@ export class Guard {
       }
       if (this.coveringApproval(req)) return { action: "proceed", via: "approval" } as const;
 
+      // Rejected by the person and not brought back: "no", no new queue entry (the core keeps the plugin off), one journal line an hour per version.
+      // Before windows and the source rule: a window or a trusted source must not undo what the person said "no" to; «Вернуть» does.
+      if (this.isRejected(req.pluginId, req.contentHash)) {
+        this.logRepeatReject(req.pluginId, req.contentHash, req.version);
+        return { action: "reject", message: "secure-bb: версия отклонена вами; чтобы вернуть, нажмите «Вернуть» в Карантине" } as const;
+      }
+
       // A stop survives a rejection: dismiss needs no code, so a process that can reach the guard could otherwise clear the stop and let the window in.
       const stopped = this.isStopped(req.pluginId, req.contentHash);
       const w = stopped ? null : this.openWindowOf(req.pluginId);
       if (w) {
-        const a = this.addApproval({ contentHash: req.contentHash, pluginId: req.pluginId, version: req.version, source: req.source, sourceKind: req.sourceKind, gitCommit: null, npmIntegrity: null, via: "window", windowId: w.id, rights: ev?.ok && ev.hash === req.contentHash ? ev.rights : null });
+        const a = this.addApproval({ contentHash: req.contentHash, pluginId: req.pluginId, version: req.version, source: req.source, sourceKind: req.sourceKind, gitCommit: null, npmIntegrity: null, via: "window", windowId: w.id, rights: ev?.ok && ev.hash === req.contentHash ? ev.rights : null, why: "в открытом окне доверия: окно пропускает версии, пока не просят нового" });
         this.db.prepare(`UPDATE windows SET uses = uses + 1 WHERE id = ?`).run(w.id);
         if (w.mode === "sliding") {
           const next = Math.min(this.now() + w.sizeSec * 1000, w.hardExpiresAt);
@@ -776,7 +811,7 @@ export class Guard {
 
       const verdict = this.sourceVerdict(req, ev, stopped);
       if (verdict.pass) {
-        const a = this.addApproval({ contentHash: req.contentHash, pluginId: req.pluginId, version: req.version, source: req.source, sourceKind: req.sourceKind, gitCommit: null, npmIntegrity: null, via: "source", windowId: null, rights: verdict.rights });
+        const a = this.addApproval({ contentHash: req.contentHash, pluginId: req.pluginId, version: req.version, source: req.source, sourceKind: req.sourceKind, gitCommit: null, npmIntegrity: null, via: "source", windowId: null, rights: verdict.rights, why: String(verdict.detail.why ?? "прошла сама: источник и права те же") });
         this.resolveQueue(req.pluginId, req.contentHash, "approved");
         this.log("approved.source", req.pluginId, req.contentHash, { approval: a.id, version: req.version, source: req.source, sourceKind: req.sourceKind, ...verdict.detail });
         return { action: "proceed", via: "source" } as const;
@@ -965,6 +1000,8 @@ export class Guard {
     requestId: number | null;
     /** Troubleshooting mode is on until this time (the plugin's hook passes too, and says so); 0: off. */
     troubleshootUntil: number;
+    /** The person rejected this version and has not brought it back. */
+    rejected: boolean;
   } {
     const pluginId = pluginIdOf(raw.pluginId);
     const contentHash = hashOf(raw.contentHash);
@@ -977,6 +1014,7 @@ export class Guard {
       window: w ? { id: w.id, expiresAt: w.expiresAt, hardExpiresAt: w.hardExpiresAt, mode: w.mode, sizeSec: w.sizeSec } : null,
       requestId: q ? Number(q.id) : null,
       troubleshootUntil: this.troubleshootUntil(),
+      rejected: a === null && this.isRejected(pluginId, contentHash),
     };
   }
 
@@ -997,11 +1035,12 @@ export class Guard {
     return { ok: true };
   }
 
-  private heldRequest(id: number): QueueRow {
+  /** A held entry, or (when `orRejected`) one the person rejected: «Вернуть» approves it with a touch. */
+  private heldRequest(id: number, orRejected = false): QueueRow {
     const row = this.db.prepare(`SELECT * FROM queue WHERE id = ?`).get(id) as Raw | undefined;
     if (!row) throw new GuardError("not_found", `no request #${id}`);
     const q = queueOf(row);
-    if (q.status !== "held") throw new GuardError("conflict", `request #${id} is already ${q.status}`);
+    if (q.status !== "held" && !(orRejected && q.status === "dismissed")) throw new GuardError("conflict", `request #${id} is already ${q.status}`);
     return q;
   }
 
@@ -1023,11 +1062,11 @@ export class Guard {
     const id = intOf(raw.requestId, "requestId", 1, Number.MAX_SAFE_INTEGER);
     if (raw.acknowledgeBlock !== undefined && typeof raw.acknowledgeBlock !== "boolean") throw new GuardError("invalid", "acknowledgeBlock is true or false");
     const ack = raw.acknowledgeBlock === true;
-    const q = this.heldRequest(id);
+    const q = this.heldRequest(id, true);
     this.assertLiftable(q, ack);
     const factor = this.verifyFactor(`approve:${q.pluginId}`, this.normalizeAction({ op: "approve", requestId: id, ...(ack ? { acknowledgeBlock: true } : {}) }), raw);
     return this.tx(() => {
-      const a = this.addApproval({ contentHash: q.contentHash, pluginId: q.pluginId, version: q.version, source: q.source, sourceKind: q.sourceKind, gitCommit: null, npmIntegrity: null, via: "touch", windowId: null, rights: q.rights });
+      const a = this.addApproval({ contentHash: q.contentHash, pluginId: q.pluginId, version: q.version, source: q.source, sourceKind: q.sourceKind, gitCommit: null, npmIntegrity: null, via: "touch", windowId: null, rights: q.rights, why: touchWhy(q.note) });
       this.resolveQueue(q.pluginId, q.contentHash, "approved");
       // The record says what exactly was approved: after the fact, this is what the owner reads.
       this.log("approved.touch", q.pluginId, q.contentHash, { approval: a.id, review: q.id, version: q.version, source: q.source, sourceKind: q.sourceKind, rootDir: q.rootDir, ...(ack ? { acknowledgeBlock: true } : {}), ...factorDetail(factor) });
@@ -1041,7 +1080,7 @@ export class Guard {
    */
   approveAndTrust(raw: Record<string, unknown>): { approval: ApprovalRow; entry: string; mySources: string[] } {
     const id = intOf(raw.requestId, "requestId", 1, Number.MAX_SAFE_INTEGER);
-    const q = this.heldRequest(id);
+    const q = this.heldRequest(id, true);
     this.assertLiftable(q, false);
     if (isHardFlagNote(q.note)) throw new GuardError("invalid", "a version with a hard flag cannot be returned together with trusting its source");
     const action = this.normalizeAction({ op: "approve-trust", requestId: id });
@@ -1050,7 +1089,7 @@ export class Guard {
     if (!cur.includes(entry) && cur.length + 1 > MAX_SOURCES) throw new GuardError("invalid", `at most ${MAX_SOURCES} sources`);
     const factor = this.verifyFactor(`approve-trust:${q.pluginId}`, action, raw);
     return this.tx(() => {
-      const a = this.addApproval({ contentHash: q.contentHash, pluginId: q.pluginId, version: q.version, source: q.source, sourceKind: q.sourceKind, gitCommit: null, npmIntegrity: null, via: "touch", windowId: null, rights: q.rights });
+      const a = this.addApproval({ contentHash: q.contentHash, pluginId: q.pluginId, version: q.version, source: q.source, sourceKind: q.sourceKind, gitCommit: null, npmIntegrity: null, via: "touch", windowId: null, rights: q.rights, why: touchWhy(q.note) });
       this.resolveQueue(q.pluginId, q.contentHash, "approved");
       const next = cur.includes(entry) ? cur : [...cur, entry].sort();
       this.setMeta("my_sources", JSON.stringify(next));
@@ -1150,7 +1189,7 @@ export class Guard {
           results.push({ kind: "queue", id: it.id, label: it.label, ok: false, local: false, note: "изменилось после показа списка: не одобрено, посмотрите заново" });
           continue;
         }
-        const a = this.addApproval({ contentHash: q.contentHash, pluginId: q.pluginId, version: q.version, source: q.source, sourceKind: q.sourceKind, gitCommit: null, npmIntegrity: null, via: "touch", windowId: null, rights: q.rights });
+        const a = this.addApproval({ contentHash: q.contentHash, pluginId: q.pluginId, version: q.version, source: q.source, sourceKind: q.sourceKind, gitCommit: null, npmIntegrity: null, via: "touch", windowId: null, rights: q.rights, why: touchWhy(q.note) });
         this.resolveQueue(q.pluginId, q.contentHash, "approved");
         this.log("approved.touch", q.pluginId, q.contentHash, { approval: a.id, review: q.id, version: q.version, source: q.source, sourceKind: q.sourceKind, rootDir: q.rootDir, batch: b.id, ...factorDetail(factor) });
         results.push({ kind: "queue", id: it.id, label: it.label, ok: true, local: false, note: "одобрено" });
@@ -1889,6 +1928,8 @@ export class Guard {
       firstSeen: Number(r.first_seen),
       lastSeen: Number(r.last_seen),
       resolvedAt: r.resolved_at === null ? null : Number(r.resolved_at),
+      rejected: r.rejected_at !== null && r.rejected_at !== undefined,
+      rejectedAt: r.rejected_at === null || r.rejected_at === undefined ? null : Number(r.rejected_at),
     });
     const rank = `CASE class WHEN 'critical' THEN 0 WHEN 'instructions' THEN 1 ELSE 2 END`;
     const open = (this.db.prepare(`SELECT * FROM agent_drifts WHERE status = 'open' ORDER BY ${rank}, id DESC LIMIT 500`).all() as Raw[]).map(view);
@@ -1911,6 +1952,28 @@ export class Guard {
       alarms: (last?.alarms as unknown[] | undefined) ?? [],
       notes: (last?.notes as unknown[] | undefined) ?? [],
     };
+  }
+
+  /**
+   * «Это не я — отклонить»: marks open differences as rejected. Tightening, so no code: nothing goes into the baseline, the difference stays open
+   * (the alarm, the polluted thread and the closed windows stay until the file itself is fixed), and the journal gets a record. The guard cannot
+   * roll a file back (it only reads the agents' files), so the person fixes it by hand; accepting is still possible later, with a touch.
+   */
+  agentsReject(raw: Record<string, unknown>): { rejected: number } {
+    if (this.agents === null) throw new GuardError("invalid", "the agent watch is not configured at this guard");
+    const ids = this.agentIds(raw.ids);
+    return this.tx(() => {
+      const rows = this.openDrifts(ids);
+      const now = this.now();
+      let n = 0;
+      for (const r of rows) {
+        if (r.rejected_at !== null && r.rejected_at !== undefined) continue;
+        this.db.prepare(`UPDATE agent_drifts SET rejected_at = ? WHERE id = ?`).run(now, Number(r.id));
+        n++;
+      }
+      this.log("agents.reject", null, null, { count: n, drifts: rows.slice(0, 50).map((r) => ({ id: Number(r.id), path: String(r.path), change: String(r.change), class: String(r.class) })) });
+      return { rejected: n };
+    });
   }
 
   /** Accepts differences into the baseline. A touch (a code or a passkey signature over exactly these ids), like `approve`. */

@@ -71,6 +71,8 @@ export interface GateDeps {
   threads: ThreadTree;
   /** Third-party plugins that are running now (their UI code shares our origin). */
   thirdPartyRunning: () => Promise<string[]>;
+  /** Who keeps the approval session closed: running plugins not from «мои источники» and/or with an interface. Absent: every running third-party plugin. */
+  sessionBlockers?: () => Promise<string[]>;
   /** Path from `BB_SECURE_BB_TOTP_FILE`, or null. */
   externalTotpFile: string | null;
   /** Directory snapshots live in (no trailing slash needed); only plugins inside it can use windows or touch-approved proposals. */
@@ -125,6 +127,8 @@ function secretFromFile(text: string): string | null {
   const candidate = uri ? uri[1]! : (trimmed.split(/\s+/)[0] ?? "");
   return /^[A-Za-z2-7]{16,}=*$/.test(candidate) ? candidate.toUpperCase() : null;
 }
+
+const REJECTED_BY_PERSON = "secure-bb: версия отклонена вами; чтобы вернуть, нажмите «Вернуть» в Карантине";
 
 export class Gate {
   constructor(private readonly d: GateDeps) {}
@@ -235,12 +239,17 @@ export class Gate {
     this.store.log("session.use", null, null, { purpose });
   }
 
+  /** The plugins that keep a session closed: not every running third-party plugin, only the ones whose code could reach the token (see `sessionBlockers` in probe.ts). */
+  private async sessionBlockers(): Promise<string[]> {
+    return this.d.sessionBlockers ? this.d.sessionBlockers() : this.d.thirdPartyRunning();
+  }
+
   /**
    * Opens a session with one fresh code. Refused while any third-party plugin runs: its interface code lives in the page's
    * origin and could read the token. The old session (if any) is closed: there is one.
    */
   async openSession(code: string): Promise<{ token: string; idleMs: number; capMs: number }> {
-    const running = await this.d.thirdPartyRunning();
+    const running = await this.sessionBlockers();
     if (running.length > 0)
       throw new GateError("conflict", `disable these third-party plugins first: their interface code could read the session token (${running.join(", ")})`, { plugins: running });
     this.touch("session.open", code);
@@ -258,7 +267,7 @@ export class Gate {
   async openGuardSession(proof: GuardProof): Promise<{ token: string; idleMs: number; capMs: number }> {
     const guard = this.d.guard;
     if (!guard) throw new GateError("invalid", "not in guard mode");
-    const running = await this.d.thirdPartyRunning();
+    const running = await this.sessionBlockers();
     if (running.length > 0)
       throw new GateError("conflict", `disable these third-party plugins first: their interface code could read the session token (${running.join(", ")})`, { plugins: running });
     const opened = await guard.sessionOpen(proof);
@@ -286,13 +295,13 @@ export class Gate {
       // The sessions are the guard's: ask it whether one is open (no secret in the answer), and close it there if a third-party plugin runs.
       const open = (await this.d.guard.state().catch(() => null))?.sessions ?? [];
       if (open.length === 0) return [];
-      const running = await this.d.thirdPartyRunning();
+      const running = await this.sessionBlockers();
       if (running.length === 0) return [];
       await this.closeGuardSessions(`third-party plugin running: ${running.slice(0, 5).join(", ")}`);
       return running;
     }
     if (this.store.unclosedSessions().length === 0) return [];
-    const running = await this.d.thirdPartyRunning();
+    const running = await this.sessionBlockers();
     if (running.length === 0) return [];
     this.closeSessions(`third-party plugin running: ${running.slice(0, 5).join(", ")}`);
     return running;
@@ -599,6 +608,8 @@ export class Gate {
    *              holding here as well means a core that does not (yet) ask the guard still cannot load an unapproved version.
    * Findings and reasons go to the guard's queue entry as an annotation (for the page; nothing there decides anything).
    */
+  private readonly rejectLogged = new Map<string, number>();
+
   private async decideGuarded(ctx: HookCtx, guard: GuardPort): Promise<Decision> {
     let look: GuardLookup;
     try {
@@ -613,6 +624,16 @@ export class Gate {
     if (look.troubleshootUntil > this.now) {
       this.store.logDecision("troubleshoot", ctx.pluginId, ctx.contentHash, { version: ctx.version, trigger: ctx.trigger, until: look.troubleshootUntil, approved: look.approved });
       return { action: "proceed" };
+    }
+    // The person rejected this version and has not brought it back: "no", no new queue entry, no hold at the guard, and a journal line once an hour per version
+    // (the core asks again at every start).
+    if (look.rejected && !look.approved) {
+      const key = `${ctx.pluginId}:${ctx.contentHash}`;
+      if ((this.rejectLogged.get(key) ?? 0) <= this.now - 3_600_000) {
+        this.rejectLogged.set(key, this.now);
+        this.store.logDecision("reject.repeat", ctx.pluginId, ctx.contentHash, { version: ctx.version, trigger: ctx.trigger, reason: "rejected by the person" });
+      }
+      return { action: "reject", message: REJECTED_BY_PERSON };
     }
     // Not approved and no window: the guard may let it in by itself (an own source, rights not grown). The core runs the hooks before it asks the
     // guard, so without this question the hook would hold such a version once and it would wait for a recheck. What the guard decides is the guard's:
@@ -735,7 +756,6 @@ export class Gate {
    * The queue entry is the guard's; the thread comes from the proposal whose snapshot directory is the entry's directory.
    */
   async openGuardWindow(entry: { id: number; pluginId: string; contentHash: string; rootDir: string }, proof: GuardProof, scope?: "tree" | "thread"): Promise<WindowRow> {
-    const guard = this.d.guard!;
     let proposal: ProposalRow | null = null;
     try {
       proposal = this.store.proposalByDir(await realpath(entry.rootDir));
@@ -744,7 +764,23 @@ export class Gate {
     }
     if (!proposal || proposal.pluginId !== entry.pluginId || !proposal.threadId)
       throw new GateError("invalid", "this entry did not come from a thread, so a trust window cannot be bound to it; approve the version instead");
-    const found = this.store.getCheck(entry.contentHash)?.result ?? this.store.getCheck(localCheckKey(proposal.localHash))?.result ?? null;
+    return this.openGuardWindowFor(entry.pluginId, proposal, this.store.getCheck(entry.contentHash)?.result ?? null, proof, scope);
+  }
+
+  /**
+   * «Открыть окно на N мин» on the plugin's own row (no waiting version): the window is bound to the thread of the plugin's latest proposal.
+   * No such thread (the plugin was not put in by an agent through `propose`): no window, and the page says why.
+   */
+  async openGuardWindowForPlugin(pluginId: string, proof: GuardProof, scope?: "tree" | "thread"): Promise<WindowRow> {
+    const proposal = this.store.latestThreadProposal(pluginId);
+    if (!proposal) throw new GateError("invalid", "this plugin was not proposed from a thread, so a trust window cannot be bound to it");
+    return this.openGuardWindowFor(pluginId, proposal, null, proof, scope);
+  }
+
+  private async openGuardWindowFor(pluginId: string, proposal: ProposalRow, checked: CheckResult | null, proof: GuardProof, scope?: "tree" | "thread"): Promise<WindowRow> {
+    const guard = this.d.guard!;
+    const entry = { pluginId };
+    const found = checked ?? this.store.getCheck(localCheckKey(proposal.localHash))?.result ?? null;
     if (found !== null && bySeverity(found, "block").length > 0)
       throw new GateError("invalid", "this version was blocked by the checks; a window cannot be opened on it (approve the version knowingly, or fix the plugin)");
     const policy = this.store.policy();
@@ -753,7 +789,7 @@ export class Gate {
     for (const old of this.store.unclosedWindows()) if (old.pluginId === entry.pluginId) this.store.closeWindow(old.id, "reopened");
     const w = this.store.insertWindow({
       pluginId: entry.pluginId,
-      threadId: proposal.threadId,
+      threadId: proposal.threadId ?? "неизвестен",
       scope: scope ?? policy.scope,
       mode: gw.mode,
       sizeSec: gw.sizeSec,

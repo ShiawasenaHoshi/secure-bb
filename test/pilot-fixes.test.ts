@@ -15,7 +15,7 @@ const held = (id: number, pluginId: string, version: string, hash: string | null
 describe("2. rights are concrete", () => {
   const env = (...detail: string[]) => capabilityPhrase({ kind: "env", detail });
   it("env:HOME and env:* read differently; «все» is the red word of env:*", () => {
-    expect(env("HOME")).toBe("узнать путь к вашей домашней папке");
+    expect(env("HOME")).toBe("узнать путь к вашей домашней папке (только где она лежит, не её содержимое)");
     expect(env("*")).toBe("прочитать все переменные окружения (там бывают пароли и токены)");
     expect(env("HOME")).not.toBe(env("*"));
     expect(env("HOME")).not.toMatch(/пароли|токены|все/);
@@ -27,7 +27,7 @@ describe("2. rights are concrete", () => {
     expect(env("MY_FLAG")).toBe("прочитать переменную окружения «MY_FLAG»");
     expect(env()).toContain("все");
     expect(env("HOME", "*")).toContain("все");
-    expect(env("HOME", "USER")).toBe("узнать путь к вашей домашней папке; узнать имя вашего пользователя");
+    expect(env("HOME", "USER")).toBe("узнать путь к вашей домашней папке (только где она лежит, не её содержимое); узнать имя вашего пользователя");
   });
   it("the network to a named host is not «в интернет вообще»", () => {
     const one = capabilityPhrase({ kind: "network", detail: ["host:telemetry.example", "module:node:https"] });

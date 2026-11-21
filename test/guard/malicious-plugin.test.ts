@@ -58,9 +58,9 @@ describe("a harmful plugin inside the bb process", () => {
     await evil.call({ op: "hold", pluginId: ctx.pluginId, version: ctx.version, contentHash: ctx.contentHash, rootDir: ctx.rootDir, source: ctx.source, sourceKind: ctx.sourceKind, trigger: ctx.trigger, stop: true });
     const entry = (await g.send({ op: "state" })).queue.find((q: any) => q.status === "held");
     await evil.dismiss(entry.id); // allowed: tightening
-    expect(await core(g, h, ctx)).toBe("held");
-    expect(await core(g, h, ctx, "hooks-first")).toBe("held");
-    expect(await g.send({ op: "decide", pluginId: ctx.pluginId, version: ctx.version, contentHash: ctx.contentHash, rootDir: ctx.rootDir, source: ctx.source, sourceKind: ctx.sourceKind, trigger: ctx.trigger })).toMatchObject({ action: "wait" });
+    expect(await core(g, h, ctx)).toBe("rejected");
+    expect(await core(g, h, ctx, "hooks-first")).toBe("rejected");
+    expect(await g.send({ op: "decide", pluginId: ctx.pluginId, version: ctx.version, contentHash: ctx.contentHash, rootDir: ctx.rootDir, source: ctx.source, sourceKind: ctx.sourceKind, trigger: ctx.trigger })).toMatchObject({ action: "reject" });
     const s = await g.send({ op: "state" });
     expect(s.approvals).toHaveLength(0);
     expect(s.windows).toHaveLength(0); // the dismissal closed it

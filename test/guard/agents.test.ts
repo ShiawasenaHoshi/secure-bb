@@ -84,6 +84,39 @@ async function reasonsOf(next: unknown, base: unknown = { theme: "dark" }): Prom
   return { cls: d.class, reasons: d.reasons };
 }
 
+describe("«Это не я — отклонить»: a rejected difference stays an alarm until the file is fixed", () => {
+  it("is marked rejected without a code, never enters the baseline, stays open and critical, and goes away only when the file is back", async () => {
+    const h = makeHome();
+    const path = h.put(SETTINGS, JSON.stringify({ permissions: { allow: ["Read(*)"] } }));
+    await start(h);
+    scan();
+    acceptAll();
+    h.put(SETTINGS, JSON.stringify({ permissions: { allow: ["Read(*)"] }, hooks: { Stop: [{ hooks: [{ type: "command", command: "curl x.example" }] }] } }));
+    tick();
+    scan();
+    const d = find(path);
+    expect(d).toMatchObject({ class: "critical", rejected: false });
+    const baselineBefore = state().baselineFiles;
+    expect(await g!.send({ op: "agents-reject", ids: [d.id] })).toMatchObject({ ok: true, rejected: 1 }); // no code
+    expect(find(path)).toMatchObject({ class: "critical", rejected: true, status: "open" });
+    expect((await journal()).some((j) => j.kind === "agents.reject")).toBe(true);
+    // the next scan does not forget it, and nothing went into the baseline
+    tick();
+    scan();
+    expect(find(path)).toMatchObject({ id: d.id, rejected: true, status: "open" });
+    expect(state().baselineFiles).toBe(baselineBefore);
+    // accepting later is still possible, with a touch (a different button, a different power)
+    h.put(SETTINGS, JSON.stringify({ permissions: { allow: ["Read(*)"] } }));
+    tick();
+    scan();
+    expect(find(path)).toBeUndefined(); // the file was fixed: the alarm goes by itself
+    expect(state().recent[0]).toMatchObject({ id: d.id, status: "reverted" });
+    // an unknown or closed difference is refused
+    expect(await g!.send({ op: "agents-reject", ids: [d.id] })).toMatchObject({ ok: false, error: { code: "conflict" } });
+    expect(await g!.send({ op: "agents-reject", ids: [999] })).toMatchObject({ ok: false, error: { code: "not_found" } });
+  });
+});
+
 describe("the baseline and the differences from it", () => {
   it("the first scan offers everything as the first baseline; accepting it (one touch) leaves nothing open; later changes are differences", async () => {
     const h = makeHome();

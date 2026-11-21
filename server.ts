@@ -34,7 +34,7 @@ import { createHash } from "node:crypto";
 import { BLOCKED_REASON, bySeverity, capabilityTokens } from "./src/decision.js";
 import { Gate, GateError, UNSAFE_DIR_REASON, type HookCtx, type ThreadTree } from "./src/gate.js";
 import { buildOverview } from "./src/overview.js";
-import { collectProbe, isThirdParty, runningThirdParty, type InstalledPluginLite } from "./src/probe.js";
+import { collectProbe, isThirdParty, runningThirdParty, sessionBlockersFromGuard, type InstalledPluginLite } from "./src/probe.js";
 import { runChecks } from "./src/checks/index.js";
 import { checkPathRefusal, checkSummary } from "./src/checkpath.js";
 import type { FetchLike } from "./src/deps/registry.js";
@@ -216,6 +216,7 @@ export default async function plugin(bb: BbPluginApi) {
     threads,
     taint,
     thirdPartyRunning: async () => runningThirdParty(await listPlugins()),
+    sessionBlockers: async () => sessionBlockersFromGuard(await listPlugins(), guardLink ? await guardLink.state().catch(() => null) : null).map((b) => b.id),
     externalTotpFile: process.env.BB_SECURE_BB_TOTP_FILE?.trim() || null,
     snapshotsRoot,
     onChecked: () => {
@@ -526,11 +527,12 @@ export default async function plugin(bb: BbPluginApi) {
     return guardLink;
   };
   /** The held entry of the guard's queue with this id (the page's ids are the guard's in guard mode). */
-  const guardEntry = async (id: number): Promise<GuardQueueEntry> => {
+  /** An entry waiting for a decision; with `orRejected` also one the person rejected («Вернуть» in Quarantine approves it with a touch). */
+  const guardEntry = async (id: number, orRejected = false): Promise<GuardQueueEntry> => {
     const st = await needGuard().state();
     const q = st.queue.find((x) => x.id === id);
     if (!q) throw new GateError("not_found", `no review #${id}`);
-    if (q.status !== "held") throw new GateError("conflict", `review #${id} is already ${q.status}`);
+    if (q.status !== "held" && !(orRejected && q.status === "dismissed")) throw new GateError("conflict", `review #${id} is already ${q.status}`);
     return q;
   };
   const proposalOfEntry = async (q: { rootDir: string; pluginId: string }) => {
@@ -624,7 +626,7 @@ export default async function plugin(bb: BbPluginApi) {
   const approveAtGuard = async (id: number, proof: GuardProof | undefined, acknowledgeBlock: boolean | undefined): Promise<{ ok: true; note: string }> => {
     const link = needGuard();
     if (proof === undefined) throw new GateError("invalid_code", "a code or a touch is needed: the guard checks it");
-    const q = await guardEntry(id);
+    const q = await guardEntry(id, true);
     const f = await entryFacts(q);
     if (f.unsafeDir) throw new GateError("invalid", "this version lies in a directory that others can write to; it cannot be approved from there (see the page)", { unsafeDir: true });
     if (f.blocked && !acknowledgeBlock) throw new GateError("invalid", "this version was blocked by the checks; confirm that you accept the risk to approve it anyway", { blocked: true });
@@ -792,6 +794,15 @@ export default async function plugin(bb: BbPluginApi) {
       return view;
     }),
     // A touch for exactly these differences: the guard checks the code or the signature (bound to the ids) and moves its baseline. Nothing is accepted here.
+    // «Это не я — отклонить»: no code (tightening). The difference stays open: the alarm and the pollution stay until the file itself is fixed.
+    "agents.reject": wrap(async ({ ids }) => {
+      if (!agents || !guardLink) throw new GateError("invalid", "отклонить расхождения можно только через сторожа");
+      if (ids.length === 0) throw new GateError("invalid", "нет расхождений для отклонения");
+      const r = await guardLink.agentsReject(ids);
+      await agents.refresh(false);
+      changed();
+      return { ok: true as const, rejected: r.rejected, note: "отклонено: в эталон не пошло; тревога остаётся, пока файл не исправят" };
+    }),
     "agents.accept": wrap(async ({ ids, code, passkey }) => {
       if (!agents || !guardLink) throw new GateError("invalid", "принять расхождения можно только через сторожа");
       if (ids.length === 0) throw new GateError("invalid", "нет расхождений для принятия");
@@ -821,7 +832,7 @@ export default async function plugin(bb: BbPluginApi) {
       const proof = proofOf(code, passkey);
       if (proof === undefined) throw new GateError("invalid_code", "a code or a touch is needed: the guard checks it");
       if (id < 0) throw new GateError("invalid", "this proposal is not installed yet: approve it first (the source can be trusted from its entry then)");
-      const q = await guardEntry(id);
+      const q = await guardEntry(id, true);
       const f = await entryFacts(q);
       if (f.unsafeDir) throw new GateError("invalid", "this version lies in a directory that others can write to; it cannot be approved from there (see the page)", { unsafeDir: true });
       if (f.blocked) throw new GateError("invalid", "this version was stopped by the checks: it is returned on its own card, never together with trusting its source", { blocked: true });
@@ -851,7 +862,18 @@ export default async function plugin(bb: BbPluginApi) {
       changed();
       return { ok: true as const };
     }),
-    "window.open": wrap(async ({ queueId, code, passkey, session, scope }) => {
+    "window.open": wrap(async ({ queueId, pluginId, code, passkey, session, scope }) => {
+      if (pluginId !== undefined && queueId === undefined) {
+        // From the plugin's own row (no waiting version): bound to the thread of its latest proposal.
+        if (!guardLink) throw new GateError("invalid", "из строки плагина окно открывается только в режиме сторожа; без него — с карточки версии, которая ждёт решения");
+        const proof = proofOrSession({ code, passkey, session }, scope === "tree" && store.policy().scope === "thread");
+        if (proof === undefined) throw new GateError("invalid_code", "a code or a touch is needed: the guard checks it");
+        await gate.openGuardWindowForPlugin(pluginId, proof, scope);
+        recheck();
+        changed();
+        return { ok: true as const };
+      }
+      if (queueId === undefined) throw new GateError("invalid", "queueId or pluginId is needed");
       if (guardLink) {
         // "The whole tree" while the policy says "this thread only" widens the policy: a fresh touch, never a session.
         const proof = proofOrSession({ code, passkey, session }, scope === "tree" && store.policy().scope === "thread");
@@ -1084,6 +1106,10 @@ export default async function plugin(bb: BbPluginApi) {
           return out({ op: "batch-approve", batchId: q.batchId, setHash: q.setHash });
         }
         case "window.open": {
+          if (q.pluginId !== undefined && q.queueId === undefined) {
+            if (!store.latestThreadProposal(q.pluginId)) throw new GateError("invalid", "a window is opened for a plugin that an agent put in from a thread");
+            return out({ op: "open-window", pluginId: q.pluginId, scope: q.scope ?? store.policy().scope });
+          }
           if (q.queueId === undefined || q.queueId < 0) throw new GateError("invalid", "a window is opened from an installed entry of the guard's queue");
           const entry = await guardEntry(q.queueId);
           return out({ op: "open-window", pluginId: entry.pluginId, scope: q.scope ?? store.policy().scope });
