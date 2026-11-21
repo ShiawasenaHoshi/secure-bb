@@ -15,13 +15,36 @@ export function isTrustedRepo(slug: string, patterns: readonly string[]): boolea
   return patterns.some((p) => p === s || (p.endsWith("/*") && p.slice(0, -2) === owner));
 }
 
-const GITHUB = /github\.com[:/]+([\w.-]+)\/([\w.-]+?)(?:\.git)?(?=[\s/"'?#]|$)/i;
 const ADDRESS = /\b(?:https?|ssh|git|ftp):\/\/[^\s"']+|\bgit@[\w.-]+:[^\s"']+/gi;
 
-/** `owner/name` of a github.com address; null for other hosts or unparsable ones. */
+/**
+ * `owner/name` of a github.com address; null for other hosts or unparsable ones. The host is read from the parsed address
+ * and must be exactly `github.com`: `github.com` in the path (`https://evil.tld/github.com/o/r`), in a longer host name
+ * (`github.com.evil.tld`) or in the user part (`github.com@evil.tld`) is not GitHub (threat model F10).
+ */
 export function githubSlug(address: string): string | null {
-  const m = GITHUB.exec(address);
-  return m ? `${m[1]}/${m[2]}`.toLowerCase() : null;
+  let host: string;
+  let path: string;
+  const scp = /^[\w.-]+@([\w.-]+):(.+)$/.exec(address); // git@github.com:owner/name.git
+  if (scp) {
+    host = scp[1]!;
+    path = scp[2]!;
+  } else {
+    try {
+      const u = new URL(address);
+      if (!["https:", "http:", "ssh:", "git:"].includes(u.protocol)) return null;
+      host = u.hostname;
+      path = u.pathname;
+    } catch {
+      return null;
+    }
+  }
+  if (host.toLowerCase() !== "github.com") return null;
+  const parts = path.split(/[?#]/)[0]!.split("/").filter(Boolean);
+  if (parts.length < 2) return null;
+  const owner = parts[0]!;
+  const name = parts[1]!.replace(/\.git$/i, "");
+  return /^[\w.-]+$/.test(owner) && /^[\w.-]+$/.test(name) ? `${owner}/${name}`.toLowerCase() : null;
 }
 
 /** True when the segment has addresses and every one is a trusted github.com repository. */

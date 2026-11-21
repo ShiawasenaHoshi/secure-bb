@@ -44,18 +44,11 @@ describe("trusted repositories: own work does not taint", () => {
   });
 
   it("gh with an explicit trusted repository does not taint; without one it does", () => {
-    for (const c of [
-      "gh pr checkout 5 --repo me/my-plugin",
-      "gh pr diff 5 -R myorg/tool",
-      "gh api repos/me/my-plugin/pulls/5",
-      "gh repo clone me/my-plugin",
-      "gh issue view 3 --repo https://github.com/me/my-plugin",
-      "gh release download v1 --repo=me/my-plugin",
-    ])
+    for (const c of ["gh repo clone me/my-plugin", "gh release download v1 --repo=me/my-plugin", "gh api repos/me/my-plugin/contents/README.md", "gh repo view me/my-plugin"])
       expect(cmd(c, MINE), c).toBeNull();
-    for (const c of ["gh pr checkout 5", "gh api user", "gh repo clone evil/x", "gh pr diff 5 --repo evil/x", "gh pr checkout 5 --repo me/my-plugin && gh pr diff 6"])
+    for (const c of ["gh pr checkout 5", "gh api user", "gh repo clone evil/x", "gh pr diff 5 --repo evil/x", "gh repo clone me/my-plugin && gh pr diff 6"])
       expect(cmd(c, MINE)?.kind, c).toBe("repo");
-    expect(cmd("gh pr checkout 5 --repo me/my-plugin", [])?.kind).toBe("repo");
+    expect(cmd("gh repo clone me/my-plugin", [])?.kind).toBe("repo");
   });
 
   it("non-repository kinds are unaffected by the list", () => {

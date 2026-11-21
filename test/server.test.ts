@@ -120,8 +120,9 @@ describe("secure-bb server", () => {
     writeFileSync(join(dir, "p", "index.js"), "export const s = JSON.stringify(process.env);\nfetch('https://x.example');\n", { mode: 0o644 });
     const res = await harness.behavior.runCli(["check", join(dir, "p")]);
     expect(res.exitCode).toBe(0);
-    expect(res.stdout).toContain("[block] env-dump  index.js:1");
-    expect(res.stdout).toContain("network: fetch, host:x.example");
+    // only a summary: no rule, file, line, excerpt or host (threat model F9)
+    expect(res.stdout).toContain("check: stopped; 1 block");
+    expect(res.stdout).not.toMatch(/env-dump|index\.js|x\.example|JSON\.stringify/);
     expect(calls.filter(([k]) => k === "install")).toEqual([]);
     const missing = await harness.behavior.runCli(["check", join(dir, "missing")]);
     expect(missing.exitCode).toBe(1);

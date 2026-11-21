@@ -197,8 +197,10 @@ export class Sentinel {
 
   // ---- settings: every change needs a code (spec §9: policy is changed only by touch) --------------
   setSettings(patch: SettingsPatch, code: string | undefined): SentinelSettings {
-    if (code === undefined) throw new SentinelError("invalid_code", "изменение настроек дозора требует кода");
     const cur = this.settings();
+    // Switching the module off, or narrowing it to threads with an open window, only sends less: no code, and the block after wrong codes does not apply (threat model F8).
+    const tightensOnly = Object.entries(patch).every(([k, v]) => v === undefined || (k === "enabled" && v === false) || (k === "allThreads" && v === false));
+    if (!tightensOnly && code === undefined) throw new SentinelError("invalid_code", "изменение настроек дозора требует кода");
     const next: SentinelSettings = { ...cur, thresholds: { ...cur.thresholds }, instructions: { ...cur.instructions } };
     if (patch.provider !== undefined) next.provider = patch.provider;
     if (patch.enabled !== undefined) next.enabled = patch.enabled;
@@ -217,7 +219,7 @@ export class Sentinel {
       else next.instructions[id] = text.trim().slice(0, 2000);
     }
     const normalized = normalizeSettings(next);
-    this.d.touch("sentinel.settings", code);
+    if (!tightensOnly) this.d.touch("sentinel.settings", code!);
     this.d.store.setSettings(normalized);
     this.d.onChange?.();
     return normalized;

@@ -262,8 +262,13 @@ export interface Policy {
   /** Hard ceiling of one configuration window, minutes. */
   cfgCapMin: number;
   cfgMode: "sliding" | "fixed";
+  /**
+   * Threat model F7: any server code of a plugin runs in the gate's process and uid and can rewrite its state, so
+   * "clean checks, no capabilities" is not a reason to skip the touch. Off by default; turned on only with a code.
+   */
+  autoSafe: boolean;
 }
-export const DEFAULT_POLICY: Policy = { windowMin: 30, capMin: 240, mode: "sliding", scope: "tree", cfgWindowMin: 10, cfgCapMin: 240, cfgMode: "sliding" };
+export const DEFAULT_POLICY: Policy = { windowMin: 30, capMin: 240, mode: "sliding", scope: "tree", cfgWindowMin: 10, cfgCapMin: 240, cfgMode: "sliding", autoSafe: false };
 
 export interface TotpRow {
   secret: string;
@@ -521,6 +526,7 @@ export class Store implements RegistryCache {
       cfgWindowMin: num("cfg_window_min", DEFAULT_POLICY.cfgWindowMin),
       cfgCapMin: num("cfg_cap_min", DEFAULT_POLICY.cfgCapMin),
       cfgMode: map.get("cfg_mode") === "fixed" ? "fixed" : "sliding",
+      autoSafe: map.get("auto_safe") === "1",
     };
   }
   setPolicy(patch: Partial<Policy>): void {
@@ -532,6 +538,7 @@ export class Store implements RegistryCache {
     if (patch.cfgWindowMin !== undefined) put.run("cfg_window_min", String(patch.cfgWindowMin));
     if (patch.cfgCapMin !== undefined) put.run("cfg_cap_min", String(patch.cfgCapMin));
     if (patch.cfgMode !== undefined) put.run("cfg_mode", patch.cfgMode);
+    if (patch.autoSafe !== undefined) put.run("auto_safe", patch.autoSafe ? "1" : "0");
   }
   getMeta(key: string): string | null {
     const r = this.db.prepare(`SELECT value FROM policy WHERE key = ?`).get(`meta.${key}`) as { value: string } | undefined;
@@ -662,6 +669,20 @@ export class Store implements RegistryCache {
   getApproval(id: number): ApprovalRow | null {
     const r = this.db.prepare(`SELECT * FROM approvals WHERE id = ?`).get(id) as Raw | undefined;
     return r ? approval(r) : null;
+  }
+  /**
+   * Revokes every active approval of the same version as `a`: the row itself and each row of that plugin with the same core
+   * content hash or the same reviewed-source hash (a version has one row before the build and another after, threat model F18).
+   * Returns the reviewed-source hashes involved, so that the snapshots they name can be unpinned too.
+   */
+  revokeVersion(a: { pluginId: string; contentHash: string; localHash: string | null }): { revoked: number; localHashes: string[] } {
+    const rows = this.db
+      .prepare(`SELECT id, local_hash FROM approvals WHERE plugin_id = ? AND revoked_at IS NULL AND (content_hash = ? OR (? IS NOT NULL AND local_hash = ?))`)
+      .all(a.pluginId, a.contentHash, a.localHash, a.localHash) as Array<{ id: number; local_hash: string | null }>;
+    for (const r of rows) this.revokeApproval(r.id);
+    const hashes = new Set<string>(a.localHash ? [a.localHash] : []);
+    for (const r of rows) if (r.local_hash) hashes.add(r.local_hash);
+    return { revoked: rows.length, localHashes: [...hashes] };
   }
   revokeApproval(id: number): void {
     this.db.prepare(`UPDATE approvals SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`).run(this.now(), id);
@@ -1117,6 +1138,19 @@ export class Store implements RegistryCache {
     this.log(kind, pluginId, contentHash, detail);
     return true;
   }
+  /** The newest records of the given kinds since `since` (not limited by how many other records came after them). */
+  listLogKinds(kinds: readonly string[], since: number, limit = 20): LogRow[] {
+    const marks = kinds.map(() => "?").join(",");
+    const rows = this.db.prepare(`SELECT * FROM log WHERE kind IN (${marks}) AND ts >= ? ORDER BY id DESC LIMIT ?`).all(...kinds, since, limit) as Raw[];
+    return rows.map((r) => ({
+      id: r.id as number,
+      ts: r.ts as number,
+      kind: r.kind as string,
+      pluginId: (r.plugin_id as string | null) ?? null,
+      contentHash: (r.content_hash as string | null) ?? null,
+      detail: r.detail ? JSON.parse(r.detail as string) : null,
+    })) as LogRow[];
+  }
   /** `withoutPrefix`: leave out kinds that start so (the agent's view hides approval-session records). */
   listLog(limit = 100, withoutPrefix?: string): LogRow[] {
     const rows = withoutPrefix === undefined
@@ -1188,6 +1222,9 @@ export class Store implements RegistryCache {
          ON CONFLICT(plugin_id) DO UPDATE SET local_hash = excluded.local_hash WHERE seen_plugins.baseline = 1`,
       )
       .run(pluginId, this.now(), localHash);
+  }
+  hasBaselineRow(pluginId: string): boolean {
+    return this.db.prepare(`SELECT 1 FROM seen_plugins WHERE plugin_id = ? AND baseline = 1`).get(pluginId) !== undefined;
   }
   baselineHash(pluginId: string): string | null {
     const r = this.db.prepare(`SELECT local_hash FROM seen_plugins WHERE plugin_id = ? AND baseline = 1`).get(pluginId) as { local_hash: string | null } | undefined;

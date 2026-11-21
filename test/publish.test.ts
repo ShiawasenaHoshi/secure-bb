@@ -546,7 +546,7 @@ describe("when it runs: freeze, close, approval", () => {
     e.enable();
     await windowedPlugin("demo");
     e.t += 31_000;
-    e.gate.closeWindow(e.gate.openWindows()[0]!.id, e.code());
+    e.gate.closeWindow(e.gate.openWindows()[0]!.id);
     await e.publisher.idle();
     expect(e.store.listPublications()[0]).toMatchObject({ status: "published", trigger: "freeze" });
   });

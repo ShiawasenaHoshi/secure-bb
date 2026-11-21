@@ -45,9 +45,15 @@ export interface FileFacts {
 const NETWORK_MODULES = new Set(["http", "https", "http2", "net", "tls", "dgram", "dns", "dns/promises", "undici", "ws", "axios", "node-fetch", "cross-fetch", "got", "superagent", "request", "needle", "socket.io-client", "isomorphic-ws", "node-ftp", "ssh2", "socks", "net-ping"]);
 const CHILD_MODULES = new Set(["child_process", "cross-spawn", "execa", "shelljs", "node-pty", "cluster"]);
 const FS_MODULES = new Set(["fs", "fs/promises", "fs-extra", "graceful-fs", "original-fs"]);
-const DYNAMIC_MODULES = new Set(["vm", "module", "vm2", "isolated-vm", "worker_threads", "inspector", "inspector/promises", "repl", "wasi"]);
+/**
+ * `v8` (heap snapshots hold every secret of the process), `diagnostics_channel` (sees other plugins' requests) and `async_hooks`
+ * reach the whole process without any import that looks dangerous: they count as dynamic code, not as plain built-ins.
+ */
+const DYNAMIC_MODULES = new Set(["vm", "module", "vm2", "isolated-vm", "worker_threads", "inspector", "inspector/promises", "repl", "wasi", "v8", "diagnostics_channel", "async_hooks"]);
+/** A database handle: `ATTACH` / `load_extension` through it reach files of other plugins (threat model F2). */
+const DATABASE_MODULES = new Set(["sqlite", "better-sqlite3", "sqlite3", "libsql", "@libsql/client", "node-sqlite3"]);
 /** Node built-ins with no capability of their own. Any other `node:` module is an unknown: review. */
-const PLAIN_BUILTINS = new Set(["assert", "assert/strict", "async_hooks", "buffer", "console", "constants", "crypto", "diagnostics_channel", "events", "os", "path", "path/posix", "path/win32", "perf_hooks", "process", "punycode", "querystring", "readline", "readline/promises", "stream", "stream/promises", "stream/web", "stream/consumers", "string_decoder", "sqlite", "test", "timers", "timers/promises", "tty", "url", "util", "util/types", "v8", "zlib"]);
+const PLAIN_BUILTINS = new Set(["assert", "assert/strict", "buffer", "console", "constants", "crypto", "events", "os", "path", "path/posix", "path/win32", "perf_hooks", "process", "punycode", "querystring", "readline", "readline/promises", "stream", "stream/promises", "stream/web", "stream/consumers", "string_decoder", "test", "timers", "timers/promises", "tty", "url", "util", "util/types", "zlib"]);
 const BUILTIN_RPC = new Set(["bb-account", "connect", "mcp", "custom-instructions"]);
 const GLOBAL_OBJECTS = new Set(["globalThis", "global", "window", "self"]);
 const NETWORK_GLOBALS = new Set(["fetch", "WebSocket", "XMLHttpRequest", "EventSource"]);
@@ -340,6 +346,7 @@ function moduleCapability(spec: string): { kind: CapabilityKind; detail: string 
   if (CHILD_MODULES.has(key)) return { kind: "child_process", detail: label };
   if (FS_MODULES.has(key)) return { kind: "fs", detail: label };
   if (DYNAMIC_MODULES.has(key)) return { kind: "dynamic_code", detail: label };
+  if (DATABASE_MODULES.has(key)) return { kind: "database", detail: label };
   if (full.startsWith("@get-bb/plugin-sdk/app")) return { kind: "ui", detail: spec };
   return null;
 }
@@ -361,6 +368,26 @@ const ENV_SINK_CALLS = new Set(["JSON.stringify", "String", "util.inspect", "ins
 const HANDLER_REGISTRARS = new Set(["route", "register", "experimental_websocket"]);
 const TIMER_FUNCS = new Set(["setTimeout", "setInterval", "setImmediate"]);
 
+
+// ---- SQL that reaches past the plugin's own database (threat model F2) -----------------------------------------
+/** PRAGMAs that only tune the plugin's own database; any other assignment (or any schema-qualified one) is a block. */
+const BENIGN_PRAGMAS = new Set(["journal_mode", "synchronous", "foreign_keys", "busy_timeout", "user_version", "cache_size", "temp_store", "wal_autocheckpoint", "secure_delete", "auto_vacuum", "recursive_triggers", "case_sensitive_like", "locking_mode", "page_size", "application_id", "mmap_size"]);
+
+const LOAD_EXTENSION_METHODS = new Set(["loadExtension", "enableLoadExtension"]);
+
+/** Rule ids for the dangerous SQL a string holds (empty: none). `?` stands in for a part that is not constant. */
+export function sqlRules(value: string): string[] {
+  const out: string[] = [];
+  if (/\bATTACH\s+(?:DATABASE\s+)?[^;]*?\bAS\b/i.test(value)) out.push("sqlite-attach");
+  if (/\bload_extension\b/i.test(value)) out.push("sqlite-extension");
+  if (/\bVACUUM\s+(?:[\w"`\[\]]+\s+)?INTO\b/i.test(value)) out.push("sqlite-vacuum-into");
+  for (const m of value.matchAll(/\bPRAGMA\s+(?:([\w"`]+)\s*\.\s*)?(\w+)\s*(=|\()/gi)) {
+    const qualified = m[1] !== undefined;
+    const assigns = m[3] === "=" || qualified; // `PRAGMA x(…)` of an unqualified read pragma (table_info(t)) is not an assignment
+    if (assigns && (qualified || !BENIGN_PRAGMAS.has(m[2]!.toLowerCase()))) out.push("sqlite-pragma");
+  }
+  return out;
+}
 
 export function analyze(rel: string, parsed: { ast: N; code: string }): FileFacts {
   const { ast, code } = parsed;
@@ -405,6 +432,10 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
     if (n.type === "MemberExpression" && isGlobalObj(n.object)) return propName(n);
     if (n.type === "MemberExpression" && propName(n) === "require") return "require";
     return null;
+  };
+  const propNameOf = (n0: N): string | null => {
+    const n = unwrap(n0);
+    return n?.type === "MemberExpression" ? propName(n) : n?.type === "Identifier" ? n.name : null;
   };
   const calleeSimpleName = (c0: N): string | null => {
     const c = unwrap(c0);
@@ -776,6 +807,24 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
     if (!consumed.has(n) && PIPE_SHELL.test(value)) finding("shell-pipe-string", "info", n, excerptOf(value));
     if (BUILTIN_RPC.has(value)) builtinCandidates.push({ n, value });
   };
+  /** Text of a string expression with every non-constant part replaced by `?` (so `ATTACH '${p}' AS s` is still seen). */
+  const sqlText = (n: N): string | null => {
+    if (n.type === "Literal") return typeof n.value === "string" ? n.value : null;
+    if (n.type === "TemplateLiteral") return n.quasis.map((q: N, i: number) => (q.value.cooked ?? "") + (i < n.expressions.length ? (fold(n.expressions[i], consts) ?? "?") : "")).join("");
+    if (n.type === "BinaryExpression" && n.operator === "+") {
+      const f = fold(n, consts);
+      if (f !== null) return f;
+      const l = sqlText(n.left) ?? (fold(n.left, consts) ?? "?");
+      const r = sqlText(n.right) ?? (fold(n.right, consts) ?? "?");
+      return l + r;
+    }
+    return null;
+  };
+  const sqlChecks = (n: N, extra = ""): void => {
+    const v = sqlText(n);
+    if (v === null) return;
+    for (const rule of sqlRules(extra + v)) finding(rule, "block", n);
+  };
   const rpcCall = (call: N): void => {
     for (const a of call.arguments) {
       const v = fold(a, consts);
@@ -785,13 +834,20 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
 
   const visitors: Record<string, (n: N, anc: N[]) => void> = {
     Literal(n) {
-      if (typeof n.value === "string") stringChecks(n.value, n);
+      if (typeof n.value === "string") {
+        stringChecks(n.value, n);
+        sqlChecks(n);
+      }
+    },
+    TemplateLiteral(n) {
+      sqlChecks(n);
     },
     TemplateElement(n) {
       if (n.value.cooked) stringChecks(n.value.cooked, n);
     },
     BinaryExpression(n, anc) {
       if (n.operator !== "+" || anc[anc.length - 2]?.type === "BinaryExpression") return;
+      sqlChecks(n);
       const f = fold(n, consts);
       if (f !== null) stringChecks(f, n);
     },
@@ -894,11 +950,19 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
         if (name === "experimental_serverAccess") cap("server_access", "bb.experimental_serverAccess", n);
       }
       if (name === "experimental_serverAccess") cap("server_access", "experimental_serverAccess", n);
+      // `bb.storage.database()`: a handle that runs in the gate's own process and uid, and can ATTACH its database. Any
+      // `.database` property counts (`const s = bb.storage; s.database()`), and so does an unreadable key on `bb` / `storage`.
+      if (name === "database") cap("database", "bb.storage.database", n);
+      else if (name === null && n.computed && ((n.object.type === "Identifier" && n.object.name === "bb") || propNameOf(n.object) === "storage")) {
+        cap("database", "bb.storage[?]", n);
+        finding("dynamic-access", "review", n);
+      }
       if (name !== null && /^(experimental_)?(contentScripts?|composer)$/.test(name)) cap("ui", name, n);
       if (name === "sendBeacon") cap("network", "navigator.sendBeacon", n);
     },
     ObjectPattern(n) {
       for (const p of n.properties) {
+        if (p.type === "Property" && (p.computed ? fold(p.key, consts) : p.key.type === "Identifier" ? p.key.name : p.key.value) === "database") cap("database", "bb.storage.database", p);
         if (p.type === "Property" && (p.computed ? fold(p.key, consts) : p.key.type === "Identifier" ? p.key.name : p.key.value) === "constructor") {
           cap("dynamic_code", ".constructor", p);
           finding("dynamic-constructor", "review", p);
@@ -951,6 +1015,8 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
         // Reflect.get(globalThis, x) and friends reach the same things as globalThis[x]
         if (callee.object.type === "Identifier" && callee.object.name === "Reflect" && n.arguments[0] && isGlobalLike(n.arguments[0])) finding("dynamic-access", "review", n);
       }
+      if (simple !== null && LOAD_EXTENSION_METHODS.has(simple)) finding("sqlite-extension", "block", n);
+      if (simple === "pragma" && n.arguments[0]) sqlChecks(n.arguments[0], "PRAGMA ");
       if (simple !== null && FS_WRITE.has(simple)) facts.fsWrite = true;
       if (callee.type === "Identifier" && /rpc/i.test(callee.name)) rpcCall(n);
       if (simple !== null && SINK_NAMES.has(simple)) scanSink(n, simple);

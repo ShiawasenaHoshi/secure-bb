@@ -25,6 +25,7 @@ import {
   type Unobserved,
   type WindowScope,
 } from "./model.js";
+import { GateError } from "../gate.js";
 import type { Store } from "../store.js";
 
 export interface WatchActions {
@@ -217,10 +218,10 @@ export class Watchdog {
   }
 
   /** Closes a window by hand (a touch). Changes made until now are taken first. */
-  async closeWindow(windowId: number, code: Proof): Promise<void> {
+  /** Closing a window only tightens: no code, and the block after wrong codes does not apply (threat model F8). */
+  async closeWindow(windowId: number): Promise<void> {
     const w = this.store.getCfgWindow(windowId);
     if (!w || w.closedAt !== null) throw new WatchError("not_found", "no such open configuration window");
-    this.d.touch("watch.window.close", code);
     if (isCfgOpen(w, this.now)) await this.scan();
     this.store.closeCfgWindow(windowId, "closed");
     this.store.log("watch.window.close", null, null, { windowId, scopes: w.scopes });
@@ -442,9 +443,13 @@ export class Watchdog {
     return d;
   }
 
-  /** Rollback is off by default; switching it (either way) needs a touch. */
-  setRollback(enabled: boolean, code: string): void {
-    this.d.touch("watch.rollback.mode", code);
+  /** Rollback is off by default. Switching it on only tightens (no code, threat model F8); switching it off needs a touch. */
+  setRollback(enabled: boolean, code?: string): void {
+    const turnsOff = !enabled && this.store.getMeta(META_ROLLBACK) === "1";
+    if (turnsOff) {
+      if (code === undefined) throw new GateError("invalid_code", "turning the rollback off needs a code");
+      this.d.touch("watch.rollback.mode", code);
+    }
     this.store.setMeta(META_ROLLBACK, enabled ? "1" : "0");
     this.store.log("watch.rollback.mode", null, null, { enabled });
   }

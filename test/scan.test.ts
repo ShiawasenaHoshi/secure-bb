@@ -212,7 +212,7 @@ describe("the command lines", () => {
     const b = cursorCommand({ prompt: "CODE", cwd: dirs.cwd, model: "gpt-5", server });
     if (!b.ok) throw new Error("unavailable");
     expect(b.spec.file).toBe("cursor-agent");
-    expect(b.spec.args).toEqual(["-p", "--trust", "--mode", "ask", "--model", "gpt-5"]);
+    expect(b.spec.args).toEqual(["-p", "--trust", "--mode", "ask", "--sandbox", "enabled", "--model", "gpt-5"]);
     expect(b.spec.stdin).toBe("CODE");
     expect(b.spec.env).toEqual({ PATH: "/usr/bin", HOME: "/home/svc", USER: "svc" });
     for (const bad of ["claude-sonnet-4", "Opus", "anthropic/x", "--force", "a b", "", "x;rm"]) expect(validateSecondModel(bad)).not.toBeNull();
@@ -361,7 +361,7 @@ describe("the scanner", () => {
     const row = await h.scanner.scan(h.target());
     expect(peak).toBe(2);
     expect(h.calls.map((c) => c.file).sort()).toEqual(["claude", "cursor-agent"]);
-    expect(h.calls.find((c) => c.file === "cursor-agent")!.args).toEqual(["-p", "--trust", "--mode", "ask", "--model", "gpt-5"]);
+    expect(h.calls.find((c) => c.file === "cursor-agent")!.args).toEqual(["-p", "--trust", "--mode", "ask", "--sandbox", "enabled", "--model", "gpt-5"]);
     expect(row.status).toBe("suspect");
     expect(row.result!.models.map((m) => [m.label, m.status])).toEqual([["claude", "clean"], ["cursor-agent (gpt-5)", "flag"]]);
     expect(scanView(row).flags.join("\n")).toContain("cursor-agent (gpt-5): код не совпадает с описанием");
@@ -493,6 +493,7 @@ describe("the options (spec §8): off by default, switching one off needs a code
       const db = new Database(":memory:");
       for (const s of MIGRATIONS) db.exec(s);
       this.store = new Store(db, () => this.t);
+      this.store.setPolicy({ autoSafe: true }); // see threat-fixes.test.ts for the default
       this.gate = new Gate({
         store: this.store,
         now: () => this.t,
@@ -518,42 +519,40 @@ describe("the options (spec §8): off by default, switching one off needs a code
     }
   }
 
-  it("turning things on needs no code; turning an enabled one off does, and a wrong code changes nothing", async () => {
+  it("turning things on needs a code (code leaves for the cloud); turning them off needs none, and a wrong code changes nothing", async () => {
     const g = new G();
     await g.register();
-    g.gate.setAiSettings({ enabled: true, autoFreeze: true, autoExternal: true, second: true, secondModel: "gpt-5" }, undefined);
+    const on = { enabled: true, autoFreeze: true, autoExternal: true, second: true, secondModel: "gpt-5" };
+    expect(() => g.gate.setAiSettings(on, undefined)).toThrow(GateError);
+    expect(() => g.gate.setAiSettings(on, "000000")).toThrow(/invalid or already used code/);
+    expect(g.store.aiSettings().enabled).toBe(false);
+    g.gate.setAiSettings(on, g.code());
     expect(g.store.aiSettings()).toMatchObject({ enabled: true, autoFreeze: true, autoExternal: true, second: true, secondModel: "gpt-5" });
-    for (const off of [{ autoFreeze: false }, { autoExternal: false }, { second: false }, { enabled: false }]) {
-      expect(() => g.gate.setAiSettings(off, undefined)).toThrow(GateError);
-      expect(() => g.gate.setAiSettings(off, "000000")).toThrow(/invalid or already used code/);
-    }
-    expect(g.store.aiSettings()).toMatchObject({ enabled: true, autoFreeze: true, autoExternal: true, second: true });
-    g.gate.setAiSettings({ autoFreeze: false }, g.code());
+    g.gate.setAiSettings({ autoFreeze: false }, undefined);
     expect(g.store.aiSettings().autoFreeze).toBe(false);
-    g.tick();
-    g.gate.setAiSettings({ enabled: false }, g.code());
+    g.gate.setAiSettings({ enabled: false }, undefined);
     expect(g.store.aiSettings().enabled).toBe(false);
     expect(g.store.listLog(20).filter((r) => r.kind === "ai.settings").length).toBeGreaterThanOrEqual(3);
   });
 
-  it("per-plugin freeze scan: on without a code, off with one", async () => {
+  it("per-plugin freeze scan: on with a code, off without one", async () => {
     const g = new G();
     await g.register();
-    g.gate.setAiSettings({ freezePlugin: { id: "demo", on: true } }, undefined);
+    expect(() => g.gate.setAiSettings({ freezePlugin: { id: "demo", on: true } }, undefined)).toThrow(GateError);
+    g.gate.setAiSettings({ freezePlugin: { id: "demo", on: true } }, g.code());
     expect(g.store.aiSettings().freezePlugins).toEqual(["demo"]);
-    expect(() => g.gate.setAiSettings({ freezePlugin: { id: "demo", on: false } }, undefined)).toThrow(GateError);
-    g.gate.setAiSettings({ freezePlugin: { id: "demo", on: false } }, g.code());
+    g.gate.setAiSettings({ freezePlugin: { id: "demo", on: false } }, undefined);
     expect(g.store.aiSettings().freezePlugins).toEqual([]);
     expect(() => g.gate.setAiSettings({ freezePlugin: { id: "../x", on: true } }, undefined)).toThrow(/id/);
   });
 
-  it("the second model: needs a name, and the name cannot be an Anthropic model or an option", () => {
+  it("the second model: needs a name, and the name cannot be an Anthropic model or an option", async () => {
     const g = new G();
+    await g.register();
     expect(() => g.gate.setAiSettings({ second: true }, undefined)).toThrow(/имя второй модели/);
     expect(() => g.gate.setAiSettings({ secondModel: "claude-opus-4" }, undefined)).toThrow(/Anthropic/);
     expect(() => g.gate.setAiSettings({ secondModel: "--force" }, undefined)).toThrow(GateError);
-    g.gate.setAiSettings({ second: true, secondModel: "gpt-5" }, undefined);
-    expect(g.store.aiSettings().secondModel).toBe("gpt-5");
+    g.gate.setAiSettings({ second: true, secondModel: "gpt-5" }, g.code());
   });
 
   it("a window freeze reports the pinned version to the freeze option; nothing else does", async () => {
@@ -580,6 +579,7 @@ describe("a scan only ever adds a hold (spec §8, §5.3)", () => {
     const db = new Database(":memory:");
     for (const m of MIGRATIONS) db.exec(m);
     const store = new Store(db, () => t);
+    store.setPolicy({ autoSafe: true });
     const flags = new Map<string, string>();
     const external: string[] = [];
     const gate = new Gate({

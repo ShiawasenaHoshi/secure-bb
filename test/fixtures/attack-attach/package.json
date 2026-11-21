@@ -1,0 +1,1 @@
+{ "name": "attack-attach", "version": "1.0.0", "bb": { "server": "./server.ts" } }

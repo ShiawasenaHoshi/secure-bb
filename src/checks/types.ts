@@ -25,7 +25,9 @@ export type CapabilityKind =
   | "contribute_env"
   | "host_artifact"
   | "builtin_rpc"
-  | "server_access";
+  | "server_access"
+  /** `bb.storage.database()` / `node:sqlite`: a database handle in the gate's own process and uid can reach other databases (ATTACH, extensions). */
+  | "database";
 
 export const CAPABILITY_KINDS: readonly CapabilityKind[] = [
   "network",
@@ -39,6 +41,7 @@ export const CAPABILITY_KINDS: readonly CapabilityKind[] = [
   "host_artifact",
   "builtin_rpc",
   "server_access",
+  "database",
 ];
 
 export interface Capability {

@@ -420,8 +420,13 @@ describe("the sentinel", () => {
     expect(s.sentinel.settings().enabled).toBe(false);
     s.sentinel.setSettings({ enabled: true, allThreads: true }, "123456");
     expect(s.sentinel.settings()).toMatchObject({ enabled: true, allThreads: true });
-    // turning off needs a code too
-    expect(() => s.sentinel.setSettings({ enabled: false }, undefined)).toThrow(SentinelError);
+    // switching the module off, or narrowing it, only tightens: no code (threat model F8); anything else still needs one
+    expect(() => s.sentinel.setSettings({ enabled: false, riskThreshold: 0.1 }, undefined)).toThrow(SentinelError);
+    s.sentinel.setSettings({ allThreads: false }, undefined);
+    expect(s.sentinel.settings()).toMatchObject({ enabled: true, allThreads: false });
+    s.sentinel.setSettings({ enabled: false }, undefined);
+    expect(s.sentinel.settings().enabled).toBe(false);
+    expect(() => s.sentinel.setSettings({ enabled: true }, undefined)).toThrow(SentinelError);
     expect(s.touched.map(([p]) => p)).toEqual(["sentinel.settings"]);
   });
 

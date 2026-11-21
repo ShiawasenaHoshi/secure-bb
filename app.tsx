@@ -18,6 +18,7 @@ import type { SkillQueueView } from "./src/skills/guard";
 import { OUTCOME_LABEL, firedText, verdictText } from "./src/sentinel/view";
 import type { QuestionView } from "./src/sentinel/view";
 import type { FeedRow } from "./src/sentinel/types";
+import { T } from "./src/text";
 
 // ---------------------------------------------------------------- helpers --
 
@@ -473,7 +474,7 @@ function AiCard({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; refetch: () => v
     <div className={card}>
       <h3 className="font-semibold">ИИ-скан плагинов (необязательный модуль)</h3>
       <p className={muted}>
-        Выключен по умолчанию. Включённый, отправляет код плагина (без комментариев) в облако моделей. Модели только добавляют подозрение: одобрить версию они не могут. Включать — без кода; выключать включённую опцию — только с кодом.
+        Выключен по умолчанию. Включённый, отправляет код плагина (без комментариев) в облако моделей. Модели только добавляют подозрение: одобрить версию они не могут. Включать — только с кодом (код плагина уходит в облако); выключать — без кода.
       </p>
       <div className="mt-2 space-y-1">
         {box("Модуль включён (кнопка «Сканировать»)", "enabled", false)}
@@ -485,7 +486,7 @@ function AiCard({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; refetch: () => v
         </label>
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-2">
-        {registered ? <CodeField value={code} onChange={setCode} /> : <span className={muted}>Код нужен только для выключения; второй фактор ещё не зарегистрирован.</span>}
+        {registered ? <CodeField value={code} onChange={setCode} /> : <span className={muted}>Код нужен для включения; второй фактор ещё не зарегистрирован.</span>}
         <button className={btn} disabled={act.busy || model === ai.settings.secondModel} onClick={() => set({ secondModel: model })}>Сохранить имя модели</button>
       </div>
       <p className={`mt-2 ${muted}`}>
@@ -608,9 +609,6 @@ function WindowRows({ windows, cfgWindows, rpc, refetch }: { windows: WindowView
   const now = useNow();
   const ap = useApproval();
   const act = useCodeAction(refetch);
-  const [code, setCode] = useState("");
-  const [closing, setClosing] = useState<number | null>(null);
-  const [closingCfg, setClosingCfg] = useState<number | null>(null);
   if (windows.length === 0 && cfgWindows.length === 0) return null;
   return (
     <div className="space-y-2">
@@ -619,28 +617,9 @@ function WindowRows({ windows, cfgWindows, rpc, refetch }: { windows: WindowView
         return (
           <div key={`cfg-${w.id}`} className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted px-3 py-2 text-sm">
             <span className="min-w-0 flex-1">{cfgWindowLine(w, remaining)}</span>
-            {closingCfg === w.id ? (
-              <>
-                <RoutineCode value={code} onChange={setCode} />
-                <button
-                  className={btnPrimary}
-                  disabled={act.busy || !ap.ready(code)}
-                  onClick={() =>
-                    void act.run(async () => {
-                      await ap.routine(code, (proof) => rpc.call("watch.window.close", { windowId: w.id, ...proof }));
-                      setCode("");
-                      setClosingCfg(null);
-                    })
-                  }
-                >
-                  Закрыть
-                </button>
-              </>
-            ) : (
-              <button className={btn} onClick={() => setClosingCfg(w.id)}>
-                Закрыть
-              </button>
-            )}
+            <button className={btn} disabled={act.busy} onClick={() => void act.run(async () => { await rpc.call("watch.window.close", { windowId: w.id }); })}>
+              Закрыть
+            </button>
           </div>
         );
       })}
@@ -649,28 +628,9 @@ function WindowRows({ windows, cfgWindows, rpc, refetch }: { windows: WindowView
         return (
           <div key={w.id} className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted px-3 py-2 text-sm">
             <span className="min-w-0 flex-1">{windowLine(w, remaining)}</span>
-            {closing === w.id ? (
-              <>
-                <RoutineCode value={code} onChange={setCode} />
-                <button
-                  className={btnPrimary}
-                  disabled={act.busy || !ap.ready(code)}
-                  onClick={() =>
-                    void act.run(async () => {
-                      await ap.routine(code, (proof) => rpc.call("window.close", { windowId: w.id, ...proof }));
-                      setCode("");
-                      setClosing(null);
-                    })
-                  }
-                >
-                  Закрыть
-                </button>
-              </>
-            ) : (
-              <button className={btn} onClick={() => setClosing(w.id)}>
-                Закрыть
-              </button>
-            )}
+            <button className={btn} disabled={act.busy} onClick={() => void act.run(async () => { await rpc.call("window.close", { windowId: w.id }); })}>
+              Закрыть
+            </button>
           </div>
         );
       })}
@@ -697,13 +657,32 @@ function JournalAlarm({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<type
   );
 }
 
+/** Threat model X3: the gate was off for a while, or bb's safe-mode is (or was) on. Shown on the page and in the strip, for a week. */
+function AliveAlarm({ ov }: { ov: Overview }) {
+  const a = ov.alive;
+  if (a.gaps.length === 0 && a.safeMode !== true && !a.safeModeSeen) return null;
+  const at = (t: number) => new Date(t).toLocaleString();
+  return (
+    <div className="rounded-md border-2 border-destructive bg-destructive/10 p-2 text-destructive" role="alert" data-secure-bb-alarm>
+      <p className="font-semibold">ТРЕВОГА: гейт не всегда работал</p>
+      <ul className="mt-1 list-disc pl-5 text-xs">
+        {a.gaps.map((g, i) => <li key={i}>Гейт не работал с {at(g.from)} по {at(g.to)} ({Math.round(g.ms / 60_000)} мин){g.stopped ? ": его остановили (выключили)" : ": процесс остановился без предупреждения"}{g.safeMode ? "; safe-mode bb был включён" : ""}.</li>)}
+        {a.safeMode === true ? <li>safe-mode bb включён сейчас: сторонние плагины не работают.</li> : null}
+        {a.safeMode !== true && a.safeModeSeen ? <li>За последнюю неделю safe-mode bb включался (см. журнал).</li> : null}
+      </ul>
+      <p className="mt-1 text-xs">Пока гейта нет, ничего не удерживается и не проверяется; за это время могли поменять настройки и вернуть их. Проверьте конфигурацию и плагины вручную.</p>
+    </div>
+  );
+}
+
 /** Always-on-screen strip: open windows are never hidden. */
 function WindowOverlay() {
   const { rpc, data, refetch } = useOverview();
-  if (!data || (data.windows.length === 0 && data.watch.windows.length === 0 && data.journal.ok)) return null;
+  if (!data || (data.windows.length === 0 && data.watch.windows.length === 0 && data.journal.ok && data.alive.gaps.length === 0 && data.alive.safeMode !== true)) return null;
   return (
     <div className="pointer-events-auto fixed bottom-3 left-3 z-50 max-w-[min(32rem,calc(100vw-1.5rem))] space-y-2 rounded-lg border border-border bg-card p-2 shadow-lg" data-secure-bb-banner>
       <JournalAlarm ov={data} rpc={rpc} refetch={refetch} />
+      <AliveAlarm ov={data} />
       <WindowRows windows={data.windows} cfgWindows={data.watch.windows} rpc={rpc} refetch={refetch} />
     </div>
   );
@@ -775,6 +754,7 @@ function Registration({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<type
       <p className="mt-1">
         Без неё одобрить плагин нельзя. Сделайте это сразу: до регистрации любой процесс на этой машине (в том числе агент) может её начать раньше вас.
       </p>
+      <p className="mt-1 rounded-md border border-destructive p-2 text-destructive">{T.totpFile.registerWarning}</p>
       {blockedByPlugins ? (
         <div className="mt-2">
           <p className="text-destructive">Выключите сторонние плагины — их код интерфейса увидел бы QR-код:</p>
@@ -995,9 +975,10 @@ function PluginRow({ p, ov, rpc, refetch, registered, checks }: { p: PluginView;
         <div className="mt-1 flex flex-wrap items-center gap-3">
           <ScanButton ov={ov} target={{ pluginId: p.id }} rpc={rpc} refetch={refetch} />
           <label className="flex items-center gap-1 text-xs">
-            <input type="checkbox" checked={ov.ai.settings.freezePlugins.includes(p.id)} disabled={act.busy || (ov.ai.settings.freezePlugins.includes(p.id) && code.length !== 6)} onChange={(e) => void act.run(async () => { await rpc.call("ai.settings", { freezePlugin: { id: p.id, on: e.target.checked }, ...(code.length === 6 ? { code } : {}) }); setCode(""); })} />
-            автоскан при заморозке этого плагина{ov.ai.settings.freezePlugins.includes(p.id) ? " (снять — с кодом)" : ""}
+            <input type="checkbox" checked={ov.ai.settings.freezePlugins.includes(p.id)} disabled={act.busy || (!ov.ai.settings.freezePlugins.includes(p.id) && (!registered || code.length !== 6))} onChange={(e) => void act.run(async () => { await rpc.call("ai.settings", { freezePlugin: { id: p.id, on: e.target.checked }, ...(code.length === 6 ? { code } : {}) }); setCode(""); })} />
+            автоскан при заморозке этого плагина{ov.ai.settings.freezePlugins.includes(p.id) ? "" : " (включить — с кодом)"}
           </label>
+          {registered && !ov.ai.settings.freezePlugins.includes(p.id) ? <CodeField value={code} onChange={setCode} /> : null}
         </div>
       ) : null}
       {p.history.length > 1 ? (
@@ -1010,12 +991,11 @@ function PluginRow({ p, ov, rpc, refetch, registered, checks }: { p: PluginView;
           </ul>
         </details>
       ) : null}
-      {registered && (p.pin || ov.ai.settings.freezePlugins.includes(p.id)) ? (
+      {p.pin ? (
         <div className="mt-2 flex flex-wrap items-center gap-2">
-          <CodeField value={code} onChange={setCode} />
           {p.pin ? (
-            <button className={btn} disabled={act.busy || !ap.ready(code)} onClick={() => void act.run(async () => { await ap.routine(code, (proof) => rpc.call("approval.revoke", { approvalId: p.pin!.id, ...proof })); setCode(""); })}>
-              Отозвать
+            <button className={btn} disabled={act.busy} onClick={() => void act.run(async () => { await rpc.call("approval.revoke", { approvalId: p.pin!.id }); })}>
+              Отозвать (без кода)
             </button>
           ) : null}
         </div>
@@ -1034,9 +1014,11 @@ function PolicyCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof
   const [cfgWindowMin, setCfgWindowMin] = useState(String(p.cfgWindowMin));
   const [cfgCapMin, setCfgCapMin] = useState(String(p.cfgCapMin));
   const [cfgMode, setCfgMode] = useState<"sliding" | "fixed">(p.cfgMode);
+  const [autoSafe, setAutoSafe] = useState(p.autoSafe);
   const [code, setCode] = useState("");
   const act = useCodeAction(refetch);
   useEffect(() => {
+    setAutoSafe(p.autoSafe);
     setWindowMin(String(p.windowMin));
     setCapMin(String(p.capMin));
     setMode(p.mode);
@@ -1044,7 +1026,7 @@ function PolicyCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof
     setCfgWindowMin(String(p.cfgWindowMin));
     setCfgCapMin(String(p.cfgCapMin));
     setCfgMode(p.cfgMode);
-  }, [p.windowMin, p.capMin, p.mode, p.scope, p.cfgWindowMin, p.cfgCapMin, p.cfgMode]);
+  }, [p.windowMin, p.capMin, p.mode, p.scope, p.cfgWindowMin, p.cfgCapMin, p.cfgMode, p.autoSafe]);
   return (
     <div className={card}>
       <h3 className="font-semibold">Окна доверия: настройки</h3>
@@ -1081,6 +1063,11 @@ function PolicyCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof
           </select>
         </label>
       </div>
+      <label className="mt-3 flex items-start gap-2">
+        <input type="checkbox" className="mt-1" checked={autoSafe} onChange={(e) => setAutoSafe(e.target.checked)} />
+        <span>Автопропуск версий без возможностей (без касания)</span>
+      </label>
+      <p className="mt-1 rounded-md border border-destructive p-2 text-destructive">{T.autoSafeWarning}</p>
       <div className="mt-3 flex items-center gap-2">
         <CodeField value={code} onChange={setCode} />
         <button
@@ -1088,7 +1075,7 @@ function PolicyCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof
           disabled={act.busy}
           onClick={() =>
             void act.run(async () => {
-              await rpc.call("policy.set", { windowMin: Number(windowMin), capMin: Number(capMin), mode, scope, cfgWindowMin: Number(cfgWindowMin), cfgCapMin: Number(cfgCapMin), cfgMode, ...(code.length === 6 ? { code } : {}) });
+              await rpc.call("policy.set", { autoSafe, windowMin: Number(windowMin), capMin: Number(capMin), mode, scope, cfgWindowMin: Number(cfgWindowMin), cfgCapMin: Number(cfgCapMin), cfgMode, ...(code.length === 6 ? { code } : {}) });
               setCode("");
             })
           }
@@ -1294,11 +1281,11 @@ function WatchSection({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<type
         <h3 className="font-semibold">Откат: {w.rollbackEnabled ? "включён" : "выключен"}</h3>
         <p className={muted}>
           Откатывает только безопасное и только вне окна: выключает включённый встроенный плагин из списка, удаляет новую переменную окружения, возвращает инструкции. Остальное только показывается.
-          Переключается кодом (в обе стороны).
+          Включить можно без кода (это ужесточение), выключить — только кодом.
         </p>
         <div className="mt-2 flex flex-wrap items-center gap-2">
-          <CodeField value={code} onChange={setCode} />
-          <button className={btn} disabled={need} onClick={() => void act.run(async () => { await rpc.call("watch.rollbackMode", { enabled: !w.rollbackEnabled, code }); setCode(""); })}>
+          {w.rollbackEnabled ? <CodeField value={code} onChange={setCode} /> : null}
+          <button className={btn} disabled={act.busy || (w.rollbackEnabled && need)} onClick={() => void act.run(async () => { await rpc.call("watch.rollbackMode", { enabled: !w.rollbackEnabled, ...(w.rollbackEnabled ? { code } : {}) }); setCode(""); })}>
             {w.rollbackEnabled ? "Выключить откат" : "Включить откат"}
           </button>
         </div>
@@ -1528,6 +1515,7 @@ function GatePage() {
           <p className="rounded-md border border-destructive p-2 text-destructive">Слишком много неверных кодов: одобрения заблокированы до {when(ov.totp.blockedUntil)}.</p>
         ) : null}
         <JournalAlarm ov={ov} rpc={rpc} refetch={refetch} />
+        <AliveAlarm ov={ov} />
         <WindowRows windows={ov.windows} cfgWindows={ov.watch.windows} rpc={rpc} refetch={refetch} />
         <Section title="Защита этого bb"><StageCard ov={ov} /></Section>
         <Section title="Второй фактор"><Registration ov={ov} rpc={rpc} refetch={refetch} /></Section>

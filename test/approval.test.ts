@@ -22,13 +22,13 @@ const EXPECTED: Record<string, RpcGroup> = {
   "queue.approve": "routine",
   "queue.dismiss": "routine",
   "window.open": "routine",
-  "window.close": "routine",
-  "approval.revoke": "routine",
+  "window.close": "free", // tightening: no code (threat model F8)
+  "approval.revoke": "free",
   "watch.accept": "routine",
   "watch.acceptAll": "routine",
   "watch.rollback": "routine",
   "watch.window.open": "routine",
-  "watch.window.close": "routine",
+  "watch.window.close": "free",
   "skills.approve": "routine",
   "batch.approve": "routine",
   // dangerous (doc §1: политика, снять блок, выключить защиту/откат, доверенные репозитории/источники, провайдер/адрес, регистрация)
