@@ -1,11 +1,11 @@
-// sbb-guard: serve | totp-register | status | journal-verify | import
+// sbb-guard: serve | totp-register | totp-disable | passkey-enroll | passkey-list | passkey-remove | status | journal-verify | import
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { createInterface } from "node:readline/promises";
 import { resolvePaths, type GuardPaths } from "./config.ts";
 import { openDb, privateDir } from "./db.ts";
-import { Guard, GuardError, type ImportItem } from "./guard.ts";
+import { Guard, GuardError, type ImportItem, type PasskeyRow } from "./guard.ts";
 import { encodeQr } from "./qr.ts";
 import { listen } from "./server.ts";
 import { generateSecret, otpauthUri } from "./totp.ts";
@@ -37,14 +37,20 @@ export const terminalIo: Io = {
 
 const USAGE = `sbb-guard ${VERSION} — decision guard for secure-bb
 
-  sbb-guard serve [--data DIR] [--socket PATH] [--socket-gid GID]
+  sbb-guard serve [--data DIR] [--socket PATH] [--socket-gid GID] [--rp-id ID] [--origin URL]
   sbb-guard totp-register [--data DIR] [--code CODE] [--replacing-code CODE]
+  sbb-guard totp-disable [--data DIR] [--yes]
+  sbb-guard passkey-enroll [--data DIR] [--label NAME] [--rp-id ID] [--origin URL]
+  sbb-guard passkey-list [--data DIR]
+  sbb-guard passkey-remove ID [--data DIR] [--yes]
   sbb-guard status [--data DIR] [--socket PATH]
   sbb-guard journal-verify [--data DIR]
   sbb-guard import FILE [--data DIR] [--yes] [--digest SHA256]
 
 Paths: --data / SBB_GUARD_DATA (default /var/sbb-guard), --socket / SBB_GUARD_SOCKET (default <data>/run/guard.sock),
---socket-gid / SBB_GUARD_SOCKET_GID.`;
+--socket-gid / SBB_GUARD_SOCKET_GID.
+Passkeys: --rp-id / SBB_GUARD_RP_ID (default localhost) and --origin / SBB_GUARD_ORIGIN (default http://localhost:38886): the page must be opened
+at exactly that origin (WebAuthn does not work on 127.0.0.1). A key is registered only here: passkey-enroll prints a one-time token, valid for 5 minutes.`;
 
 type Opts = Record<string, string | boolean>;
 export function parseArgs(argv: string[]): { cmd: string | undefined; positionals: string[]; opts: Opts } {
@@ -75,7 +81,7 @@ const optStr = (o: Opts, k: string): string | undefined => (typeof o[k] === "str
 function open(paths: GuardPaths, now: () => number): { guard: Guard; close: () => void } {
   privateDir(paths.stateDir);
   const db = openDb(paths.db);
-  return { guard: new Guard({ db, now, secretPath: paths.secret, headPath: paths.head }), close: () => db.close() };
+  return { guard: new Guard({ db, now, secretPath: paths.secret, headPath: paths.head, rp: paths.rp }), close: () => db.close() };
 }
 
 /** One request to a running guard. */
@@ -161,6 +167,136 @@ export async function totpRegister(paths: GuardPaths, io: Io, opts: Opts, now: (
   }
 }
 
+
+// ---- passkeys and the switch for codes (console only) -----------------------------------------------------------------
+const yes = (a: string | null): boolean => a !== null && /^y(es)?$/i.test(a.trim());
+const groups = (hex: string): string => (hex.match(/.{1,4}/g) ?? []).join(" ");
+
+export interface EnrollDeps {
+  /** Waits between looks at the database; tests make it fast and move their clock. */
+  sleep?: (ms: number) => Promise<void>;
+  pollMs?: number;
+}
+
+/**
+ * Opens the registration window (5 minutes), prints the one-time token, waits for the page to register a key, shows what it registered
+ * and asks for `y`. No flag skips the question: a key that a harmful plugin managed to register first must be seen by a person.
+ */
+export async function passkeyEnroll(paths: GuardPaths, io: Io, opts: Opts, now: () => number = Date.now, deps: EnrollDeps = {}): Promise<number> {
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const { guard, close } = open(paths, now);
+  try {
+    const label = optStr(opts, "label") ?? `key-${new Date(now()).toISOString().slice(0, 16).replace(/[-:T]/g, "")}`;
+    const e = guard.enrollStart(label);
+    io.out(`Registration window is open until ${new Date(e.expiresAt).toISOString()} (5 minutes).`);
+    io.out(`Key label:  ${e.label}`);
+    io.out(`Token:      ${e.token}`);
+    io.out(`Open ${paths.rp.origin} (exactly this address, not 127.0.0.1), the secure-bb page, "Добавить passkey", enter the token and touch the sensor.`);
+    io.out("Waiting for the key…");
+    for (;;) {
+      const st = guard.enrollmentStatus(e.id);
+      if (st.key) {
+        io.out("");
+        io.out(`A key was registered:  ${st.key.label}`);
+        io.out(`  AAGUID:       ${st.key.aaguid}`);
+        io.out(`  fingerprint:  ${groups(st.key.fingerprint)}`);
+        io.out("If you did not just do this yourself, answer no: something else used the token.");
+        const a = await io.ask("Activate this key? [y/N] ");
+        if (!yes(a)) {
+          guard.rejectEnrollment(e.id, a === null ? "no answer" : "declined");
+          io.err("not confirmed; the key is discarded and the window is closed");
+          return 1;
+        }
+        guard.confirmEnrollment(e.id);
+        io.out(`Key ${st.key.label} is active.`);
+        return 0;
+      }
+      if (st.state !== "open") {
+        io.err(st.state === "expired" ? "the registration window expired; nothing was registered" : `the registration window is ${st.state}; nothing was registered (five wrong tokens close it)`);
+        guard.rejectEnrollment(e.id, st.state);
+        return 1;
+      }
+      await sleep(deps.pollMs ?? 500);
+    }
+  } catch (err) {
+    if (err instanceof GuardError) {
+      io.err(err.message);
+      return 1;
+    }
+    throw err;
+  } finally {
+    close();
+  }
+}
+
+const stateText = (k: PasskeyRow): string => (k.state === "pending" ? "waiting for confirmation" : k.state);
+export function passkeyList(paths: GuardPaths, io: Io, now: () => number = Date.now): number {
+  if (!existsSync(paths.db)) {
+    io.err("no database here");
+    return 1;
+  }
+  const { guard, close } = open(paths, now);
+  try {
+    const keys = guard.listPasskeys();
+    if (keys.length === 0) io.out("no passkeys");
+    for (const k of keys) {
+      io.out(`#${k.id}  ${k.label}  ${stateText(k)}  created ${new Date(k.createdAt).toISOString()}  ${k.lastUsedAt === null ? "never used" : `last used ${new Date(k.lastUsedAt).toISOString()}`}`);
+      io.out(`     AAGUID ${k.aaguid}  fingerprint ${groups(k.fingerprint)}`);
+    }
+    io.out(`codes (TOTP): ${guard.totpDisabled() ? "switched off" : guard.totpRegistered() ? "registered" : "not registered"}`);
+    return 0;
+  } finally {
+    close();
+  }
+}
+
+export async function passkeyRemove(paths: GuardPaths, io: Io, idText: string, opts: Opts, now: () => number = Date.now): Promise<number> {
+  const id = Number(idText.replace(/^#/, ""));
+  if (!Number.isInteger(id) || id < 1) {
+    io.err("passkey-remove needs the key number from `passkey-list`");
+    return 64;
+  }
+  const { guard, close } = open(paths, now);
+  try {
+    if (opts.yes !== true && !yes(await io.ask(`Remove key #${id}? [y/N] `))) {
+      io.err("not confirmed; nothing removed (use --yes to skip the question)");
+      return 1;
+    }
+    const k = guard.removePasskey(id);
+    io.out(`removed key #${k.id} (${k.label})`);
+    return 0;
+  } catch (err) {
+    if (err instanceof GuardError) {
+      io.err(err.message);
+      return 1;
+    }
+    throw err;
+  } finally {
+    close();
+  }
+}
+
+export async function totpDisable(paths: GuardPaths, io: Io, opts: Opts, now: () => number = Date.now): Promise<number> {
+  const { guard, close } = open(paths, now);
+  try {
+    if (opts.yes !== true && !yes(await io.ask("Switch codes (TOTP) off? The secret is deleted; touches then need a passkey. [y/N] "))) {
+      io.err("not confirmed; nothing changed (use --yes to skip the question)");
+      return 1;
+    }
+    guard.totpDisable();
+    io.out("Codes are off. `sbb-guard totp-register` switches them on again with a new secret.");
+    return 0;
+  } catch (err) {
+    if (err instanceof GuardError) {
+      io.err(err.message);
+      return 1;
+    }
+    throw err;
+  } finally {
+    close();
+  }
+}
+
 export async function status(paths: GuardPaths, io: Io, now: () => number = Date.now): Promise<number> {
   io.out(`data:    ${paths.dataDir}`);
   io.out(`socket:  ${paths.socket}`);
@@ -184,6 +320,7 @@ export async function status(paths: GuardPaths, io: Io, now: () => number = Date
       windows: Array<{ pluginId: string; remainingSec: number }>;
     };
     io.out(`second factor: ${s.totp.registered ? "registered" : "NOT registered (run `sbb-guard totp-register`)"}${s.totp.blockedUntil > 0 ? `; approvals blocked until ${new Date(s.totp.blockedUntil).toISOString()}` : ""}`);
+    io.out(`passkeys: ${guard.listPasskeys().filter((k) => k.state === "active").length} active (rp ${paths.rp.rpId}, origin ${paths.rp.origin}); codes: ${guard.totpDisabled() ? "switched off" : guard.totpRegistered() ? "on" : "not registered"}`);
     io.out(`held: ${s.queue.filter((q) => q.status === "held").length}; approved versions: ${s.approvals.length}; open windows: ${s.windows.length}${s.windows.map((w) => ` [${w.pluginId}, ${Math.ceil(w.remainingSec / 60)} min]`).join("")}`);
     const j = guard.verifyJournal();
     io.out(`journal: ${j.ok ? `ok (${j.entries} records, head ${j.head ? j.head.hash.slice(0, 12) : "-"})` : `BROKEN (${j.problems.length} problem(s)); run \`sbb-guard journal-verify\``}`);
@@ -343,7 +480,7 @@ export async function main(argv: string[], io: Io = terminalIo): Promise<number>
   }
   let paths: GuardPaths;
   try {
-    paths = resolvePaths({ data: optStr(opts, "data"), socket: optStr(opts, "socket"), socketGid: optStr(opts, "socket-gid") });
+    paths = resolvePaths({ data: optStr(opts, "data"), socket: optStr(opts, "socket"), socketGid: optStr(opts, "socket-gid"), rpId: optStr(opts, "rp-id"), origin: optStr(opts, "origin") });
   } catch (err) {
     io.err(err instanceof Error ? err.message : String(err));
     return 64;
@@ -354,6 +491,18 @@ export async function main(argv: string[], io: Io = terminalIo): Promise<number>
         return await serve(paths, io);
       case "totp-register":
         return await totpRegister(paths, io, opts);
+      case "totp-disable":
+        return await totpDisable(paths, io, opts);
+      case "passkey-enroll":
+        return await passkeyEnroll(paths, io, opts);
+      case "passkey-list":
+        return passkeyList(paths, io);
+      case "passkey-remove":
+        if (positionals.length !== 1) {
+          io.err("passkey-remove needs one key number");
+          return 64;
+        }
+        return await passkeyRemove(paths, io, positionals[0]!, opts);
       case "status":
         return await status(paths, io);
       case "journal-verify":

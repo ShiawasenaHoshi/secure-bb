@@ -72,6 +72,8 @@ export interface GuardView {
   journal: { valid: boolean; entries: number; head: string | null; problems: Array<{ kind: string; id: number | null; detail: string }> } | null;
   recent: GuardState["journal"]["recent"];
   revoked: GuardApproval[];
+  /** Passkeys: where the page must be opened for them to work, the keys that can touch, whether the console has a registration window open. */
+  passkey: { rpId: string; origin: string; keys: Array<{ id: number; label: string; createdAt: number; lastUsedAt: number | null }>; enrollmentOpen: boolean; totpOff: boolean } | null;
 }
 export interface Overview {
   /** Present in guard mode only. */
@@ -191,9 +193,11 @@ async function guardOverlay(d: OverviewDeps, port: GuardPort): Promise<{ view: G
   try {
     state = await port.state();
   } catch (err) {
-    return { view: { connected: false, error: err instanceof Error ? err.message : String(err), journal: null, recent: [], revoked: [] }, state: null };
+    return { view: { connected: false, error: err instanceof Error ? err.message : String(err), journal: null, recent: [], revoked: [], passkey: null }, state: null };
   }
-  d.gate.noteGuardState(state.totp.registered);
+  // A second factor exists if either kind does: a guard with passkeys only (codes switched off) is as registered as one with a TOTP secret.
+  const keys = state.passkeys?.keys ?? [];
+  d.gate.noteGuardState(state.totp.registered || keys.length > 0);
   d.gate.syncGuardWindows(state);
   let cached = verified.get(port);
   if (!cached || d.now() - cached.at > GUARD_VERIFY_EVERY_MS) {
@@ -212,6 +216,7 @@ async function guardOverlay(d: OverviewDeps, port: GuardPort): Promise<{ view: G
       journal: r ? { valid: r.valid, entries: r.entries, head: r.head ? r.head.hash.slice(0, 16) : null, problems: r.problems.slice(0, 20) } : null,
       recent: state.journal.recent,
       revoked: state.revoked,
+      passkey: state.passkeys ? { rpId: state.passkeys.rpId, origin: state.passkeys.origin, keys, enrollmentOpen: state.passkeys.enrollmentOpen, totpOff: state.totp.disabled === true } : null,
     },
     state,
   };
@@ -346,7 +351,7 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
     assessment: assess(probe),
     ...(guarded ? { guard: guarded.view } : {}),
     totp: guarded?.state
-      ? { state: guarded.state.totp.registered ? ("external" as const) : ("none" as const), blockedUntil: guarded.state.totp.blockedUntil, pendingUnattended: false }
+      ? { state: guarded.state.totp.registered || (guarded.state.passkeys?.keys.length ?? 0) > 0 ? ("external" as const) : ("none" as const), blockedUntil: guarded.state.totp.blockedUntil, pendingUnattended: false }
       : { state: d.gate.totpState(), blockedUntil: d.gate.blockedUntil(), pendingUnattended: d.gate.pendingUnattended() },
     hookRegistered: d.hookRegistered,
     // Guard mode: window size, ceiling and mode are the guard's; "safe class passes" does not exist there.
