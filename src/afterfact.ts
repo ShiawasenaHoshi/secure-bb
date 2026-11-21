@@ -19,7 +19,20 @@ export interface AfterFactDeps {
   vetted?: (pluginId: string) => boolean;
   /** Called when a plugin the hook never saw was disabled here: the hook is not doing its job. */
   onUnvetted?: (pluginIds: string[]) => void;
+  /**
+   * Guard mode. Approvals are the guard's and are keyed by the CORE's hash (the one the hook was given), never by a hash of ours:
+   *  - `coreHash`: the hash the core gave the hook for this plugin and version (null: never seen);
+   *  - `guardApproved`: does the guard hold an approval for exactly that hash;
+   *  - `noCoreHash`: the version has no core hash, so nothing can be asked of the guard: keep it for a person with a plain reason.
+   */
+  guard?: {
+    coreHash: (pluginId: string, version: string) => string | null;
+    guardApproved: (pluginId: string, hash: string) => Promise<boolean>;
+    noCoreHash: (p: InstalledPluginLite) => void;
+  };
 }
+/** Why a version is kept when the core's hash is unknown. Plain words; it is NOT a mismatch and not a hard flag. */
+export const NO_CORE_HASH_REASON = "не удалось получить хеш ядра: версия загружена без проверки сторожем, одобрить её по хешу нельзя. Удалите её и поставьте заново через «bb secure-bb propose»";
 
 const CACHE_MS = 60_000;
 const PENDING = "pending";
@@ -105,6 +118,14 @@ export class AfterFactScanner {
 
     for (const p of plugins) {
       if (this.d.vetted?.(p.id)) continue;
+      // Allowed but failed to start (the core says `error`): its code did not run, so this is not «after the fact».
+      if (p.status === "error") continue;
+      const g = this.d.guard;
+      if (g) {
+        // A version the guard approved by the core's own hash was gated before it loaded: not «after the fact», whatever our local hash says.
+        const core = g.coreHash(p.id, p.version);
+        if (core !== null && (await g.guardApproved(p.id, core).catch(() => false))) continue;
+      }
       let hash: string;
       try {
         hash = await this.hashWithin(p);
@@ -121,6 +142,14 @@ export class AfterFactScanner {
         continue;
       }
       if (base === hash) continue; // unchanged since before secure-bb
+      if (this.d.guard) {
+        // The guard never gets OUR hash as the version's `contentHash` (it would compare it with the core's and call a lawful plugin forged).
+        // The core's hash is known and not approved: the version is held at the guard already (the hook asked it); stop the plugin.
+        // The core's hash is unknown: keep a plain entry for a person, and stop the plugin.
+        if (this.d.guard.coreHash(p.id, p.version) === null) this.d.guard.noCoreHash(p);
+        await this.hold(p, hash, disabled);
+        continue;
+      }
       const decision = await gate.decide({
         pluginId: p.id,
         version: p.version,

@@ -59,7 +59,13 @@ const open = (): any[] => state().drifts;
 const find = (path: string): any => open().find((d) => d.path === path);
 /** Accepts differences with a code (a fresh step each time). */
 const accept = (ids: number[]): { accepted: number } => g!.guard.agentsAccept({ ids, code: g!.nextCode() });
-const acceptAll = (): void => void accept(open().map((d) => d.id));
+/** Everything open: the rest in one touch, then each critical one on its own (the guard accepts a critical difference only alone). */
+const acceptAll = (): void => {
+  const all = open();
+  const rest = all.filter((d) => d.class !== "critical").map((d) => d.id);
+  if (rest.length > 0) accept(rest);
+  for (const d of all.filter((x) => x.class === "critical")) accept([d.id]);
+};
 const journal = async (): Promise<Array<{ kind: string; detail: any }>> => (await g!.send({ op: "state" })).journal.recent;
 const tick = (): void => g!.clock.advance(AGENTS_SCAN_GAP_MS + 1);
 
@@ -495,6 +501,60 @@ describe("limits are notes, not alarms", () => {
     expect(open()).toEqual([]);
     scan();
     expect(open()).toHaveLength(40);
+  });
+});
+
+describe("a critical difference is accepted alone, with its own fresh touch", () => {
+  const prepTwo = async (): Promise<{ crit: number; plain: number; crit2: number }> => {
+    const h = makeHome();
+    h.put(SETTINGS, '{"permissions":{"defaultMode":"bypassPermissions","allow":["Bash(*)"]}}');
+    h.put(".claude/CLAUDE.md", "a\n");
+    h.put(".claude.json", '{"mcpServers":{"helper":{"command":"x"}}}');
+    await start(h);
+    scan();
+    const by = (rel: string): number => open().find((d) => d.rel === rel).id as number;
+    return { crit: by(SETTINGS), plain: by(".claude/CLAUDE.md"), crit2: by(".claude.json") };
+  };
+
+  it("a critical id together with another id is refused, with a fresh valid code, and nothing is spent or accepted", async () => {
+    const { crit, plain, crit2 } = await prepTwo();
+    expect(open().find((d) => d.id === crit).class).toBe("critical");
+    for (const ids of [[crit, plain], [crit, crit2], [crit, plain, crit2]]) {
+      const r = await g!.send({ op: "agents-accept", ids, code: g!.nextCode() });
+      expect(r, JSON.stringify(ids)).toMatchObject({ ok: false, error: { code: "invalid" } });
+    }
+    expect(state().baselineFiles).toBe(0);
+    expect(open()).toHaveLength(3);
+    // the refusal did not use the code: the same step still works for a single one
+    expect(await g!.send({ op: "agents-accept", ids: [crit], code: g!.nextCode() })).toMatchObject({ ok: true, accepted: 1 });
+    expect(await g!.send({ op: "agents-accept", ids: [plain], code: g!.nextCode() })).toMatchObject({ ok: true, accepted: 1 });
+    expect(await g!.send({ op: "agents-accept", ids: [crit2], code: g!.nextCode() })).toMatchObject({ ok: true, accepted: 1 });
+  });
+
+  it("the non-critical ones still go in one call", async () => {
+    const h = makeHome();
+    h.put(".claude/CLAUDE.md", "a\n");
+    h.put(".codex/AGENTS.md", "b\n");
+    await start(h);
+    scan();
+    expect(await g!.send({ op: "agents-accept", ids: open().map((d) => d.id), code: g!.nextCode() })).toMatchObject({ ok: true, accepted: 2 });
+  });
+
+  it("an approval session does not cover it (alone or not): a fresh code or touch only", async () => {
+    const { crit, plain } = await prepTwo();
+    const s = await g!.send({ op: "session-open", code: g!.nextCode() });
+    expect(s).toMatchObject({ ok: true });
+    for (const ids of [[crit], [plain], [crit, plain]]) expect(await g!.send({ op: "agents-accept", ids, session: s.token }), JSON.stringify(ids)).toMatchObject({ ok: false });
+    expect(state().baselineFiles).toBe(0);
+  });
+
+  it("a passkey challenge for a critical id alone is given (the description counts it); for it together with another it is refused", async () => {
+    const { crit, plain } = await prepTwo();
+    await enrollKey(g!, new SoftAuthenticator());
+    const one = await g!.send({ op: "challenge", action: { op: "agents-accept", ids: [crit] } });
+    expect(one).toMatchObject({ ok: true });
+    expect(one.description).toMatch(/критичных 1/);
+    expect(await g!.send({ op: "challenge", action: { op: "agents-accept", ids: [crit, plain] } })).toMatchObject({ ok: false, error: { code: "invalid" } });
   });
 });
 
