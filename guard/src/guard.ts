@@ -32,7 +32,12 @@ import {
 } from "./passkey.ts";
 import { verifyTotp } from "./totp.ts";
 import { analyze as analyzeAgents, maskSecrets, unifiedDiff, type Change } from "./agents-rules.ts";
-import { runChecks, type CheckResult } from "./checks/index.ts";
+import { memoryManifestCache, runChecksVerified, type CheckResult, type RegistryFetch } from "./checks/index.ts";
+
+/** What the guard's own checks may spend on comparing node_modules with the registry; the budget of one evaluation is {@link DEFAULT_BUDGET_MS}. */
+const INTEGRITY_DEADLINE_MS = 2500;
+const manifestCache = memoryManifestCache();
+const runChecks = (dir: string): Promise<CheckResult> => runChecksVerified(dir, { fetch: globalThis.fetch as unknown as RegistryFetch, cache: manifestCache, deadlineMs: INTEGRITY_DEADLINE_MS });
 import { readTree, TreeRefused, type TreeLimits } from "./tree-read.ts";
 import {
   brief,

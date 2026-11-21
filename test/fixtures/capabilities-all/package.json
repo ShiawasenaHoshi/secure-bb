@@ -1,7 +1,7 @@
 {
   "name": "caps",
   "bb": {
-    "app": "./app.tsx",
+    "app": "./app.jsx",
     "host": "./host.js",
     "server": "./server.js"
   }

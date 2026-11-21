@@ -43,8 +43,30 @@ export interface TreeScan {
   rootPackage: Record<string, unknown> | null;
   declared: DeclaredDep[];
   installed: InstalledPackage[];
+  /** Every regular file of the tree (posix paths): the import graph checks existence here. */
+  allFiles: Set<string>;
+  /** Parsed `package.json` of every package in the tree (posix path → manifest): entry points of dependencies (`main`, `exports`). */
+  packageJsons: Map<string, Record<string, unknown>>;
   files: number;
   bytes: number;
+}
+
+/** What the integrity stage found out about a package directory (`node_modules/zod`). Only `verified` lifts the scan. */
+export type PackageState = "verified" | "modified" | "unverified";
+
+export interface ScanOptions {
+  /** Package directories (posix, relative to the root) whose content equals the registry tarball byte for byte. */
+  verified?: ReadonlySet<string>;
+}
+
+/** `node_modules/@a/b/lib/x.js` → `node_modules/@a/b`; the nearest enclosing package, or null outside `node_modules`. */
+export function packageDirOf(relPosix: string): string | null {
+  const segs = relPosix.split("/");
+  const i = segs.lastIndexOf("node_modules");
+  if (i < 0 || i + 1 >= segs.length) return null;
+  const take = segs[i + 1]!.startsWith("@") ? 2 : 1;
+  if (i + 1 + take > segs.length) return null;
+  return segs.slice(0, i + 1 + take).join("/");
 }
 
 const CODE_EXT = new Set([".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx"]);
@@ -64,6 +86,8 @@ function invisibleFindings(rel: string, text: string): Finding[] {
   for (let i = 0; i < lines.length && out.length < 5; i++) {
     let line = lines[i]!.replace(/\r$/, "");
     if (i === 0 && line.startsWith("\uFEFF")) line = line.slice(1);
+    // U+FE0F right after a pictographic symbol or a keycap base is how an emoji (✔️, ⚠️) is written; anywhere else it stays invisible.
+    line = line.replace(/([\p{Extended_Pictographic}0-9#*])\uFE0F/gu, "$1");
     if ([...line].some(isInvisible)) out.push({ rule: "invisible-chars", severity: "block", file: rel, line: i + 1, excerpt: excerptOf(escapeInvisible(line)) });
   }
   return out;
@@ -161,8 +185,12 @@ function packageFindings(rel: string, raw: string, isRoot: boolean): { findings:
     return idx < 0 ? 0 : raw.slice(0, idx).split("\n").length;
   };
   const scripts = pkg.scripts && typeof pkg.scripts === "object" ? (pkg.scripts as Record<string, unknown>) : {};
+  const depName = isRoot ? null : (installedPackageName(rel) ?? (typeof pkg.name === "string" ? pkg.name : rel));
   for (const name of INSTALL_SCRIPTS) {
-    if (typeof scripts[name] === "string") findings.push({ rule: "install-script", severity: "block", file: rel, line: lineOf(name), excerpt: excerptOf(`${name}: ${scripts[name]}`) });
+    if (typeof scripts[name] !== "string") continue;
+    // The core installs dependencies with `--ignore-scripts`: a dependency's script never runs. The plugin's own is a red flag as before.
+    if (depName !== null) findings.push({ rule: "install-script", severity: "info", file: rel, line: lineOf(name), excerpt: excerptOf(`install script of dependency ${depName} will not run (the core installs with --ignore-scripts): ${name}: ${scripts[name]}`) });
+    else findings.push({ rule: "install-script", severity: "block", file: rel, line: lineOf(name), excerpt: excerptOf(`${name}: ${scripts[name]}`) });
   }
   if (pkg.gypfile === true) findings.push({ rule: "native-module", severity: "block", file: rel, line: lineOf("gypfile"), excerpt: "gypfile: true (native build on install)" });
   for (const field of DEP_FIELDS) {
@@ -200,7 +228,10 @@ export function installedPackageName(rel: string): string | null {
 }
 
 /** Walks the tree once: structural findings, plus the text of every source file for the AST pass. */
-export async function scanTree(root: string): Promise<TreeScan> {
+export async function scanTree(root: string, opts: ScanOptions = {}): Promise<TreeScan> {
+  const verifiedDirs = opts.verified ?? new Set<string>();
+  const allFiles = new Set<string>();
+  const packageJsons = new Map<string, Record<string, unknown>>();
   const findings: Finding[] = [];
   const sources: SourceFile[] = [];
   let rootPackage: Record<string, unknown> | null = null;
@@ -235,6 +266,10 @@ export async function scanTree(root: string): Promise<TreeScan> {
     const segs = rel.split(sep);
     const dep = segs.includes("node_modules");
     const dist = segs[0] === "dist";
+    const posixRel = segs.join("/");
+    const pkgDir = dep ? packageDirOf(posixRel) : null;
+    // The content of a verified package is the npm release itself: it is not read for heuristics (it is still parsed when the import graph reaches it).
+    const verified = pkgDir !== null && verifiedDirs.has(pkgDir);
 
     if (!st.isSymbolicLink() && (st.mode & 0o022) !== 0) {
       writable++;
@@ -251,7 +286,9 @@ export async function scanTree(root: string): Promise<TreeScan> {
 
     if (st.isDirectory()) {
       if (AGENT_DIRS.has(name) || (name === "workflows" && segs.at(-2) === ".github")) {
-        findings.push({ rule: "agent-config", severity: "block", file: rel, line: 0, excerpt: `${name}/ (agent / IDE / CI configuration inside a plugin)` });
+        // Inside a dependency it is a file of that package's repository, not a configuration anyone loads for this plugin.
+        if (dep) findings.push({ rule: "agent-config", severity: "info", file: rel, line: 0, excerpt: `${name}/ inside a dependency (not a configuration of this plugin)` });
+        else findings.push({ rule: "agent-config", severity: "block", file: rel, line: 0, excerpt: `${name}/ (agent / IDE / CI configuration inside a plugin)` });
       }
       return;
     }
@@ -260,11 +297,19 @@ export async function scanTree(root: string): Promise<TreeScan> {
       return;
     }
 
-    if (AGENT_FILES.has(name)) findings.push({ rule: "agent-config", severity: "block", file: rel, line: 0, excerpt: name });
-    if (name === ".npmrc") findings.push({ rule: "npmrc", severity: "block", file: rel, line: 0, excerpt: ".npmrc inside a plugin" });
-    if (name === "binding.gyp") findings.push({ rule: "native-module", severity: "block", file: rel, line: 0, excerpt: "binding.gyp (native build)" });
-
     const ext = extname(name).toLowerCase();
+    allFiles.add(posixRel);
+    if (verified) {
+      // Registry content: only what the graph and the dependency list need is read.
+      if (NATIVE_EXT.has(ext)) findings.push({ rule: "binary", severity: "info", file: rel, line: 0, excerpt: `native/binary file (${ext}) in a verified npm package` });
+      if (!isCodeFile(rel) && name !== "package.json") return;
+    }
+    if (!verified) {
+      if (AGENT_FILES.has(name)) findings.push({ rule: "agent-config", severity: dep ? "info" : "block", file: rel, line: 0, excerpt: dep ? `${name} inside a dependency (not a configuration of this plugin)` : name });
+      if (name === ".npmrc") findings.push({ rule: "npmrc", severity: "block", file: rel, line: 0, excerpt: ".npmrc inside a plugin" });
+      if (name === "binding.gyp") findings.push({ rule: "native-module", severity: "block", file: rel, line: 0, excerpt: "binding.gyp (native build)" });
+    }
+
     if (st.size > MAX_FILE_BYTES) {
       findings.push({ rule: "file-too-large", severity: "review", file: rel, line: 0, excerpt: `${st.size} bytes: not scanned` });
       return;
@@ -276,24 +321,26 @@ export async function scanTree(root: string): Promise<TreeScan> {
     const executable = isExecutableMagic(buf);
     const binary = NATIVE_EXT.has(ext) || executable || (!MEDIA_EXT.has(ext) && looksBinary(buf));
     if (binary) {
-      if (!exempt) findings.push({ rule: "binary", severity: "block", file: rel, line: 0, excerpt: NATIVE_EXT.has(ext) ? `native/binary file (${ext})` : executable ? "executable binary (by magic bytes)" : "binary data" });
+      if (!exempt && !verified) findings.push({ rule: "binary", severity: "block", file: rel, line: 0, excerpt: NATIVE_EXT.has(ext) ? `native/binary file (${ext})` : executable ? "executable binary (by magic bytes)" : "binary data" });
       return;
     }
     if (MEDIA_EXT.has(ext)) return;
 
-    if ((st.mode & 0o111) !== 0 && !isCodeFile(rel) && ext !== ".sh") {
+    if (!verified && (st.mode & 0o111) !== 0 && !isCodeFile(rel) && ext !== ".sh") {
       findings.push({ rule: "executable-file", severity: "review", file: rel, line: 0, excerpt: `mode ${(st.mode & 0o7777).toString(8)}` });
     }
 
     const text = buf.toString("utf8");
-    if (text.includes("�") && Buffer.from(text, "utf8").length !== buf.length) {
+    if (!verified && text.includes("�") && Buffer.from(text, "utf8").length !== buf.length) {
       findings.push({ rule: "invalid-utf8", severity: "review", file: rel, line: 0, excerpt: "not valid UTF-8: checked as bytes only" });
     }
-    findings.push(...invisibleFindings(rel, text));
+    if (!verified) findings.push(...invisibleFindings(rel, text));
 
     if (name === "package.json") {
       const { findings: f, pkg, declared: d } = packageFindings(rel, text, rel === "package.json");
-      findings.push(...f);
+      if (!verified) findings.push(...f);
+      else findings.push(...f.filter((x) => x.severity === "info"));
+      if (pkg) packageJsons.set(posixRel, pkg);
       if (rel === "package.json") {
         rootPackage = pkg;
         declared = d;
@@ -305,7 +352,7 @@ export async function scanTree(root: string): Promise<TreeScan> {
       }
     }
     if (isCodeFile(rel)) {
-      if (!exempt && !KNOWN_VENDORED_SHA256.has(createHash("sha256").update(buf).digest("hex"))) {
+      if (!exempt && !verified && !KNOWN_VENDORED_SHA256.has(createHash("sha256").update(buf).digest("hex"))) {
         const why = minifiedReason(text);
         if (why) findings.push({ rule: "minified", severity: "block", file: rel, line: 0, excerpt: why });
       }
@@ -315,5 +362,5 @@ export async function scanTree(root: string): Promise<TreeScan> {
 
   await walkDir("");
   if (writable > 3) findings.push({ rule: "writable-by-others", severity: "block", file: "", line: 0, excerpt: `${writable - 3} more entries are writable by group/others` });
-  return { findings, sources, rootPackage, declared, installed, files, bytes };
+  return { findings, sources, rootPackage, declared, installed, allFiles, packageJsons, files, bytes };
 }

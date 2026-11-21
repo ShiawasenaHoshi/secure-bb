@@ -111,7 +111,7 @@ describe("structure (spec §5.1)", () => {
     const r = await tree({
       "node_modules/dep/package.json": JSON.stringify({ name: "dep", scripts: { postinstall: "node x" } }, null, 2),
       "node_modules/dep/index.js": "module.exports = require('node:child_process');\n",
-      "dist/server.js": "import net from 'node:net';\nexport default net;\n",
+      "dist/server.js": "import net from 'node:net';\nimport 'dep';\nexport default net;\n",
     });
     expect(r.findings.some((f) => f.rule === "install-script" && f.file.startsWith("node_modules/dep"))).toBe(true);
     expect(cap(r, "child_process")?.sites[0]!.file).toBe("node_modules/dep/index.js");

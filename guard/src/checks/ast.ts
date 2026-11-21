@@ -41,6 +41,10 @@ export interface FileFacts {
   envCalls: Array<{ callee: string; argIndex: number; line: number }>;
   relImports: Map<string, { from: string; imported: string }>;
   envReaders: Map<string, boolean[]>;
+  /** Every module specifier this file loads (`import`, `export … from`, `require`, `import()`); `null` where it is computed. The import graph of runChecks is built from these. */
+  specs: Array<string | null>;
+  /** Path-like string literals (`./worker.js`, `src/x.ts`): a file named this way may be loaded by other means (`new Worker`, `spawn("node", […])`). Capped. */
+  pathStrings: string[];
 }
 
 // ---- module tables --------------------------------------------------------
@@ -396,7 +400,7 @@ export function sqlRules(value: string): string[] {
 export function analyze(rel: string, parsed: { ast: N; code: string }): FileFacts {
   const { ast, code } = parsed;
   const lines = code.split("\n");
-  const facts: FileFacts = { findings: [], sites: [], hosts: [], secretPaths: [], rcPaths: [], fsPaths: [], network: false, childProcess: false, execSink: false, fsWrite: false, parsed: true, envCalls: [], relImports: new Map(), envReaders: new Map() };
+  const facts: FileFacts = { findings: [], sites: [], hosts: [], secretPaths: [], rcPaths: [], fsPaths: [], network: false, childProcess: false, execSink: false, fsWrite: false, parsed: true, envCalls: [], relImports: new Map(), envReaders: new Map(), specs: [], pathStrings: [] };
   const consts = collectConsts(ast);
   const lineOf = (n: N): number => n.loc?.start.line ?? 0;
   const text = (line: number): string => excerptOf(lines[line - 1] ?? "");
@@ -596,6 +600,7 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
   // ---- visitors ----------------------------------------------------------------
   const handleSpec = (specNode: N, n: N, how: "import" | "require"): void => {
     const spec = fold(specNode, consts);
+    facts.specs.push(spec);
     if (spec === null) {
       cap("dynamic_code", `${how}(expression)`, n);
       finding(how === "import" ? "dynamic-import" : "dynamic-require", "review", n);
@@ -837,9 +842,15 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
     }
   };
 
+  const notePathString = (v: string): void => {
+    if (v.length > 200 || v.length < 2 || facts.pathStrings.length >= 500 || /[\s\n]/.test(v)) return;
+    if (/\//.test(v) || /\.(m|c)?[jt]sx?$/i.test(v)) facts.pathStrings.push(v);
+  };
+
   const visitors: Record<string, (n: N, anc: N[]) => void> = {
     Literal(n) {
       if (typeof n.value === "string") {
+        notePathString(n.value);
         stringChecks(n.value, n);
         sqlChecks(n);
       }
@@ -848,6 +859,7 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
       sqlChecks(n);
     },
     TemplateElement(n) {
+      if (n.value.cooked) notePathString(n.value.cooked);
       if (n.value.cooked) stringChecks(n.value.cooked, n);
     },
     BinaryExpression(n, anc) {
