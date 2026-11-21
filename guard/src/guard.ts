@@ -551,7 +551,8 @@ export class Guard {
       throw new GuardError("invalid_code", "invalid or expired session");
     }
     this.tx(() => {
-      this.db.prepare(`UPDATE sessions SET expires_at = ?, uses = uses + 1 WHERE id = ?`).run(Math.min(now + SESSION_IDLE_MS, Number(row.hard_expires_at)), Number(row.id));
+      // Sliding never takes time away: a session opened «на час» (its end is the ceiling from the start) keeps its hour.
+      this.db.prepare(`UPDATE sessions SET expires_at = ?, uses = uses + 1 WHERE id = ?`).run(Math.max(Number(row.expires_at), Math.min(now + SESSION_IDLE_MS, Number(row.hard_expires_at))), Number(row.id));
     });
     return { via: "session", sessionId: Number(row.id) };
   }
@@ -566,15 +567,18 @@ export class Guard {
 
   /** `session-open`: a fresh touch (a session cannot open another). The old session, if any, is closed: there is one. */
   sessionOpen(raw: Record<string, unknown>): { token: string; idleMs: number; capMs: number; sessionId: number } {
-    const factor = this.verifyFactor("session.open", this.normalizeAction({ op: "session-open" }), raw);
+    // «На 1 час»: the end is the ceiling from the start, nothing to keep alive; the ceiling is the same one, never more.
+    const hour = raw.hour === true;
+    const factor = this.verifyFactor("session.open", this.normalizeAction({ op: "session-open", ...(hour ? { hour: true } : {}) }), raw);
+    const idleMs = hour ? SESSION_CAP_MS : SESSION_IDLE_MS;
     const token = randomBytes(32).toString("base64url");
     return this.tx(() => {
       for (const r of this.db.prepare(`SELECT id FROM sessions WHERE closed_at IS NULL`).all() as Array<{ id: number }>) this.closeSessionInner(Number(r.id), "replaced");
       const now = this.now();
-      const info = this.db.prepare(`INSERT INTO sessions (token_hash, opened_at, expires_at, hard_expires_at) VALUES (?, ?, ?, ?)`).run(sha256hex(token), now, now + SESSION_IDLE_MS, now + SESSION_CAP_MS);
+      const info = this.db.prepare(`INSERT INTO sessions (token_hash, opened_at, expires_at, hard_expires_at) VALUES (?, ?, ?, ?)`).run(sha256hex(token), now, now + idleMs, now + SESSION_CAP_MS);
       const id = Number(info.lastInsertRowid);
-      this.log("session.open", null, null, { session: id, idleMs: SESSION_IDLE_MS, capMs: SESSION_CAP_MS, ...factorDetail(factor) });
-      return { token, idleMs: SESSION_IDLE_MS, capMs: SESSION_CAP_MS, sessionId: id };
+      this.log("session.open", null, null, { session: id, idleMs, capMs: SESSION_CAP_MS, ...(hour ? { hour: true } : {}), ...factorDetail(factor) });
+      return { token, idleMs, capMs: SESSION_CAP_MS, sessionId: id };
     });
   }
   /** "Lock": tightening, no touch. Closes every session. */
@@ -1584,7 +1588,7 @@ export class Guard {
         return { op: "approve-trust", requestId: id, entry };
       }
       case "session-open":
-        return { op: "session-open" };
+        return a.hour === true ? { op: "session-open", hour: true } : { op: "session-open" };
       case "batch-approve":
         return { op: "batch-approve", batchId: str(a.batchId, "batchId", 64, 1), setHash: str(a.setHash, "setHash", 64, 64) };
       case "open-window": {
@@ -1633,6 +1637,7 @@ export class Guard {
         return `Одобрить версию ${String(q.version)} плагина «${String(q.plugin_id)}» (запись #${String(q.id)}, хеш ${String(q.content_hash).slice(0, 16)}…) И добавить источник ${String(a.entry)} в «мои источники»: новые версии оттуда будут проходить без вопросов, пока плагин не попросит новых прав`;
       }
       case "session-open":
+        if (a.hour === true) return `Открыть сессию подтверждения на ${SESSION_CAP_MS / 60_000} мин подряд (не продлевается). Рутину (одобрить версию, открыть окно, принять расхождение, одобрить скилл, пакет) она покрывает без касания; опасное — всегда со свежим касанием`;
         return `Открыть сессию подтверждения: ${SESSION_IDLE_MS / 60_000} мин скользящие, потолок ${SESSION_CAP_MS / 60_000} мин. Рутину (одобрить версию, открыть окно, принять расхождение, одобрить скилл, пакет) она покрывает без касания; опасное — всегда со свежим касанием`;
       case "batch-approve": {
         const row = this.db.prepare(`SELECT * FROM batches WHERE id = ? AND used_at IS NULL`).get(String(a.batchId)) as Raw | undefined;

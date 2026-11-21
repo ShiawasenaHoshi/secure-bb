@@ -92,7 +92,7 @@ const proofFields = (p: GuardProof): Record<string, unknown> => (typeof p === "s
 export type GuardAction =
   | { op: "approve"; requestId: number; acknowledgeBlock?: boolean }
   | { op: "approve-trust"; requestId: number }
-  | { op: "session-open" }
+  | { op: "session-open"; hour?: true }
   | { op: "batch-approve"; batchId: string; setHash: string }
   | { op: "open-window"; pluginId: string; minutes?: number; scope?: "tree" | "thread" }
   | { op: "policy"; patch: Partial<GuardPolicy> }
@@ -243,7 +243,7 @@ export interface GuardPort {
   /** «Вернуть и доверять источнику»: approves the version and adds its source, one touch, one operation at the guard. */
   approveTrust(requestId: number, proof: GuardProof): Promise<{ approval: GuardApproval; entry: string; mySources: string[] }>;
   /** Approval sessions: opening takes a fresh touch (never a session); the token comes back once. Locking tightens: no touch. */
-  sessionOpen(proof: GuardProof): Promise<{ token: string; idleMs: number; capMs: number }>;
+  sessionOpen(proof: GuardProof, hour?: boolean): Promise<{ token: string; idleMs: number; capMs: number }>;
   sessionClose(): Promise<void>;
   /** A list for one touch: fixed at the guard first, then one touch names only its id and hash. */
   batchPrepare(items: Array<{ kind: "queue" | "skill" | "drift"; id: number; fingerprint?: string; label?: string }>): Promise<GuardBatchPrepared>;
@@ -343,8 +343,8 @@ export class GuardLink implements GuardPort {
   async approveTrust(requestId: number, proof: GuardProof): Promise<{ approval: GuardApproval; entry: string; mySources: string[] }> {
     return (await this.call({ op: "approve-trust", requestId, ...proofFields(proof) })) as unknown as { approval: GuardApproval; entry: string; mySources: string[] };
   }
-  async sessionOpen(proof: GuardProof): Promise<{ token: string; idleMs: number; capMs: number }> {
-    const r = await this.call({ op: "session-open", ...proofFields(proof) });
+  async sessionOpen(proof: GuardProof, hour = false): Promise<{ token: string; idleMs: number; capMs: number }> {
+    const r = await this.call({ op: "session-open", ...(hour ? { hour: true } : {}), ...proofFields(proof) });
     return { token: String(r.token), idleMs: Number(r.idleMs), capMs: Number(r.capMs) };
   }
   async sessionClose(): Promise<void> {

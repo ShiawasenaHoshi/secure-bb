@@ -26,6 +26,8 @@ export interface FileFacts {
   /** Secret / rc / agent-config paths that reach a file-system, path or process call. */
   secretPaths: Array<{ line: number; text: string }>;
   rcPaths: Array<{ line: number; text: string }>;
+  /** Literal absolute / home paths handed to file-system calls: shown to the person, they change no decision. */
+  fsPaths: string[];
   network: boolean;
   childProcess: boolean;
   execSink: boolean;
@@ -353,6 +355,8 @@ function moduleCapability(spec: string): { kind: CapabilityKind; detail: string 
 
 // ---- the analysis -------------------------------------------------------------
 const FS_FUNCS = new Set(["readFile", "readFileSync", "writeFile", "writeFileSync", "appendFile", "appendFileSync", "createReadStream", "createWriteStream", "open", "openSync", "readdir", "readdirSync", "stat", "statSync", "lstat", "lstatSync", "access", "accessSync", "exists", "existsSync", "copyFile", "copyFileSync", "cp", "cpSync", "rename", "renameSync", "unlink", "unlinkSync", "rm", "rmSync", "mkdir", "mkdirSync", "symlink", "symlinkSync", "readlink", "realpath", "chmod", "chmodSync", "opendir", "watch", "truncate", "outputFile", "readJson", "writeJson"]);
+/** A literal that is an absolute or home path (not a URL, not a bare word). */
+const LITERAL_PATH = /^(~\/|\/(?!\/))[^\s]{2,}$/;
 const CHILD_FUNCS = new Set(["exec", "execSync", "spawn", "spawnSync", "execFile", "execFileSync", "fork"]);
 const PATH_FUNCS = new Set(["join", "resolve", "normalize", "relative"]);
 const SINK_NAMES = new Set([...FS_FUNCS, ...CHILD_FUNCS, ...PATH_FUNCS]);
@@ -392,7 +396,7 @@ export function sqlRules(value: string): string[] {
 export function analyze(rel: string, parsed: { ast: N; code: string }): FileFacts {
   const { ast, code } = parsed;
   const lines = code.split("\n");
-  const facts: FileFacts = { findings: [], sites: [], hosts: [], secretPaths: [], rcPaths: [], network: false, childProcess: false, execSink: false, fsWrite: false, parsed: true, envCalls: [], relImports: new Map(), envReaders: new Map() };
+  const facts: FileFacts = { findings: [], sites: [], hosts: [], secretPaths: [], rcPaths: [], fsPaths: [], network: false, childProcess: false, execSink: false, fsWrite: false, parsed: true, envCalls: [], relImports: new Map(), envReaders: new Map() };
   const consts = collectConsts(ast);
   const lineOf = (n: N): number => n.loc?.start.line ?? 0;
   const text = (line: number): string => excerptOf(lines[line - 1] ?? "");
@@ -621,6 +625,7 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
     for (const arg of call.arguments) {
       for (const { value, n } of stringsIn(arg)) {
         consumed.add(n);
+        if (FS_FUNCS.has(simple) && LITERAL_PATH.test(value) && facts.fsPaths.length < 20 && !facts.fsPaths.includes(value)) facts.fsPaths.push(value.slice(0, 120));
         for (const kind of pathMatches(value)) push(kind, n, value);
         if (child && PIPE_SHELL.test(value)) finding("download-exec", "block", n, excerptOf(value));
       }

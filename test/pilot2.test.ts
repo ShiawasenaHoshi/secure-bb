@@ -149,14 +149,14 @@ import { approvalWhy, cardFoldId, cardKey, doneMessage, glossSegments, pluginWin
 describe("6. every version in the history says why it passed", () => {
   it("«прошла сама» stays as the guard wrote it; a touch names the new right in words", () => {
     expect(approvalWhy({ via: "source", why: "прошла сама: свой источник, права те же" })).toBe("прошла сама: свой источник, права те же");
-    expect(approvalWhy({ via: "touch", why: "касанием: новое право: network, network:stats.example" })).toBe("касанием: новое право — сеть stats.example");
+    expect(approvalWhy({ via: "touch", why: "касанием: новое право: network, network:stats.example" })).toBe("вы, касанием: новое право — сеть stats.example");
     expect(approvalWhy({ via: "touch", why: "касанием: новое право: env, env:HOME" })).toContain("переменные окружения HOME");
-    expect(approvalWhy({ via: "touch", why: "касанием: неизвестный источник" })).toBe("касанием: неизвестный источник");
+    expect(approvalWhy({ via: "touch", why: "касанием: неизвестный источник" })).toBe("вы, касанием: неизвестный источник");
     expect(approvalWhy({ via: "touch", why: "касанием: вы одобрили сами" })).toBe("касанием: вы одобрили сами");
   });
   it("an approval from before the reason was recorded still gets a line", () => {
-    expect(approvalWhy({ via: "touch" })).toBe("касанием");
-    expect(approvalWhy({ via: "window", why: null })).toBe("в открытом окне доверия");
+    expect(approvalWhy({ via: "touch" })).toBe("вы, касанием");
+    expect(approvalWhy({ via: "window", why: null })).toBe("в окне временного доверия");
     expect(approvalWhy({ via: "source" })).toContain("прошла сама");
   });
 });
@@ -168,7 +168,7 @@ describe("7. «окно закрыто» has a button, or says why it cannot", (
   it("without a thread: the reason, and what to do instead (own source: it passes by itself)", () => {
     const own = pluginWindowAvail({ guard: true, threadId: null, level: "own" });
     expect(own.available).toBe(false);
-    expect(own.note).toContain("привязано к треду");
+    expect(own.note).toContain("привязано к чату");
     expect(own.note).toContain("проходят сами");
     expect(pluginWindowAvail({ guard: true, threadId: null, level: "unknown" }).note).toContain("одобрить касанием");
   });

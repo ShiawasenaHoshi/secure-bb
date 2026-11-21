@@ -275,7 +275,7 @@ describe("where a key is stored (AAGUID)", () => {
 
 describe("touch hints", () => {
   it("the hint about the password manager appears only after the wait", () => {
-    expect(touchWithHint("Одобрить p", false)).toBe("Подтвердите касанием. Сторож: «Одобрить p»");
+    expect(touchWithHint("Одобрить p", false)).toBe("Подтвердите касанием. Защита: «Одобрить p»");
     expect(touchWithHint("Одобрить p", true)).toContain("менеджера паролей");
     expect(touchWithHint("Одобрить p", true)).toContain("1Password");
   });
@@ -329,7 +329,7 @@ describe("review fixes (PR 2, review)", () => {
     expect(c(5)).toBe("5 версий p прошли сами");
     expect(c(11)).toBe("11 версий p прошли сами");
     expect(c(21)).toBe("21 версия p прошла сама");
-    expect(awayText({ pluginId: "p", counts: { auto: 0, window: 1, approved: 0, held: 1, stopped: 0, rejected: 0, deleted: 0, alarm: 0 } })).toBe("1 версия p прошла в окне доверия, 1 версия ждёт вашего решения");
+    expect(awayText({ pluginId: "p", counts: { auto: 0, window: 1, approved: 0, held: 1, stopped: 0, rejected: 0, deleted: 0, alarm: 0 } })).toBe("1 версия p прошла во временном доверии, 1 версия ждёт вашего решения");
   });
   it("a hash mismatch is red with its own words, not the default yellow", () => {
     expect(isMismatch(MISMATCH)).toBe(true);

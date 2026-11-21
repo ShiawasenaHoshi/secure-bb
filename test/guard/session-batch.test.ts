@@ -48,6 +48,22 @@ describe("approval session at the guard", () => {
     expect(ofKind("session.open")[0]!.detail).toMatchObject({ via: "totp" });
   });
 
+  it("«на час»: the end is the ceiling from the start, a use does not shorten it, and it never goes past the ceiling", async () => {
+    await held(2);
+    const r = await g.send({ op: "session-open", hour: true, code: g.nextCode() });
+    expect(r).toMatchObject({ ok: true, idleMs: SESSION_CAP_MS, capMs: SESSION_CAP_MS });
+    const before = (await state()).sessions[0];
+    expect(before.expiresAt - before.openedAt).toBe(SESSION_CAP_MS);
+    expect(await g.send({ op: "approve", requestId: 1, session: r.token as string })).toMatchObject({ ok: true });
+    const after = (await state()).sessions[0];
+    expect(after.expiresAt).toBe(before.expiresAt);
+    expect(after.expiresAt).toBeLessThanOrEqual(after.hardExpiresAt);
+    expect(ofKind("session.open")[0]!.detail).toMatchObject({ hour: true });
+    // the 15-minute session is unchanged: it ends 15 minutes after the open
+    const r2 = await g.send({ op: "session-open", code: g.nextCode() });
+    expect(r2).toMatchObject({ idleMs: SESSION_IDLE_MS });
+  });
+
   it("the token is not in the state, the journal, or any answer but the first; the guard keeps a hash", async () => {
     await held(2);
     const token = await openSession();

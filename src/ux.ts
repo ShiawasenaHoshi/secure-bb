@@ -65,7 +65,11 @@ export function sourceLabel(sourceKind: string, source: string): string {
 export interface CapLike {
   kind: string;
   detail: string[];
+  /** For `fs`: the literal paths the code hands to file calls, when it names any. */
+  paths?: string[];
 }
+/** The capabilities of a check result, with the file paths of the result put on the `fs` one (so that a card can name them). */
+export const capsWithPaths = (r: { capabilities: CapLike[]; fsPaths?: string[] } | undefined): CapLike[] => (r?.capabilities ?? []).map((c) => (c.kind === "fs" && r?.fsPaths && r.fsPaths.length > 0 ? { ...c, paths: r.fsPaths } : c));
 /** A piece of a phrase; `red` marks the word that must catch the eye («все»). */
 export interface Segment {
   text: string;
@@ -127,7 +131,9 @@ export function capabilityPhrase(c: CapLike): string {
     case "child_process":
       return "запускать программы на компьютере";
     case "fs":
-      return "читать и писать файлы";
+      return c.paths && c.paths.length > 0
+        ? `читать и писать файлы (в коде названы: ${c.paths.slice(0, 3).join(", ")}${c.paths.length > 3 ? ", …" : ""}; остальное из кода не видно)`
+        : "читать и писать любые файлы, к которым у bb есть доступ — в том числе ваши документы";
     case "dynamic_code":
       return "выполнять код, собранный на лету";
     case "ui":
@@ -172,10 +178,12 @@ function tokensText(tokens: string[]): string {
  */
 export function approvalWhy(a: { via: string; why?: string | null }): string {
   if (!a.why) {
-    const by: Record<string, string> = { window: "в открытом окне доверия", pin: "закреплена при заморозке окна", auto: "безопасный класс", source: "прошла сама: источник и права те же", touch: "касанием" };
+    const by: Record<string, string> = { window: "в окне временного доверия", pin: "закреплена при заморозке окна", auto: "прошла сама: безопасный класс", source: "прошла сама: источник и права те же", touch: "вы, касанием" };
     return by[a.via] ?? a.via;
   }
-  return a.why.replace(/новое право: ([^;]+?)(?= и ещё \d+|$)/, (_m, list: string) => `новое право — ${tokensText(list.split(", ").map((t) => t.trim()).filter(Boolean))}`);
+  // A touch is the person's own act; the guard's note says «касанием: …», the line says who.
+  const why = a.via === "touch" && /^касанием/.test(a.why) && !/(^|\s)вы(\s|$)/i.test(a.why) ? `вы, ${a.why}` : a.why;
+  return why.replace(/новое право: ([^;]+?)(?= и ещё \d+|$)/, (_m, list: string) => `новое право — ${tokensText(list.split(", ").map((t) => t.trim()).filter(Boolean))}`);
 }
 export const capabilityPhrases = (caps: CapLike[]): string[] => caps.map(capabilityPhrase);
 
@@ -202,6 +210,17 @@ const RED: Record<string, { title: string; line: string }> = {
   "sqlite-extension": { title: "плагин подгружает расширение базы данных", line: "Это чужая программа внутри базы secure-bb." },
 };
 const RED_FALLBACK = { title: "плагин ведёт себя как вредоносный", line: "Проверки нашли в нём признак, который бывает только у вредного кода." };
+
+/** The hosts a plugin names in its code (network capability), without the `host:` mark. */
+export const hostsOf = (caps: CapLike[]): string[] => caps.filter((c) => c.kind === "network").flatMap((c) => c.detail.filter((d) => d.startsWith("host:")).map((d) => d.slice(5)));
+/** Where the data of a red card goes, in one sentence, from the hosts the code names; null when the plugin does not go to the network. */
+export function redWhere(caps: CapLike[]): string | null {
+  const net = caps.find((c) => c.kind === "network");
+  if (!net) return null;
+  const hosts = hostsOf(caps);
+  if (hosts.length === 0) return "Куда он отправляет данные, из кода не видно: адрес может быть любым.";
+  return `Данные уходят на: ${hosts.slice(0, 3).join(", ")}${hosts.length > 3 ? ", …" : ""}.`;
+}
 
 export interface RedText {
   title: string;
@@ -249,8 +268,8 @@ export const MISMATCH_HINT = "Переустановите плагин из е�
 /** A version whose code is not what the guard checked: red, with its own words. */
 export function mismatchText(pluginId: string, version: string): RedText {
   return {
-    title: "Остановлено: код плагина не совпал с тем, что проверил сторож",
-    line: `Плагин «${pluginId}» ${version}: код не совпал с тем, что проверил сторож. Так бывает при подмене файлов. Не разрешайте, если не знаете причину. Плагин не запущен. ${MISMATCH_HINT}`,
+    title: "Остановлено: код плагина не совпал с тем, что проверила защита",
+    line: `Плагин «${pluginId}» ${version}: код не совпал с тем, что проверила защита. Так бывает при подмене файлов. Не разрешайте, если не знаете причину. Плагин не запущен. ${MISMATCH_HINT}`,
     rule: null,
   };
 }
@@ -293,7 +312,7 @@ export function yellowText(y: YellowInput): YellowText {
       line = `Плагин из ${y.level === "unknown" ? "источника" : who + " источника"} (${y.sourceLabel}), который вы ещё не разрешали.${can || " Особых прав он не просит."}`;
       break;
     default:
-      line = `Сторож не пропустил плагин сам (${y.sourceLabel}).${can}`;
+      line = `Защита не пропустила плагин сама (${y.sourceLabel}).${can}`;
   }
   return { title: `«${y.pluginId}» ${y.version} ждёт вашего решения`, line: `${line}${tail}` };
 }
@@ -308,7 +327,11 @@ export interface ProblemRef {
   anchor: string;
   tab: TabId;
   text: string;
+  /** How many alarms this one line stands for (one per changed file / change, not one per line); 1 when absent. Every count on the page sums these. */
+  weight?: number;
 }
+/** The number of alarms a list of problems stands for: one per change, whichever line they are told in. */
+export const alarmCount = (list: Array<{ weight?: number }>): number => list.reduce((n, p) => n + (p.weight ?? 1), 0);
 export interface Problem extends ProblemRef {
   kind: ProblemKind;
 }
@@ -332,20 +355,21 @@ export interface Status {
 /** One indicator. Down: the guard does not answer. Attention: something waits or alarms. The first problem is the one the button leads to. */
 export function pageStatus(i: StatusInput): Status {
   const problems: Problem[] = [
-    ...(i.guardDown ? [{ kind: "guard" as const, anchor: "sbb-guard-alarm", tab: "status" as const, text: "Сторож не отвечает" }] : []),
+    ...(i.guardDown ? [{ kind: "guard" as const, anchor: "sbb-guard-alarm", tab: "status" as const, text: "Защита не отвечает" }] : []),
     ...i.red.map((r) => ({ kind: "red" as const, ...r })),
     ...i.yellow.map((r) => ({ kind: "yellow" as const, ...r })),
     ...i.alarms.map((r) => ({ kind: "alarm" as const, ...r })),
   ];
   const first = problems[0] ?? null;
-  if (i.guardDown) return { level: "down", label: "Защита не работает", count: problems.length, problems, first };
-  if (i.red.length > 0) return { level: "stopped", label: `Остановлено (${i.red.length})`, count: problems.length, problems, first };
-  if (problems.length > 0) return { level: "attention", label: `Требует внимания (${problems.length})`, count: problems.length, problems, first };
+  const count = alarmCount(problems);
+  if (i.guardDown) return { level: "down", label: "Защита не работает", count, problems, first };
+  if (i.red.length > 0) return { level: "stopped", label: `Остановлено (${i.red.length})`, count, problems, first };
+  if (problems.length > 0) return { level: "attention", label: `Требует внимания (${count})`, count, problems, first };
   return { level: "ok", label: "Защищено", count: 0, problems, first: null };
 }
 
 /** The text under the status when the guard is down (the page must say what actually happens: everything unbuilt-in is held). */
-export const GUARD_DOWN_TEXT = "Защита не работает: сторож не отвечает. Новые плагины не загрузятся, а одобрить сейчас ничего нельзя. Что делать: на этой машине выполните «sbb-guard status».";
+export const GUARD_DOWN_TEXT = "Защита не работает: она не отвечает. Новые плагины не загрузятся, а одобрить сейчас ничего нельзя. Что делать: на этой машине выполните «sbb-guard status».";
 
 /** Why a running plugin keeps the approval session closed (its code could take the session's token). */
 export interface SessionBlocker {
@@ -428,7 +452,7 @@ export function awayText(g: Pick<AwayGroup, "pluginId" | "counts">): string {
   const name = g.pluginId ?? "системы";
   const parts: string[] = [];
   if (c.auto > 0) parts.push(`${versions(c.auto)} ${name} ${c.auto % 10 === 1 && c.auto % 100 !== 11 ? "прошла сама" : "прошли сами"}`);
-  if (c.window > 0) parts.push(`${versions(c.window)} ${name} ${c.window % 10 === 1 && c.window % 100 !== 11 ? "прошла" : "прошли"} в окне доверия`);
+  if (c.window > 0) parts.push(`${versions(c.window)} ${name} ${c.window % 10 === 1 && c.window % 100 !== 11 ? "прошла" : "прошли"} во временном доверии`);
   // Neutral: the journal does not always know who touched (a window, a source, a session), so it does not say «вы».
   if (c.approved > 0) parts.push(`${versions(c.approved)} ${name} ${plural(c.approved, "одобрена", "одобрены", "одобрено")}`);
   if (c.held > 0) parts.push(`${c.held} ${plural(c.held, "версия ждёт", "версии ждут", "версий ждут")} вашего решения`);
@@ -528,7 +552,8 @@ export interface AwayAlarms {
 /** The alarms of the summary: each current alarm by name, with the place to deal with it. Null when none. */
 export function awayAlarms(alarms: ProblemRef[]): AwayAlarms | null {
   if (alarms.length === 0) return null;
-  return { title: `${alarms.length} ${plural(alarms.length, "тревога", "тревоги", "тревог")} системы`, items: alarms };
+  const n = alarmCount(alarms);
+  return { title: `${n} ${plural(n, "тревога", "тревоги", "тревог")} системы`, items: alarms };
 }
 
 /** One line for the skills that wait: «Скиллы: 38 ждут проверки, из них 12 с жёсткими признаками». Null: nothing waits. */
@@ -599,7 +624,7 @@ export const isPasswordManager = (name: string): boolean => name === "Proton Pas
 export const TOUCH_SLOW_MS = 15_000;
 export const TOUCH_SLOW_HINT = "Проверьте окно менеджера паролей (1Password, Proton Pass…) или выберите другое устройство.";
 export const SAVED_NARROWING = "Сохранено: это сужение, касание не требуется.";
-export const touchWithHint = (description: string, slow: boolean): string => `Подтвердите касанием. Сторож: «${description}»${slow ? `. ${TOUCH_SLOW_HINT}` : ""}`;
+export const touchWithHint = (description: string, slow: boolean): string => `Подтвердите касанием. Защита: «${description}»${slow ? `. ${TOUCH_SLOW_HINT}` : ""}`;
 
 // ---- first run ---------------------------------------------------------------------------------------------------------------
 export const MODE_NAMES: Record<TrustMode, string> = { simple: "Простой", detailed: "Подробный", strict: "Строгий" };
@@ -718,6 +743,8 @@ export const doneMessage = (what: string): string => `Готово: ${what.repla
 /** The action on a card names the version it is about. */
 export const actionLabel = (verb: string, pluginId: string, version: string): string => `${verb} ${pluginId} ${version}`;
 export const deleteConfirmText = (pluginId: string, version: string): string => `Удалить плагин ${pluginId} ${version}? Чтобы вернуть, установите плагин снова`;
+/** Where the buttons were, after «Разрешить»: the same kind of line as «Удалён: …». */
+export const approvedNote = (pluginId: string, version: string): string => `Разрешено: плагин ${pluginId} ${version}.`;
 export const deletedNote = (pluginId: string, version: string): string => `Удалён: плагин ${pluginId} ${version}.`;
 
 // ---- trust window and «доверять источнику» on a card ----------------------------------------------------------------------------
@@ -740,20 +767,20 @@ export function windowAvailability(i: WindowAvailInput): WindowAvail {
   if (i.sourceKind === "path") {
     return {
       available: false,
-      note: `Окно доверия для плагина из папки недоступно: оно открывается для плагина, который агент ставит из треда. ${i.level === "own" ? "Ваш источник уже в доверенных: версии без новых прав проходят сами." : "Вместо окна доверьте источник кнопкой «Разрешить и доверять источнику»: тогда версии без новых прав будут проходить сами."}`,
+      note: `Временное доверие недоступно: плагин взят из папки на компьютере, а не из чата агента. ${i.level === "own" ? "Ваш источник уже в доверенных: версии без новых прав проходят сами." : "Вместо него доверьте источник кнопкой «Разрешить и доверять источнику»: тогда версии без новых прав будут проходить сами."}`,
     };
   }
-  return { available: false, note: "Окно доверия недоступно: плагин пришёл не из треда. Одобряйте версию или доверьте источник." };
+  return { available: false, note: "Временное доверие недоступно: плагин пришёл не из чата агента. Разрешайте версию или доверьте источник." };
 }
 /**
  * «Открыть окно на N мин» on a plugin's own row. A window is bound to the thread an agent put the plugin in from, so it is possible only for a plugin with such a
  * thread (and only with a guard); otherwise the row says why not and what to use instead — never a bare «окно закрыто».
  */
 export function pluginWindowAvail(i: { guard: boolean; threadId: string | null; level: Level }): WindowAvail {
-  if (!i.guard) return { available: false, note: "Окно открывается с карточки версии, которая ждёт решения; кнопка на строке плагина есть в режиме сторожа." };
+  if (!i.guard) return { available: false, note: "Временное доверие открывается с карточки версии, которая ждёт решения; кнопка на строке плагина есть при включённой защите." };
   if (i.threadId) return { available: true, note: null };
   const instead = i.level === "own" ? "Версии из ваших источников и без окна проходят сами, пока не просят новых прав." : "Версию можно одобрить касанием или доверить её источник.";
-  return { available: false, note: `Окно здесь невозможно: оно привязано к треду, из которого агент поставил плагин (через bb secure-bb propose), а у этого плагина такого треда нет. ${instead}` };
+  return { available: false, note: `Временное доверие здесь невозможно: оно привязано к чату, из которого агент поставил плагин, а у этого плагина такого чата нет. ${instead}` };
 }
 export interface TrustButtonInput {
   entry: string | null;
@@ -769,7 +796,7 @@ export interface TrustButton {
 export function trustButton(i: TrustButtonInput): TrustButton {
   if (i.entry === null) return { enabled: false, note: "Этот источник нельзя занести в «мои источники» (не github и не папка на диске)." };
   if (i.queueId < 0) return { enabled: false, note: "Плагин ещё не установлен: сначала разрешите версию." };
-  if (i.level === "own") return { enabled: false, note: "Ваш источник уже в доверенных: версии без новых прав проходят сами. Эта кнопка ничего бы не добавила." };
+  if (i.level === "own") return { enabled: false, note: "Ваш источник уже в доверенных: версии без новых прав проходят сами." };
   return { enabled: true, note: null };
 }
 
@@ -789,7 +816,35 @@ export function proofHint(i: { hasKey: boolean; keyOnly: boolean }): string {
   if (i.hasKey) return i.keyOnly ? `${KEY_HINT[0]!.toUpperCase()}${KEY_HINT.slice(1)}.` : `${KEY_HINT[0]!.toUpperCase()}${KEY_HINT.slice(1)} или введите ${CODE_HINT}.`;
   return `${CODE_HINT[0]!.toUpperCase()}${CODE_HINT.slice(1)}.`;
 }
-export const SESSION_LINE = "Открыть на 15 минут, чтобы не вводить код каждый раз";
+/**
+ * The action Enter presses in a code field: the first enabled button that follows the field in the document order inside the nearest group
+ * (the field's parent, then up to two levels higher) — the buttons of a card stand next to its code field.
+ */
+export function firstButtonAfter(field: Element): HTMLButtonElement | null {
+  let scope: Element | null = field.parentElement;
+  for (let up = 0; scope && up < 3; up++, scope = scope.parentElement) {
+    const buttons = Array.from(scope.querySelectorAll("button"));
+    const after = buttons.find((b) => !b.disabled && (field.compareDocumentPosition(b) & 4) !== 0);
+    if (after) return after;
+  }
+  return null;
+}
+/** Why the approval session is closed, in words, for the strip that tells the person (a session that goes quietly looked like «my click did nothing»). */
+export type SessionCloseReason = "idle" | "ceiling" | "locked" | "server";
+export function sessionClosedText(reason: SessionCloseReason): string {
+  const why: Record<SessionCloseReason, string> = {
+    idle: "прошло 15 минут без действий",
+    ceiling: "прошёл час, дольше сессия не живёт",
+    locked: "вы нажали «Заблокировать»",
+    server: "сервер её больше не признаёт (закончилось время или её закрыли на другой странице)",
+  };
+  return `Сессия закрыта: ${why[reason]}. Чтобы не вводить код каждый раз, откройте её снова.`;
+}
+/** The page's own count of the end: which of the two limits ran out. */
+export const sessionEndReason = (s: { idleUntil: number; hardUntil: number }, now: number): SessionCloseReason => (now >= s.hardUntil ? "ceiling" : "idle");
+/** After a use the idle end moves ahead by 15 minutes, but never back: a session opened for an hour keeps its hour. */
+export const slideIdle = (cur: { idleUntil: number }, startedAt: number, idleMs: number, marginMs: number): number => Math.max(cur.idleUntil, startedAt + idleMs - marginMs);
+export const SESSION_LINE = "Открыть на 15 минут или на час, чтобы не вводить код каждый раз";
 export interface SessionText {
   /** The one line (always). */
   line: string;
@@ -880,7 +935,7 @@ const MEANINGS: Array<[RegExp, (m: RegExpExecArray) => string]> = [
   [/sandbox_mode = "danger-full-access"/, () => "агент получит полный доступ к компьютеру, без песочницы"],
   [/network_access = true/, () => "агенту откроют доступ в сеть"],
   [/MCP-сервер/, () => "агент получит внешний инструмент (MCP-сервер)"],
-  [/файл не разобран как JSON/, () => "файл нельзя прочитать как настройки: агент может понять его иначе, чем сторож"],
+  [/файл не разобран как JSON/, () => "файл нельзя прочитать как настройки: агент может понять его иначе, чем защита"],
 ];
 /** What each critical reason lets the agent do, in plain words; a reason with no text of its own is passed through. */
 export function criticalMeanings(reasons: string[]): string[] {
@@ -925,7 +980,7 @@ export function manualRollback(path: string, reasons: string[]): string {
     else steps.push(r);
   }
   const what = steps.length > 0 ? [...new Set(steps)].join("; ") : "верните файл к прежнему виду (см. diff)";
-  return `Откройте файл ${path} и: ${what}. Через минуту сторож перечитает файл; когда всё как в эталоне, тревога уйдёт сама.`;
+  return `Откройте файл ${path} и: ${what}. Через минуту защита перечитает файл; когда всё вернётся к одобренным настройкам, тревога уйдёт сама.`;
 }
 
 /** Where the card of the agents' differences is shown: on the «Статус» tab while something critical or an alarm waits there, else in «Подробно». */
@@ -1007,4 +1062,74 @@ export function emphasize(text: string): Segment[] {
   }
   out.push({ text: text.slice(last) });
   return out.filter((x) => x.text !== "");
+}
+
+// ---- errors in plain Russian ---------------------------------------------------------------------------------------------------
+/** What the server and the guard answer (English, with internal words) → what the person reads. Anything not known gets a general sentence, never the English text. */
+const ERROR_TEXT: Array<[RegExp, string]> = [
+  [/hash did not match|never approved/i, "Эту версию вернуть нельзя: её файлы изменились после проверки. Установите плагин заново из его источника."],
+  [/hard flag|blocked by the checks/i, "У этой версии жёсткий признак опасности: обычным разрешением её не пропустить."],
+  [/fresh touch|session does not cover/i, "Для этого нужен свежий код или касание: сессия здесь не помогает."],
+  [/invalid or expired session|expired session/i, "Сессия закрылась. Откройте её снова или введите код."],
+  [/invalid or already used code|invalid_code|code does not match/i, "Код не подошёл. Подождите, пока в приложении появится новый, и введите его."],
+  [/a code or a touch is needed|a code is needed|code, or an open session/i, "Нужен код из приложения (или касание ключом)."],
+  [/too many|blocked until|block/i, "Слишком много неверных кодов: ввод закрыт на час."],
+  [/third-party plugins first|interface code could read/i, "Пока работают чужие плагины с интерфейсом, сессию открыть нельзя: они могли бы подсмотреть её."],
+  [/directory that others can write/i, "Папка плагина доступна на запись другим пользователям: после проверки файлы можно подменить. Исправьте права или ставьте плагин другим способом."],
+  [/is already (approved|dismissed|accepted|reverted|superseded)|already approved/i, "Это уже решено: обновите страницу."],
+  [/no such|not found|no review|no request|no difference/i, "Этого уже нет: обновите страницу."],
+  [/list expired|does not match the one that was shown|prepare it again/i, "Список устарел: соберите его заново."],
+  [/did not come from a thread|trust window/i, "Для этого плагина временное доверие недоступно: разрешайте версию целиком."],
+  [/challenge/i, "Подтверждение устарело. Нажмите ещё раз."],
+  [/acknowledgeBlock|Строгий/i, "В строгом режиме остановку обойти нельзя. Сначала смягчите режим."],
+  [/guard|ECONN|ENOENT|timeout|socket/i, "Защита не ответила. Проверьте, что она запущена, и повторите."],
+];
+export function humanError(raw: string): string {
+  for (const [re, text] of ERROR_TEXT) if (re.test(raw)) return text;
+  // Already in Russian: the page's own words, shown as they are.
+  if (/[А-Яа-яЁё]/.test(raw)) return raw;
+  return "Не получилось. Подробности записаны в журнал; повторите или позовите того, кто настраивал защиту.";
+}
+
+// ---- who, when and how ---------------------------------------------------------------------------------------------------------
+/** «21:26» for today, «20.11 21:26» for another day. */
+export function clockText(ms: number, now: number): string {
+  const d = new Date(ms);
+  const n = new Date(now);
+  const hhmm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  return d.toDateString() === n.toDateString() ? hhmm : `${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")} ${hhmm}`;
+}
+/** A rejected version (a card the person dismissed): the version's own version can be put back only if its files are what was checked. */
+export const canRestore = (q: { reason: string | null; contentHash: string | null }): boolean => !isMismatch(q.reason) && q.contentHash !== null;
+/** When the person rejected a version: the guard's journal knows (a `dismissed` record of this entry), the entry itself only knows when it last saw it. */
+export function rejectedAtOf(q: { id: number; pluginId: string; version: string; lastSeen: number }, events: Array<{ ts: number; kind: string; pluginId: string | null; detail?: unknown }>): number {
+  let best: number | null = null;
+  for (const e of events) {
+    if (e.kind !== "dismissed" || e.pluginId !== q.pluginId) continue;
+    const d = e.detail !== null && typeof e.detail === "object" ? (e.detail as Record<string, unknown>) : {};
+    if (d.review !== q.id && d.version !== q.version) continue;
+    if (best === null || e.ts > best) best = e.ts;
+  }
+  return best ?? q.lastSeen;
+}
+/** «отклонено вами 21:20». */
+export const rejectedByText = (at: number, now: number): string => `отклонено вами ${clockText(at, now)}`;
+/** «вы, касанием, 21:26» / «прошла сама: свой источник, 21:20»: who let the version in, how, when. */
+export function approvedByText(a: { via: string; why?: string | null; approvedAt: number }, now: number): string {
+  return `${approvalWhy(a)}, ${clockText(a.approvedAt, now)}`;
+}
+
+/** The notes under the «срок» fold: each sentence once (the window's note and the button's note both may say that the source is already trusted). */
+export function uniqueSentences(notes: Array<string | null | undefined>): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const note of notes) {
+    for (const part of (note ?? "").split(/(?<=[.!?])\s+/)) {
+      const t = part.trim();
+      if (t === "" || seen.has(t)) continue;
+      seen.add(t);
+      out.push(t);
+    }
+  }
+  return out;
 }

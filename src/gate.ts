@@ -235,7 +235,7 @@ export class Gate {
       this.recordFailure(`session:${purpose}`, "invalid or expired session");
     }
     // Sliding: every use moves the end 15 minutes ahead, never past the ceiling.
-    this.store.slideSession(row.id, this.now, Math.min(this.now + SESSION_IDLE_MS, row.hardExpiresAt));
+    this.store.slideSession(row.id, this.now, Math.max(row.expiresAt, Math.min(this.now + SESSION_IDLE_MS, row.hardExpiresAt)));
     this.store.log("session.use", null, null, { purpose });
   }
 
@@ -248,29 +248,31 @@ export class Gate {
    * Opens a session with one fresh code. Refused while any third-party plugin runs: its interface code lives in the page's
    * origin and could read the token. The old session (if any) is closed: there is one.
    */
-  async openSession(code: string): Promise<{ token: string; idleMs: number; capMs: number }> {
+  async openSession(code: string, hour = false): Promise<{ token: string; idleMs: number; capMs: number }> {
     const running = await this.sessionBlockers();
     if (running.length > 0)
       throw new GateError("conflict", `disable these third-party plugins first: their interface code could read the session token (${running.join(", ")})`, { plugins: running });
     this.touch("session.open", code);
     this.store.closeSessions("replaced");
     const token = newToken();
-    this.store.insertSession(hashToken(token), this.now, this.now + SESSION_IDLE_MS, this.now + SESSION_CAP_MS);
-    this.store.log("session.open", null, null, { idleMs: SESSION_IDLE_MS, capMs: SESSION_CAP_MS });
-    return { token, idleMs: SESSION_IDLE_MS, capMs: SESSION_CAP_MS };
+    // «На 1 час»: the end is the ceiling from the start (never more than the ceiling); sliding never takes time away from it.
+    const idleMs = hour ? SESSION_CAP_MS : SESSION_IDLE_MS;
+    this.store.insertSession(hashToken(token), this.now, this.now + idleMs, this.now + SESSION_CAP_MS);
+    this.store.log("session.open", null, null, { idleMs, capMs: SESSION_CAP_MS, ...(hour ? { hour: true } : {}) });
+    return { token, idleMs, capMs: SESSION_CAP_MS };
   }
 
   /**
    * Guard mode: the guard issues the session (a code or a signature, checked there) and keeps only the token's hash. The same rule as without a guard:
    * not while a third-party plugin runs (its interface code shares the page's origin and could read the token).
    */
-  async openGuardSession(proof: GuardProof): Promise<{ token: string; idleMs: number; capMs: number }> {
+  async openGuardSession(proof: GuardProof, hour = false): Promise<{ token: string; idleMs: number; capMs: number }> {
     const guard = this.d.guard;
     if (!guard) throw new GateError("invalid", "not in guard mode");
     const running = await this.sessionBlockers();
     if (running.length > 0)
       throw new GateError("conflict", `disable these third-party plugins first: their interface code could read the session token (${running.join(", ")})`, { plugins: running });
-    const opened = await guard.sessionOpen(proof);
+    const opened = await guard.sessionOpen(proof, hour);
     this.store.log("session.open", null, null, { idleMs: opened.idleMs, capMs: opened.capMs, at: "guard" });
     return opened;
   }
