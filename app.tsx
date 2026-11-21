@@ -35,7 +35,7 @@ import {
 } from "./src/ux";
 import { isMismatch, riskHeadline, approveVerb, enabledWhat, agentConfigNote, scopeText, makeStub, stableOrder, layoutItems, friendlySource, WIZARD_SOURCES_TEXT, secondFactorText, AWAY_HIDE_LABEL, type Stub } from "./src/ux";
 import { checksSummary, countsLine, DEFER_STUB_RESTORE, DELETE_CONFIRM_BUTTONS, dropUnstamped, hasNoGuardRecord, makeDeferStub, NO_RECORD_FIX, NO_RECORD_HEADLINE, NO_RECORD_LINE, pageCounts, restoreNote, significantFindings, stampMark, withoutMark } from "./src/ux";
-import { capabilityPhrase } from "./src/ux";
+import { attachFlow, capabilityPhrase } from "./src/ux";
 import { createDrafts } from "./src/drafts";
 import { isFoldOpen, openFold, toggleFold } from "./src/fold";
 import type { AwayEvent, CapLike, HeldNow, ProblemRef, TabId } from "./src/ux";
@@ -1053,7 +1053,7 @@ function ChecksView({ id, result }: { id: string; result: CheckResult | undefine
       ) : (
         <ul className="list-disc pl-5">
           {result.capabilities.map((c) => (
-            <li key={c.kind}>{capabilityPhrase({ kind: c.kind, detail: c.detail })}</li>
+            <li key={c.kind}>{capabilityPhrase(attachFlow(result, { kind: c.kind, detail: c.detail }))}</li>
           ))}
         </ul>
       )}
@@ -1067,6 +1067,12 @@ function ChecksView({ id, result }: { id: string; result: CheckResult | undefine
           ))}
           {result.capabilities.map((c) => (
             <li key={`cap-${c.kind}`} className="break-all"><span className="font-mono">{c.kind}</span>{c.detail.length ? `: ${c.detail.join(", ")}` : ""}</li>
+          ))}
+          {(result.flows ?? []).map((f) => (
+            <li key={`flow-${f.source}`} className="break-all"><span className="font-mono">flow {f.source}</span>{f.detail.length ? ` (${f.detail.join(", ")})` : ""}: {f.verdict}{f.sinks.length ? ` → ${f.sinks.map((k) => `${k.kind}${k.target ? `:${k.target}` : ""} ${k.file}:${k.line}`).join(", ")}` : ""}{f.why ? ` — ${f.why}` : ""}</li>
+          ))}
+          {(result.purposes ?? []).map((p, i) => (
+            <li key={`purpose-${i}`} className="break-all"><span className="font-mono">purpose</span> {p.on.join("/")}: {p.text} ({p.pair})</li>
           ))}
         </ul>
       </Fold>

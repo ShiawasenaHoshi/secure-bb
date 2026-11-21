@@ -8,6 +8,7 @@
 // version passes by itself only if they did not grow compared to an approved version from the same source.
 import { posix } from "node:path";
 import type { CheckResult, Finding } from "./checks/index.ts";
+import { flowTokens } from "./checks/flow.ts";
 
 export type Level = "own" | "known" | "unknown";
 export type TrustMode = "simple" | "detailed" | "strict";
@@ -114,12 +115,14 @@ export interface Rights {
 }
 const MAX_TOKENS = 400;
 
-export function capabilityTokens(r: Pick<CheckResult, "capabilities">): string[] {
+export function capabilityTokens(r: Pick<CheckResult, "capabilities" | "flows">): string[] {
   const out = new Set<string>();
   for (const c of r.capabilities) {
     out.add(c.kind);
     for (const d of c.detail) out.add(`${c.kind}:${d}`);
   }
+  // Where what the plugin reads goes (the guard counts it itself, with the same module): a new way out is a new right.
+  for (const t of flowTokens(r.flows)) out.add(t);
   return [...out].sort();
 }
 

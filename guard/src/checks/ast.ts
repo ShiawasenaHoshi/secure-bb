@@ -66,9 +66,9 @@ export interface FileFacts {
 }
 
 // ---- module tables --------------------------------------------------------
-const NETWORK_MODULES = new Set(["http", "https", "http2", "net", "tls", "dgram", "dns", "dns/promises", "undici", "ws", "axios", "node-fetch", "cross-fetch", "got", "superagent", "request", "needle", "socket.io-client", "isomorphic-ws", "node-ftp", "ssh2", "socks", "net-ping"]);
-const CHILD_MODULES = new Set(["child_process", "cross-spawn", "execa", "shelljs", "node-pty", "cluster"]);
-const FS_MODULES = new Set(["fs", "fs/promises", "fs-extra", "graceful-fs", "original-fs"]);
+export const NETWORK_MODULES = new Set(["http", "https", "http2", "net", "tls", "dgram", "dns", "dns/promises", "undici", "ws", "axios", "node-fetch", "cross-fetch", "got", "superagent", "request", "needle", "socket.io-client", "isomorphic-ws", "node-ftp", "ssh2", "socks", "net-ping"]);
+export const CHILD_MODULES = new Set(["child_process", "cross-spawn", "execa", "shelljs", "node-pty", "cluster"]);
+export const FS_MODULES = new Set(["fs", "fs/promises", "fs-extra", "graceful-fs", "original-fs"]);
 /**
  * `v8` (heap snapshots hold every secret of the process), `diagnostics_channel` (sees other plugins' requests) and `async_hooks`
  * reach the whole process without any import that looks dangerous: they count as dynamic code, not as plain built-ins.
@@ -77,11 +77,11 @@ const DYNAMIC_MODULES = new Set(["vm", "module", "vm2", "isolated-vm", "worker_t
 /** A database handle: `ATTACH` / `load_extension` through it reach files of other plugins (threat model F2). */
 const DATABASE_MODULES = new Set(["sqlite", "better-sqlite3", "sqlite3", "libsql", "@libsql/client", "node-sqlite3"]);
 /** Node built-ins with no capability of their own. Any other `node:` module is an unknown: review. */
-const PLAIN_BUILTINS = new Set(["assert", "assert/strict", "buffer", "console", "constants", "crypto", "events", "os", "path", "path/posix", "path/win32", "perf_hooks", "process", "punycode", "querystring", "readline", "readline/promises", "stream", "stream/promises", "stream/web", "stream/consumers", "string_decoder", "test", "timers", "timers/promises", "tty", "url", "util", "util/types", "zlib"]);
+export const PLAIN_BUILTINS = new Set(["assert", "assert/strict", "buffer", "console", "constants", "crypto", "events", "os", "path", "path/posix", "path/win32", "perf_hooks", "process", "punycode", "querystring", "readline", "readline/promises", "stream", "stream/promises", "stream/web", "stream/consumers", "string_decoder", "test", "timers", "timers/promises", "tty", "url", "util", "util/types", "zlib"]);
 const BUILTIN_RPC = new Set(["bb-account", "connect", "mcp", "custom-instructions"]);
 const GLOBAL_OBJECTS = new Set(["globalThis", "global", "window", "self"]);
 const NETWORK_GLOBALS = new Set(["fetch", "WebSocket", "XMLHttpRequest", "EventSource"]);
-const FS_WRITE = new Set(["writeFile", "writeFileSync", "appendFile", "appendFileSync", "createWriteStream", "copyFile", "copyFileSync", "rename", "renameSync", "cp", "cpSync", "symlink", "symlinkSync", "outputFile", "outputFileSync", "writeSync", "chmod", "chmodSync", "fchmod"]);
+export const FS_WRITE = new Set(["writeFile", "writeFileSync", "appendFile", "appendFileSync", "createWriteStream", "copyFile", "copyFileSync", "rename", "renameSync", "cp", "cpSync", "symlink", "symlinkSync", "outputFile", "outputFileSync", "writeSync", "chmod", "chmodSync", "fchmod"]);
 const VM_SINKS = new Set(["runInThisContext", "runInNewContext", "runInContext", "compileFunction"]);
 const ENV_SERIALIZERS = new Set(["JSON.stringify", "Object.entries", "Object.keys", "Object.values", "Object.fromEntries", "util.inspect", "inspect"]);
 const DECODE_FUNCS = new Set(["atob", "unescape", "gunzipSync", "inflateSync", "inflateRawSync", "unzipSync", "brotliDecompressSync", "createDecipheriv", "createDecipher"]);
@@ -106,7 +106,7 @@ const CREDENTIAL_FILES: Array<[RegExp, string]> = [
 ];
 export const credentialLabels = (value: string): string[] => CREDENTIAL_FILES.filter(([re]) => re.test(value)).map(([, label]) => label);
 /** Folders of system programs: a path there names a program, not a document. */
-const SYSTEM_BIN = /^(\/usr\/(local\/)?s?bin|\/s?bin|\/opt\/homebrew\/s?bin|\/System\/Library\/[^\s]*\/bin)\//;
+export const SYSTEM_BIN = /^(\/usr\/(local\/)?s?bin|\/s?bin|\/opt\/homebrew\/s?bin|\/System\/Library\/[^\s]*\/bin)\//;
 const PIPE_SHELL = /\b(curl|wget)\b[^|\n]*\|\s*(sudo\s+)?(ba|z|da)?sh\b/;
 
 // ---- parsing ----------------------------------------------------------------
@@ -174,9 +174,9 @@ export function parseSource(rel: string, text: string, comments?: Array<{ start:
 
 // ---- the walker ---------------------------------------------------------------
 /** Type-only keys of TypeScript nodes: never runtime code. */
-const SKIP_KEYS = new Set(["loc", "start", "end", "type", "typeAnnotation", "typeParameters", "typeArguments", "returnType", "superTypeParameters", "superTypeArguments", "implements", "range"]);
+export const SKIP_KEYS = new Set(["loc", "start", "end", "type", "typeAnnotation", "typeParameters", "typeArguments", "returnType", "superTypeParameters", "superTypeArguments", "implements", "range"]);
 /** TS nodes that carry runtime code; every other `TS*` node is a type and is not entered. */
-const RUNTIME_TS = new Set(["TSEnumDeclaration", "TSEnumBody", "TSEnumMember", "TSModuleDeclaration", "TSModuleBlock", "TSParameterProperty", "TSAsExpression", "TSSatisfiesExpression", "TSNonNullExpression", "TSTypeAssertion", "TSInstantiationExpression", "TSExportAssignment", "TSImportEqualsDeclaration", "TSExternalModuleReference"]);
+export const RUNTIME_TS = new Set(["TSEnumDeclaration", "TSEnumBody", "TSEnumMember", "TSModuleDeclaration", "TSModuleBlock", "TSParameterProperty", "TSAsExpression", "TSSatisfiesExpression", "TSNonNullExpression", "TSTypeAssertion", "TSInstantiationExpression", "TSExportAssignment", "TSImportEqualsDeclaration", "TSExternalModuleReference"]);
 
 /** Pre-order walk with the ancestor chain (the node itself is last). Handles JSX and TypeScript nodes. */
 function walkAst(root: N, visit: (n: N, anc: N[]) => void): void {
@@ -344,7 +344,7 @@ export function fold(n: N, consts: Consts): string | null {
   }
 }
 
-function collectConsts(ast: N): Consts {
+export function collectConsts(ast: N): Consts {
   const consts: Consts = new Map();
   const declared = new Map<string, number>();
   const decls: N[] = [];
@@ -374,11 +374,11 @@ const anyNode = (n: N, pred: (x: N) => boolean): boolean => {
   return false;
 };
 
-function normalizeModule(spec: string): string {
+export function normalizeModule(spec: string): string {
   return spec.replace(/^node:/, "");
 }
 
-function moduleCapability(spec: string): { kind: CapabilityKind; detail: string } | null {
+export function moduleCapability(spec: string): { kind: CapabilityKind; detail: string } | null {
   const full = normalizeModule(spec);
   const root = full.startsWith("@") ? full.split("/").slice(0, 2).join("/") : full.split("/")[0]!;
   const key = full.startsWith("@") ? root : NETWORK_MODULES.has(full) || FS_MODULES.has(full) ? full : root;
@@ -393,12 +393,12 @@ function moduleCapability(spec: string): { kind: CapabilityKind; detail: string 
 }
 
 // ---- the analysis -------------------------------------------------------------
-const FS_FUNCS = new Set(["readFile", "readFileSync", "writeFile", "writeFileSync", "appendFile", "appendFileSync", "createReadStream", "createWriteStream", "open", "openSync", "readdir", "readdirSync", "stat", "statSync", "lstat", "lstatSync", "access", "accessSync", "exists", "existsSync", "copyFile", "copyFileSync", "cp", "cpSync", "rename", "renameSync", "unlink", "unlinkSync", "rm", "rmSync", "mkdir", "mkdirSync", "symlink", "symlinkSync", "readlink", "realpath", "chmod", "chmodSync", "opendir", "watch", "truncate", "outputFile", "readJson", "writeJson"]);
+export const FS_FUNCS = new Set(["readFile", "readFileSync", "writeFile", "writeFileSync", "appendFile", "appendFileSync", "createReadStream", "createWriteStream", "open", "openSync", "readdir", "readdirSync", "stat", "statSync", "lstat", "lstatSync", "access", "accessSync", "exists", "existsSync", "copyFile", "copyFileSync", "cp", "cpSync", "rename", "renameSync", "unlink", "unlinkSync", "rm", "rmSync", "mkdir", "mkdirSync", "symlink", "symlinkSync", "readlink", "realpath", "chmod", "chmodSync", "opendir", "watch", "truncate", "outputFile", "readJson", "writeJson"]);
 /** A literal that is an absolute or home path (not a URL, not a bare word). */
 /** A literal path into the person's own folders (home, Documents, Desktop, Downloads, another user's home). */
 const HOME_PATH = /^~(\/|$)|(^|[\\/])(Documents|Desktop|Downloads)([\\/]|$)|^[\\/](Users|home)[\\/]|^[A-Za-z]:[\\/]Users[\\/]/;
 const LITERAL_PATH = /^(~\/|\/(?!\/))[^\s]{2,}$/;
-const CHILD_FUNCS = new Set(["exec", "execSync", "spawn", "spawnSync", "execFile", "execFileSync", "fork"]);
+export const CHILD_FUNCS = new Set(["exec", "execSync", "spawn", "spawnSync", "execFile", "execFileSync", "fork"]);
 const PATH_FUNCS = new Set(["join", "resolve", "normalize", "relative"]);
 const SINK_NAMES = new Set([...FS_FUNCS, ...CHILD_FUNCS, ...PATH_FUNCS]);
 /** Calls that change files or start processes: where an rc / agent-config path is dangerous. Reading or joining such a path is not. */
@@ -1212,11 +1212,14 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
       }
       if (name !== null && /^(experimental_)?(contentScripts?|composer)$/.test(name)) cap("ui", name, n);
       if (name === "sendBeacon") cap("network", "navigator.sendBeacon", n);
+      // The text of the agent's last reply that bb hands to a `thread.idle` handler: what is said in a conversation.
+      if (name === "lastAssistantText") cap("sdk_read", "event.lastAssistantText", n);
       sdkMember(n, parent);
     },
     ObjectPattern(n) {
       for (const p of n.properties) {
         if (p.type === "Property" && (p.computed ? fold(p.key, consts) : p.key.type === "Identifier" ? p.key.name : p.key.value) === "database") cap("database", "bb.storage.database", p);
+        if (p.type === "Property" && !p.computed && (p.key.type === "Identifier" ? p.key.name : p.key.value) === "lastAssistantText") cap("sdk_read", "event.lastAssistantText", p);
         if (p.type === "Property" && (p.computed ? fold(p.key, consts) : p.key.type === "Identifier" ? p.key.name : p.key.value) === "constructor") {
           cap("dynamic_code", ".constructor", p);
           finding("dynamic-constructor", "review", p);

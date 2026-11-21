@@ -1,6 +1,7 @@
 // Result shapes of the deterministic plugin checks (spec §5.1).
 
 import type { Finding, Severity } from "../text-rules.ts";
+import type { FlowSummary, Purpose } from "./flow.ts";
 export type { Finding, Severity };
 
 export type CapabilityKind =
@@ -117,7 +118,7 @@ export interface DependencyStats {
  * The version of the analysis a result was made by. Results are stored by the content hash and shown for as long as the version lives, so a change of
  * what the checks count (which directory of a repository, which calls are which right) must make the stored ones be made again: they carry this number.
  */
-export const CHECKS_VERSION = 4;
+export const CHECKS_VERSION = 5;
 
 export interface CheckResult {
   /** `CHECKS_VERSION` at the time; absent on results of the first checks. */
@@ -135,6 +136,10 @@ export interface CheckResult {
   programsUnknown?: boolean;
   /** Whose credential files the plugin's file or process calls reach («Google (Gemini)», «SSH-ключи»). For the person to read; no decision uses them. */
   credentials?: string[];
+  /** Where what the plugin reads goes («Зачем»): one summary per source it has. Absent when the code was not analysed for flows. For the person to read, and the guard's rights say the dangerous ones. */
+  flows?: FlowSummary[];
+  /** «Зачем» by the pair access → sink: short sentences with the capability kinds whose lines they belong to. */
+  purposes?: Purpose[];
 }
 /** The detail of a `network` capability: a network call whose address the code does not show. */
 export const UNRESOLVED_HOST = "unresolved-host";
