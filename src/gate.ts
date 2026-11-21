@@ -13,6 +13,7 @@ import type { AiSettings } from "./scan/types.js";
 import { normalizePattern } from "./taint/repos.js";
 import { checkBranch, checkRepoUrl, sameSettings } from "./publish/validate.js";
 import type { PublishSettings } from "./publish/types.js";
+import type { GuardLookup, GuardPort, GuardState } from "./guardlink.js";
 import { T } from "./text.js";
 import { generateSecret, otpauthUri, verifyTotp, stepAt } from "./totp.js";
 import type { ApprovalRow, Policy, ProposalRow, QueueRow, Store, WindowRow } from "./store.js";
@@ -98,9 +99,17 @@ export interface GateDeps {
   publishAllowFile?: boolean;
   /** Stage 3: a version that did not come through `propose` is held (the "scan externals" option). Must not throw. */
   onExternal?: (ctx: HookCtx) => void;
+  /**
+   * Guard mode (`BB_SECURE_BB_GUARD_SOCKET`): approvals, windows and the second factor live in the decision guard.
+   * The hook then only ADDS restrictions to what the guard allows; it never records an approval of its own.
+   */
+  guard?: GuardPort;
 }
 
 export type TotpState = "none" | "pending" | "locked" | "external" | "external-broken";
+
+/** Guard mode: what a window of the guard needs from this plugin besides the guard's own record. */
+export const GUARD_WINDOW_UNBOUND = "окно сторожа открыто не отсюда: к какому треду оно относится, неизвестно";
 
 const HOUR_MS = 3_600_000;
 /** A stored result with unverified dependencies (no network at the time) is verified again after this long, when its version is next decided. */
@@ -128,7 +137,18 @@ export class Gate {
   }
 
   // ---- TOTP --------------------------------------------------------------
+  /** Guard mode: whether the guard said, last time we asked, that it has a second factor (the secret itself is never here). */
+  private guardRegistered = false;
+  isGuarded(): boolean {
+    return this.d.guard !== undefined;
+  }
+  noteGuardState(registered: boolean): void {
+    this.guardRegistered = registered;
+  }
+
   totpState(): TotpState {
+    // The secret is held outside bb by the guard: for the page that is the same as an external secret file.
+    if (this.d.guard) return this.guardRegistered ? "external" : "none";
     if (this.d.externalTotpFile !== null) return this.readExternal() === null ? "external-broken" : "external";
     return this.store.totp()?.state ?? "none";
   }
@@ -170,7 +190,8 @@ export class Gate {
    * A session proof is only ever made by `proofFor`, which looked at the RPC table first.
    */
   touch(purpose: string, proof: Proof): void {
-    if (proof instanceof ListProof) return; // one code for a whole fixed list was accepted a moment ago (`approveList`)
+    if (proof instanceof ListProof) return; // one code for a whole fixed list was accepted a moment ago (`approveList`), or the guard checked this one
+    if (this.d.guard) throw new GateError("invalid_code", "in guard mode the guard checks every code; this one did not go through it");
     const code = proof instanceof SessionProof ? null : proof;
     const state = this.totpState();
     if (state === "none" || state === "pending") throw new GateError("not_registered", "no second factor is registered yet; register one on the secure-bb page");
@@ -195,6 +216,7 @@ export class Gate {
   proofFor(rpc: RpcName, cred: { code?: string; session?: string }, opts: { escalate?: boolean } = {}): Proof {
     if (cred.code !== undefined) return cred.code;
     if (cred.session !== undefined) {
+      if (this.d.guard) throw new GateError("invalid_code", "there are no sessions in guard mode: the guard checks a fresh code for every approval");
       if (groupOf(rpc) !== "routine" || opts.escalate === true) throw new GateError("invalid_code", "this action needs a fresh code: a session does not cover it");
       return mintSessionProof(cred.session);
     }
@@ -424,6 +446,7 @@ export class Gate {
   }
 
   private async decideUnsafe(ctx: HookCtx): Promise<Decision> {
+    if (this.d.guard) return this.decideGuarded(ctx, this.d.guard);
     const approved = this.store.activeApproval(ctx.contentHash);
     if (approved) {
       this.scheduleCheck(ctx);
@@ -535,6 +558,184 @@ export class Gate {
       return this.hold(ctx, proposal, why);
     }
     return this.holdExternal(ctx, proposal, reason ?? aiFlag);
+  }
+
+  // ---- guard mode -----------------------------------------------------------------------------------------------
+  /**
+   * The hook in guard mode. The core asks the guard itself and the guard says yes or "held"; this hook can only make it stricter:
+   *   proceed  — the guard has approved this exact version, or one of its windows is open on this plugin and this version
+   *              came from the window's thread tree, is clean and has nothing new (the guard will then approve it by the window);
+   *   reject   — hard findings (the same as without a guard);
+   *   wait     — everything else, including "the guard has not approved it and no window covers it". The guard holds that too;
+   *              holding here as well means a core that does not (yet) ask the guard still cannot load an unapproved version.
+   * Findings and reasons go to the guard's queue entry as an annotation (for the page; nothing there decides anything).
+   */
+  private async decideGuarded(ctx: HookCtx, guard: GuardPort): Promise<Decision> {
+    let look: GuardLookup;
+    try {
+      look = await guard.lookup(ctx.pluginId, ctx.contentHash);
+    } catch (err) {
+      // Fail closed, as the core does when the guard does not answer.
+      this.store.logDecision("hold", ctx.pluginId, ctx.contentHash, { version: ctx.version, trigger: ctx.trigger, reason: "guard unreachable", message: err instanceof Error ? err.message : String(err) });
+      return { action: "wait", reason: T.agentHeldNoReview };
+    }
+    // An approval a window made a moment ago, while that window is still open, is not final: the core may have asked the guard first, and
+    // the guard approves by the window without knowing what this hook knows (a new capability, a tainted tree). Looked at again below;
+    // if it must be held, the approval is withdrawn (tightening: no code). A human's approval, a pin of a closed window, an import: final.
+    const byOpenWindow = look.approval?.via === "window" && look.window !== null && look.approval.windowId === look.window.id;
+    if (look.approved && !byOpenWindow) {
+      this.scheduleCheck(ctx);
+      return { action: "proceed" };
+    }
+    const withdraw = byOpenWindow ? look.approval!.id : null;
+    const hold = async (reason: string, extra: Record<string, unknown> = {}): Promise<Decision> => {
+      if (withdraw !== null) await guard.revoke({ approvalId: withdraw }).catch(() => undefined);
+      // The version is kept for a human at the guard even if the core never asks it (a hook that holds is enough for the core to stop),
+      // and a window of the guard must not lift this hold: that is the stop on a new capability.
+      await guard.hold({ pluginId: ctx.pluginId, version: ctx.version, contentHash: ctx.contentHash, rootDir: ctx.rootDir, source: ctx.source, sourceKind: ctx.sourceKind, trigger: ctx.trigger }, look.window !== null).catch(() => undefined);
+      this.store.logDecision("hold", ctx.pluginId, ctx.contentHash, { version: ctx.version, trigger: ctx.trigger, reason });
+      this.annotate(guard, ctx, { reason, ...extra });
+      return { action: "wait", reason: T.agentHeldNoReview };
+    };
+
+    let proposal: ProposalRow | null = null;
+    let tampered: string | null = null;
+    let verifiedDir: string | null = null;
+    if (!(await isInsideSnapshots(this.d.snapshotsRoot, ctx.rootDir))) {
+      const unsafe = await this.unsafeDirs(ctx.rootDir);
+      this.scheduleCheck(ctx);
+      return hold(unsafe !== null ? `${UNSAFE_DIR_REASON}: ${unsafe}` : "не из снимка secure-bb: версия одобряется по хешу сторожем");
+    }
+    const real = await realpath(ctx.rootDir);
+    proposal = this.store.proposalByDir(real);
+    if (proposal && proposal.pluginId === ctx.pluginId) {
+      tampered = await this.verifySnapshot(proposal, real);
+      if (tampered === null) verifiedDir = real;
+    } else proposal = null;
+
+    const aiFlag = this.d.scanFlag?.({ contentHash: ctx.contentHash, localHash: proposal?.localHash ?? null }) ?? null;
+    const key = proposal && verifiedDir ? localCheckKey(proposal.localHash) : ctx.contentHash;
+    const result = await this.awaitCheck(this.startCheck(key, ctx.pluginId, verifiedDir ?? ctx.rootDir, ctx.contentHash));
+    if (result === null) return hold(tampered ?? "проверки не завершились");
+    if (key !== ctx.contentHash) {
+      const linked = this.store.getCheck(ctx.contentHash);
+      const own = this.store.getCheck(key);
+      if (!linked || (own && own.ts > linked.ts)) this.store.putCheck(ctx.contentHash, ctx.pluginId, result);
+    }
+    const summary = { capabilities: capabilityTokens(result), findings: result.findings.slice(0, 40).map((f) => ({ rule: f.rule, severity: f.severity, file: f.file, line: f.line })) };
+
+    const blocks = bySeverity(result, "block");
+    if (blocks.length > 0) {
+      if (withdraw !== null) await guard.revoke({ approvalId: withdraw }).catch(() => undefined);
+      await guard.hold({ pluginId: ctx.pluginId, version: ctx.version, contentHash: ctx.contentHash, rootDir: ctx.rootDir, source: ctx.source, sourceKind: ctx.sourceKind, trigger: ctx.trigger }, true).catch(() => undefined);
+      const why = `${BLOCKED_REASON}: ${summarize(blocks)}`;
+      this.annotate(guard, ctx, { reason: why, blocked: true, ...summary });
+      this.store.logDecision("reject", ctx.pluginId, ctx.contentHash, { version: ctx.version, rules: blocks.map((f) => f.rule) });
+      return { action: "reject", message: "rejected by secure-bb" };
+    }
+    if (tampered !== null) return hold(tampered, summary);
+
+    // No window of the guard covers this plugin: the guard holds it for a human, and so do we.
+    if (look.window === null) {
+      const reviews = bySeverity(result, "review");
+      return hold(reviews.length > 0 ? `проверки требуют ревью: ${summarize(reviews)}` : result.capabilities.length > 0 ? `вне безопасного класса: ${result.capabilities.map((c) => c.kind).join(", ")}` : T.autoSafeOff, summary);
+    }
+    // A window is open at the guard. It knows the plugin id and the time; which thread opened it, and what the plugin could do then, is ours.
+    const w = this.store.windowByGuardId(look.window.id);
+    if (w === null || w.pluginId !== ctx.pluginId) return hold(GUARD_WINDOW_UNBOUND, summary);
+    if (proposal === null || proposal.windowId !== w.id) return hold("версия пришла не из треда, для которого открыто окно", summary);
+    const taint = await this.guardWindow(w);
+    if (taint === "closed") {
+      // The window is closed here and at the guard: closing only tightens, so the guard takes it without a code.
+      await guard.closeWindow({ windowId: look.window.id }).catch(() => undefined);
+      return hold("окно закрыто: в дереве тредов читали недоверенное", summary);
+    }
+    if (taint === "unknown") return hold("не удалось проверить загрязнение дерева тредов", summary);
+    const reviews = bySeverity(result, "review");
+    const fresh = newTokens(result, w.caps);
+    if (reviews.length > 0 || fresh.length > 0 || aiFlag !== null) {
+      const why = fresh.length > 0 ? `новая возможность в окне: ${fresh.slice(0, 6).join(", ")}${fresh.length > 6 ? "…" : ""}` : reviews.length > 0 ? `проверки требуют ревью: ${summarize(reviews)}` : aiFlag!;
+      return hold(why, summary); // the window stays open (spec §0, §6)
+    }
+    return { action: "proceed" }; // the guard approves it by the window and journals that
+  }
+
+  /** Check results are put on the guard's queue entry for the page. Never awaited by the hook and never throws. */
+  private annotate(guard: GuardPort, ctx: HookCtx, findings: Record<string, unknown>): void {
+    void guard.annotate({ contentHash: ctx.contentHash }, { ...findings, from: "secure-bb", version: ctx.version }).catch(() => undefined);
+  }
+
+  /** Brings the shadow rows of windows in line with the guard's: its clock and its closing are the truth. */
+  syncGuardWindows(state: GuardState): void {
+    const live = new Map(state.windows.map((w) => [w.id, w]));
+    for (const row of this.store.unclosedWindows()) {
+      if (row.guardWindowId === null) continue;
+      const g = live.get(row.guardWindowId);
+      if (!g) {
+        const closed = state.closedWindows.find((c) => c.id === row.guardWindowId);
+        this.store.closeWindow(row.id, closed?.closedReason ?? "closed at the guard", closed?.closedAt ?? this.now);
+        try {
+          this.d.onFreeze?.(row.pluginId, null); // approvals are the guard's: there is no local pin to pass on
+        } catch {
+          /* optional */
+        }
+        continue;
+      }
+      if (g.expiresAt !== row.expiresAt) this.store.setWindowExpiry(row.id, g.expiresAt);
+    }
+  }
+
+  /**
+   * Opens a window at the guard (with a code, checked there), then remembers here which thread it belongs to and what the plugin could do at that moment.
+   * The queue entry is the guard's; the thread comes from the proposal whose snapshot directory is the entry's directory.
+   */
+  async openGuardWindow(entry: { id: number; pluginId: string; contentHash: string; rootDir: string }, code: string, scope?: "tree" | "thread"): Promise<WindowRow> {
+    const guard = this.d.guard!;
+    let proposal: ProposalRow | null = null;
+    try {
+      proposal = this.store.proposalByDir(await realpath(entry.rootDir));
+    } catch {
+      proposal = null;
+    }
+    if (!proposal || proposal.pluginId !== entry.pluginId || !proposal.threadId)
+      throw new GateError("invalid", "this entry did not come from a thread, so a trust window cannot be bound to it; approve the version instead");
+    const found = this.store.getCheck(entry.contentHash)?.result ?? this.store.getCheck(localCheckKey(proposal.localHash))?.result ?? null;
+    if (found !== null && bySeverity(found, "block").length > 0)
+      throw new GateError("invalid", "this version was blocked by the checks; a window cannot be opened on it (approve the version knowingly, or fix the plugin)");
+    const policy = this.store.policy();
+    const gw = await guard.openWindow(entry.pluginId, undefined, code);
+    for (const old of this.store.unclosedWindows()) if (old.pluginId === entry.pluginId) this.store.closeWindow(old.id, "reopened");
+    const w = this.store.insertWindow({
+      pluginId: entry.pluginId,
+      threadId: proposal.threadId,
+      scope: scope ?? policy.scope,
+      mode: gw.mode,
+      sizeSec: gw.sizeSec,
+      capSec: gw.capSec,
+      openedAt: gw.openedAt,
+      expiresAt: gw.expiresAt,
+      hardExpiresAt: gw.hardExpiresAt,
+      caps: found ? capabilityTokens(found) : [],
+      guardWindowId: gw.id,
+    });
+    this.store.setProposalWindow(proposal.id, w.id);
+    this.store.log("window.open", entry.pluginId, null, { windowId: w.id, guardWindow: gw.id, thread: w.threadId, scope: w.scope, mode: w.mode, sizeSec: w.sizeSec });
+    return w;
+  }
+
+  /** Closing only tightens: no code. */
+  async closeGuardWindow(guardWindowId: number): Promise<void> {
+    await this.d.guard!.closeWindow({ windowId: guardWindowId });
+    const row = this.store.windowByGuardId(guardWindowId);
+    if (row && row.closedAt === null) {
+      this.store.closeWindow(row.id, "closed");
+      this.store.log("window.close", row.pluginId, null, { windowId: row.id, guardWindow: guardWindowId });
+      try {
+        this.d.onFreeze?.(row.pluginId, null);
+      } catch {
+        /* optional */
+      }
+    }
   }
 
   /** Null: only the server's user can write there (or the check cannot run on this OS). Otherwise a description for the page. */

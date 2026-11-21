@@ -19,6 +19,11 @@ export interface ProposeDeps {
   /** Called after a successful install: lets the gate record what bb built. */
   afterInstall?: (dir: string) => Promise<void>;
   changed: () => void;
+  /**
+   * Guard mode: whether to install is not decided here. The guard holds what no human approved and no window covers,
+   * and its queue entry (made when the core asks) is what the human sees; a snapshot that never reached the core would have none.
+   */
+  guarded?: boolean;
 }
 
 /**
@@ -143,7 +148,7 @@ export async function propose(
   // Outside a window a clean plugin of the safe class (spec §5.2) needs no touch: the hook will let it in.
   const safeClass = checks !== null && checks.capabilities.length === 0 && bySeverity(checks, "review").length === 0;
 
-  if (!allowed && !safeClass) {
+  if (!allowed && !safeClass && !d.guarded) {
     const q = d.store.upsertQueue({
       kind: "proposal",
       contentHash: null,

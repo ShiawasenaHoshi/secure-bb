@@ -18,13 +18,15 @@
       "acorn": [
         "./vendor/acorn.d.mts"
       ]
-    }
+    },
+    "allowImportingTsExtensions": true
   },
   "include": [
     "server.ts",
     "app.tsx",
     "src",
     "test",
-    "vendor/*.d.mts"
+    "vendor/*.d.mts",
+    "guard"
   ]
 }

@@ -210,7 +210,7 @@ function SessionBar({ ov, session, open, lock }: { ov: Overview; session: Sessio
   const [code, setCode] = useState("");
   const act = useCodeAction(() => undefined);
   const registered = ov.totp.state === "locked" || ov.totp.state === "external";
-  if (!registered) return null;
+  if (!registered || ov.guard) return null; // with a guard there are no sessions: it checks a fresh code for every approval
   if (session) {
     const left = Math.max(0, Math.ceil((Math.min(session.idleUntil, session.hardUntil) - now) / 60_000));
     const ceiling = Math.max(0, Math.ceil((session.hardUntil - now) / 60_000));
@@ -738,6 +738,18 @@ function Registration({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<type
   const act = useCodeAction(refetch);
   const state = ov.totp.state;
 
+  if (ov.guard) {
+    return state === "external" ? (
+      <div className={card}>✓ Второй фактор у сторожа: секрет лежит в его каталоге, через bb не проходил и нигде не показывается.</div>
+    ) : (
+      <div className={`${card} border-2 border-destructive`}>
+        <h3 className="text-base font-semibold text-destructive">Второй фактор не зарегистрирован у сторожа</h3>
+        <p className="mt-1">Регистрация — только на консоли машины, где работает сторож: <span className="font-mono">sudo sbb-guard totp-register</span> (QR выводится в терминал). Через bb секрет не проходит, поэтому его не может перехватить плагин.</p>
+        {ov.guard.connected ? null : <p className="mt-1 text-destructive">Сторож сейчас не отвечает.</p>}
+      </div>
+    );
+  }
+
   if (state === "locked") return <div className={card}>✓ Второй фактор (TOTP) зарегистрирован. Секрет больше нигде не показывается.</div>;
   if (state === "external") return <div className={card}>✓ Секрет TOTP берётся из внешнего файла (BB_SECURE_BB_TOTP_FILE).</div>;
   if (state === "external-broken") return <div className={`${card} border-destructive`}>Задан BB_SECURE_BB_TOTP_FILE, но файл не читается или в нём нет секрета. Одобрения невозможны.</div>;
@@ -1063,11 +1075,17 @@ function PolicyCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof
           </select>
         </label>
       </div>
-      <label className="mt-3 flex items-start gap-2">
-        <input type="checkbox" className="mt-1" checked={autoSafe} onChange={(e) => setAutoSafe(e.target.checked)} />
-        <span>Автопропуск версий без возможностей (без касания)</span>
-      </label>
-      <p className="mt-1 rounded-md border border-destructive p-2 text-destructive">{T.autoSafeWarning}</p>
+      {ov.guard ? (
+        <p className={`mt-3 ${muted}`}>Размер, потолок и режим окна хранит сторож (расширять — с кодом, он проверит его сам). Автопропуска безопасного класса в режиме сторожа нет: каждое одобрение даёт человек.</p>
+      ) : (
+        <>
+          <label className="mt-3 flex items-start gap-2">
+            <input type="checkbox" className="mt-1" checked={autoSafe} onChange={(e) => setAutoSafe(e.target.checked)} />
+            <span>Автопропуск версий без возможностей (без касания)</span>
+          </label>
+          <p className="mt-1 rounded-md border border-destructive p-2 text-destructive">{T.autoSafeWarning}</p>
+        </>
+      )}
       <div className="mt-3 flex items-center gap-2">
         <CodeField value={code} onChange={setCode} />
         <button
@@ -1484,6 +1502,93 @@ function SkillsSection({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typ
   );
 }
 
+// ------------------------------------------------------------------- guard --
+
+/** Guard mode: is the guard there, is its journal sound, what it has recorded lately. */
+function GuardAlarm({ ov }: { ov: Overview }) {
+  const g = ov.guard;
+  if (!g) return null;
+  if (!g.connected)
+    return (
+      <div className="rounded-md border-2 border-destructive bg-destructive/10 p-2 text-destructive" role="alert" data-secure-bb-alarm>
+        <p className="font-semibold">Сторож решений не отвечает</p>
+        <p className="mt-1 text-xs">Ядро держит всё не встроенное: новые плагины не загрузятся, уже загруженные работают. Одобрить сейчас ничего нельзя. Проверьте службу сторожа (<span className="font-mono">sbb-guard status</span> на машине). {g.error}</p>
+      </div>
+    );
+  if (g.journal && !g.journal.valid)
+    return (
+      <div className="rounded-md border-2 border-destructive bg-destructive/10 p-2 text-destructive" role="alert" data-secure-bb-alarm>
+        <p className="font-semibold">ТРЕВОГА: цепочка журнала сторожа нарушена</p>
+        <ul className="mt-1 list-disc pl-5 text-xs">{g.journal.problems.slice(0, 5).map((p, i) => <li key={i}>{p.detail}</li>)}</ul>
+        <p className="mt-1 text-xs">Файлы сторожа изменены не им. Всё, что он «одобрил» до этого места, нельзя считать надёжным.</p>
+      </div>
+    );
+  return null;
+}
+
+function GuardCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void }) {
+  const g = ov.guard;
+  const act = useCodeAction(refetch);
+  if (!g) return null;
+  return (
+    <div className="space-y-3">
+      <div className={card}>
+        <p>
+          Одобрения, окна доверия и секрет второго фактора — у <b>сторожа</b> (отдельный процесс и пользователь ОС). Здесь только интерфейс, проверки и «стоп по новой возможности»: этот плагин может лишь <b>добавить</b> удержание, разрешает только сторож.
+        </p>
+        <p className={`mt-1 ${muted}`}>
+          {g.connected ? "Сторож отвечает." : "Сторож не отвечает."}
+          {g.journal ? ` Журнал сторожа: ${g.journal.valid ? "цепочка цела" : "НАРУШЕН"}, записей ${g.journal.entries}, голова ${g.journal.head ?? "—"}.` : ""}
+          {" "}Код, введённый здесь, проходит через процесс bb, поэтому вредный плагин мог бы его перехватить; после действия в журнале видно, что именно одобрено.
+        </p>
+        <div className="mt-2">
+          <button className={btn} disabled={act.busy} onClick={() => void act.run(async () => { await rpc.call("guard.verify"); })}>Проверить журнал сторожа</button>
+        </div>
+        <Msg error={act.error} />
+      </div>
+      <details className={card}>
+        <summary className="cursor-pointer font-medium">Последние записи журнала сторожа ({g.recent.length})</summary>
+        <ul className="mt-2 space-y-1 font-mono text-xs">
+          {g.recent.map((r) => (
+            <li key={r.id} className="break-all">
+              #{r.id} {when(r.ts)} {r.kind}{r.pluginId ? ` ${r.pluginId}` : ""}{r.detail ? ` ${JSON.stringify(r.detail).slice(0, 200)}` : ""}
+            </li>
+          ))}
+        </ul>
+      </details>
+    </div>
+  );
+}
+
+/** Migration: the approvals this plugin holds, to a file that `sbb-guard import` reads on the console. Works with or without a guard. */
+function MigrationCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void }) {
+  const [code, setCode] = useState("");
+  const [out, setOut] = useState<{ path: string; digest: string; count: number } | null>(null);
+  const act = useCodeAction(refetch);
+  const registered = ov.totp.state === "locked" || ov.totp.state === "external";
+  return (
+    <div className={card}>
+      <p>Перенос одобрений этого плагина в сторож: выгрузка в файл (с кодом), затем на консоли <span className="font-mono">sudo sbb-guard import &lt;файл&gt;</span> — он покажет каждую строку и спросит подтверждение. Файл делает код внутри bb, поэтому сторож не верит ему без вашего подтверждения; сверьте контрольную сумму.</p>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <CodeField value={code} onChange={setCode} />
+        <button className={btn} disabled={act.busy || code.length !== 6 || !registered} onClick={() => void act.run(async () => { setOut(await rpc.call("approvals.export", { code })); setCode(""); })}>
+          Выгрузить одобрения
+        </button>
+      </div>
+      {out ? (
+        <div className="mt-2 text-xs">
+          <p>Выгружено одобрений: {out.count}.</p>
+          <p className="break-all font-mono">{out.path}</p>
+          <p className="break-all font-mono">sha256 {out.digest}</p>
+          <p className="break-all font-mono">sudo sbb-guard import {out.path} --digest {out.digest}</p>
+        </div>
+      ) : null}
+      {!registered ? <p className={`mt-1 ${muted}`}>Нужен зарегистрированный второй фактор.</p> : null}
+      <Msg error={act.error} />
+    </div>
+  );
+}
+
 // -------------------------------------------------------------------- page --
 
 /** Tells the server this page is open, so a registration started now counts as attended. */
@@ -1516,9 +1621,11 @@ function GatePage() {
         ) : null}
         <JournalAlarm ov={ov} rpc={rpc} refetch={refetch} />
         <AliveAlarm ov={ov} />
+        <GuardAlarm ov={ov} />
         <WindowRows windows={ov.windows} cfgWindows={ov.watch.windows} rpc={rpc} refetch={refetch} />
         <Section title="Защита этого bb"><StageCard ov={ov} /></Section>
         <Section title="Второй фактор"><Registration ov={ov} rpc={rpc} refetch={refetch} /></Section>
+        {ov.guard ? <Section title={`Сторож решений${ov.guard.connected ? "" : " (не отвечает!)"}`}><GuardCard ov={ov} rpc={rpc} refetch={refetch} /></Section> : null}
         <Section title={`Гейт плагинов — очередь (${held.length})`}>
           {held.length === 0 ? <div className={`${card} ${muted}`}>Ничего не держится.</div> : held.map((q) => <QueueCard key={q.id} q={q} ov={ov} rpc={rpc} refetch={refetch} />)}
           {settled.length > 0 ? (
@@ -1540,6 +1647,7 @@ function GatePage() {
         <Section title={`Скиллы${ov.skills.open.length > 0 ? ` — очередь (${ov.skills.open.length})` : ""}`}><SkillsSection ov={ov} rpc={rpc} refetch={refetch} /></Section>
         <Section title={`Загрязнение тредов${ov.tainted.length > 0 ? ` (${ov.tainted.length})` : ""}`}><TaintCard ov={ov} /></Section>
         <Section title={`Доверенные репозитории (${ov.trustedRepos.length})`}><TrustedRepos ov={ov} rpc={rpc} refetch={refetch} /></Section>
+        <Section title="Перенос одобрений в сторож"><MigrationCard ov={ov} rpc={rpc} refetch={refetch} /></Section>
         <Section title={`Журнал${ov.journal.ok ? "" : " (!)"}`}><LogCard ov={ov} rpc={rpc} refetch={refetch} /></Section>
       </div>
     </div>

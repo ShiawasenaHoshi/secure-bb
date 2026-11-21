@@ -1,6 +1,7 @@
 // RPC contract shared by server.ts and app.tsx (the app imports only its type).
 import { defineRpcContract } from "@get-bb/plugin-sdk";
 import type { BatchPrepared, BatchResult } from "./batch.js";
+import type { GuardJournalReport } from "./guardlink.js";
 import type { JournalReport } from "./journal.js";
 import type { Overview } from "./overview.js";
 import * as s from "./schema.js";
@@ -14,6 +15,8 @@ const batchKind = s.oneOf(["queue", "skill", "drift"] as const);
 export const rpcContract = defineRpcContract({
   overview: { input: s.nullValue(), output: s.json<Overview>() },
   "journal.verify": { input: s.nullValue(), output: s.json<JournalReport>() },
+  "guard.verify": { input: s.nullValue(), output: s.json<GuardJournalReport | { error: string }>() },
+  "approvals.export": { input: s.object({ code }), output: s.json<{ path: string; digest: string; count: number }>() },
   "trusted.set": { input: s.object({ add: s.optional(s.string({ min: 1, max: 140 })), remove: s.optional(s.string({ min: 1, max: 140 })), code }), output: s.json<{ ok: true; repos: string[] }>() },
   "session.open": { input: s.object({ code }), output: s.json<{ token: string; idleMs: number; capMs: number }>() },
   "session.close": { input: s.nullValue(), output: s.json<{ ok: true }>() },

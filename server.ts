@@ -14,6 +14,11 @@ import {
   type BbPluginApi,
 } from "@get-bb/plugin-sdk";
 import { Alive } from "./src/alive.js";
+import { GuardLink, GuardLinkError, guardSocketFromEnv, type GuardPolicy, type GuardQueueEntry } from "./src/guardlink.js";
+import { buildExport, writeExport } from "./src/export.js";
+import { localCheckKey } from "./src/decision.js";
+import { mintListProof } from "./src/approval.js";
+import { realpath } from "node:fs/promises";
 import { BatchService, type BatchSource } from "./src/batch.js";
 import type { Proof } from "./src/approval.js";
 import { AfterFactScanner } from "./src/afterfact.js";
@@ -23,7 +28,7 @@ import { SkillReader } from "./src/skills/reader.js";
 import { SkillStore } from "./src/skills/store.js";
 import { rpcContract } from "./src/contract.js";
 import { createHash } from "node:crypto";
-import { BLOCKED_REASON, bySeverity } from "./src/decision.js";
+import { BLOCKED_REASON, bySeverity, capabilityTokens } from "./src/decision.js";
 import { Gate, GateError, UNSAFE_DIR_REASON, type HookCtx, type ThreadTree } from "./src/gate.js";
 import { buildOverview } from "./src/overview.js";
 import { collectProbe, isThirdParty, runningThirdParty, type InstalledPluginLite } from "./src/probe.js";
@@ -66,6 +71,10 @@ const WATCH_DEBOUNCE_MS = 1_500;
 function refusal(err: unknown): never {
   if (err instanceof GateError) {
     const code = err.code === "invalid_code" || err.code === "blocked" ? "forbidden" : err.code === "not_registered" ? "conflict" : err.code;
+    throw new experimental_PluginRpcRefusal({ code, message: err.message });
+  }
+  if (err instanceof GuardLinkError) {
+    const code = err.code === "invalid_code" || err.code === "blocked" ? "forbidden" : err.code === "not_found" || err.code === "invalid" ? err.code : "conflict";
     throw new experimental_PluginRpcRefusal({ code, message: err.message });
   }
   if (err instanceof ScanError) throw new experimental_PluginRpcRefusal({ code: err.code === "invalid" ? "invalid" : "conflict", message: err.message });
@@ -171,7 +180,13 @@ export default async function plugin(bb: BbPluginApi) {
     onDone: () => changed(),
   });
 
+  // Guard mode: only when the server's environment names the guard's socket. Without it, everything below behaves as it always did.
+  const guardSocket = guardSocketFromEnv(process.env);
+  const guardLink = guardSocket ? new GuardLink(guardSocket) : null;
+  if (guardLink) bb.log.info("guard mode: approvals, trust windows and the second factor are held by the decision guard; this plugin only adds restrictions");
+
   const gate = new Gate({
+    guard: guardLink ?? undefined,
     store,
     scanFlag: (k) => flagReason(store.latestScanFor(k)),
     onFreeze: (pluginId, pin) => {
@@ -322,7 +337,7 @@ export default async function plugin(bb: BbPluginApi) {
   const alive = new Alive({ store, now, safeMode: () => watchSource.safeMode().catch(() => null), log: (m) => bb.log.error(m) });
   if ((await alive.start()) !== null) changed();
   const overview = () =>
-    buildOverview({ alive, sentinel, scanner: aiScanner, publisher, store, gate, now, hookRegistered, listPlugins, probe, descendants: threads.descendants, watch, skills: skillGuard, journal: () => journal(), taintedThreads: () => store.taintedThreads(20) });
+    buildOverview({ guard: guardLink ?? undefined, alive, sentinel, scanner: aiScanner, publisher, store, gate, now, hookRegistered, listPlugins, probe, descendants: threads.descendants, watch, skills: skillGuard, journal: () => journal(), taintedThreads: () => store.taintedThreads(20) });
 
   // ---- after-the-fact mode ------------------------------------------------
   const scanner = new AfterFactScanner({
@@ -363,6 +378,8 @@ export default async function plugin(bb: BbPluginApi) {
   const batchSources: Record<"queue" | "skill" | "drift", BatchSource> = {
     queue: {
       describe(id) {
+        // Guard mode: one code approves one version at the guard (a code is never accepted twice), so versions are not batched.
+        if (guardLink) return { skip: "в режиме сторожа версии плагинов одобряются по одной: у сторожа один код — одно одобрение" };
         const q = store.getQueue(id);
         if (!q || q.status !== "held") return null;
         if (q.reason?.startsWith(UNSAFE_DIR_REASON)) return { skip: "каталог доступен на запись другим: одобрить нельзя, пока его не исправят" };
@@ -417,13 +434,111 @@ export default async function plugin(bb: BbPluginApi) {
     }
   };
 
-  bb.rpc.register(rpcContract, {
+  // ---- guard mode helpers ------------------------------------------------------------------------------------------
+  /** A code the guard has already checked (once, for the call that carries it): the mark `Gate.touch` takes without looking at a secret. */
+  const VERIFIED = mintListProof() as unknown as string;
+  const needGuard = (): GuardLink => {
+    if (!guardLink) throw new GateError("invalid", "not in guard mode");
+    return guardLink;
+  };
+  /** The held entry of the guard's queue with this id (the page's ids are the guard's in guard mode). */
+  const guardEntry = async (id: number): Promise<GuardQueueEntry> => {
+    const st = await needGuard().state();
+    const q = st.queue.find((x) => x.id === id);
+    if (!q) throw new GateError("not_found", `no review #${id}`);
+    if (q.status !== "held") throw new GateError("conflict", `review #${id} is already ${q.status}`);
+    return q;
+  };
+  const proposalOfEntry = async (q: { rootDir: string; pluginId: string }) => {
+    for (const dir of [q.rootDir, await realpath(q.rootDir).catch(() => null)]) {
+      const p = dir ? store.proposalByDir(dir) : null;
+      if (p && p.pluginId === q.pluginId) return p;
+    }
+    return null;
+  };
+  /** What the checks and the hook said about an entry (kept here, not at the guard: the guard cannot vouch for it). */
+  const entryFacts = async (q: GuardQueueEntry) => {
+    const proposal = await proposalOfEntry(q);
+    const result = store.getCheck(q.contentHash)?.result ?? (proposal ? store.getCheck(localCheckKey(proposal.localHash))?.result : null) ?? null;
+    const note = q.annotation?.findings as { reason?: unknown } | null | undefined;
+    const reason = typeof note?.reason === "string" ? note.reason : null;
+    return {
+      proposal,
+      result,
+      unsafeDir: reason?.startsWith(UNSAFE_DIR_REASON) ?? false,
+      blocked: (reason?.startsWith(BLOCKED_REASON) ?? false) || (result !== null && bySeverity(result, "block").length > 0),
+    };
+  };
+  const approveAtGuard = async (id: number, code: string | undefined, acknowledgeBlock: boolean | undefined): Promise<{ ok: true; note: string }> => {
+    const link = needGuard();
+    if (code === undefined) throw new GateError("invalid_code", "a code is needed: the guard checks it");
+    const q = await guardEntry(id);
+    const f = await entryFacts(q);
+    if (f.unsafeDir) throw new GateError("invalid", "this version lies in a directory that others can write to; it cannot be approved from there (see the page)", { unsafeDir: true });
+    if (f.blocked && !acknowledgeBlock) throw new GateError("invalid", "this version was blocked by the checks; confirm that you accept the risk to approve it anyway", { blocked: true });
+    await link.approve(id, code);
+    if (f.blocked) store.log("block.lifted", q.pluginId, q.contentHash, { review: id, version: q.version, rules: f.result ? bySeverity(f.result, "block").map((x) => x.rule) : [] });
+    // A capability accepted with a code inside an open window becomes part of the window's set; the window stays open.
+    const w = store.unclosedWindows().find((x) => x.pluginId === q.pluginId && x.guardWindowId !== null);
+    if (w && f.result) store.setWindowCaps(w.id, [...new Set([...w.caps, ...capabilityTokens(f.result)])].sort());
+    store.log("approved.guard", q.pluginId, q.contentHash, { review: id, version: q.version });
+    if (f.proposal) publisher.onApproved(f.proposal.id);
+    recheck();
+    changed();
+    return { ok: true as const, note: "approved at the guard" };
+  };
+
+  /**
+   * In guard mode a code that arrives with any RPC is checked by the guard first (it consumes the code there: the secret is not here),
+   * and the handler then runs with the mark that says so. RPCs that need more than that (they act at the guard) do it themselves.
+   */
+  const OWN_GUARD_PATH = new Set(["queue.approve", "queue.dismiss", "window.open", "policy.set", "session.open", "totp.begin", "totp.confirm"]);
+  const withGuardTouch = <T extends object>(handlers: T): T => {
+    if (!guardLink) return handlers;
+    const out: Record<string, unknown> = {};
+    for (const [name, fn] of Object.entries(handlers) as Array<[string, (input: any) => unknown]>) {
+      out[name] = OWN_GUARD_PATH.has(name)
+        ? fn
+        : async (input: any) => {
+            if (input && typeof input === "object" && typeof input.code === "string") {
+              try {
+                await guardLink.touch(name, input.code);
+              } catch (err) {
+                return refusal(err);
+              }
+              return fn({ ...input, code: VERIFIED });
+            }
+            return fn(input);
+          };
+    }
+    return out as T;
+  };
+
+  bb.rpc.register(rpcContract, withGuardTouch({
     overview: () => overview(),
     "journal.verify": () => {
       const r = journal(true);
       changed();
       return r;
     },
+    "guard.verify": async () => {
+      if (!guardLink) return { error: "not in guard mode" };
+      try {
+        const r = await guardLink.verifyJournal();
+        changed();
+        return r;
+      } catch (err) {
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+    "approvals.export": wrap(({ code }) => {
+      // The code was checked by the guard (guard mode) or is checked here (without a guard): either way `touch` takes it.
+      gate.touch("approvals.export", code);
+      const result = buildExport(store.listApprovals(5000), now());
+      const path = writeExport(dataDir, result, now());
+      store.log("approvals.export", null, null, { count: result.count, digest: result.digest });
+      return { path, digest: result.digest, count: result.count };
+    }),
     "trusted.set": wrap(({ code, ...change }) => {
       const repos = gate.setTrustedRepo(change, code);
       changed();
@@ -434,6 +549,7 @@ export default async function plugin(bb: BbPluginApi) {
       return { ok: true as const };
     },
     "totp.begin": wrap(async () => {
+      if (guardLink) throw new GateError("conflict", "в режиме сторожа второй фактор регистрируется только на консоли: `sudo sbb-guard totp-register`; через bb секрет не проходит");
       // "Attended" = the secure-bb page pinged us moments ago. A registration
       // started without it must be restarted from the page before it can be confirmed.
       const attended = now() - lastPagePing < PAGE_PING_TTL_MS;
@@ -442,22 +558,38 @@ export default async function plugin(bb: BbPluginApi) {
       return { secret, uri, matrix: encodeQr(uri) };
     }),
     "totp.confirm": wrap(({ code }) => {
+      if (guardLink) throw new GateError("conflict", "в режиме сторожа второй фактор регистрируется только на консоли: `sudo sbb-guard totp-register`");
       gate.confirmRegistration(code);
       changed();
       return { ok: true as const };
     }),
     "queue.approve": wrap(async ({ id, code, session, acknowledgeBlock }) => {
+      if (guardLink) return approveAtGuard(id, code, acknowledgeBlock);
       // Lifting a block is the dangerous kind of this RPC: a fresh code, never a session.
       const proof = gate.proofFor("queue.approve", { code, session }, { escalate: acknowledgeBlock === true });
       const note = await approveQueueFull(id, proof, { acknowledgeBlock });
       return { ok: true as const, note };
     }),
-    "queue.dismiss": wrap(({ id, code, session }) => {
+    "queue.dismiss": wrap(async ({ id, code, session }) => {
+      if (guardLink) {
+        if (code === undefined) throw new GateError("invalid_code", "a code is needed: the guard checks it");
+        await guardEntry(id);
+        await guardLink.dismiss(id, code);
+        changed();
+        return { ok: true as const };
+      }
       gate.dismissQueue(id, gate.proofFor("queue.dismiss", { code, session }));
       changed();
       return { ok: true as const };
     }),
-    "window.open": wrap(({ queueId, code, session, scope }) => {
+    "window.open": wrap(async ({ queueId, code, session, scope }) => {
+      if (guardLink) {
+        if (code === undefined) throw new GateError("invalid_code", "a code is needed: the guard checks it");
+        await gate.openGuardWindow(await guardEntry(queueId), code, scope);
+        recheck();
+        changed();
+        return { ok: true as const };
+      }
       // A window wider than the policy ("whole tree" when the policy says "this thread only") widens the policy: a fresh code.
       const proof = gate.proofFor("window.open", { code, session }, { escalate: scope === "tree" && store.policy().scope === "thread" });
       gate.openWindow(queueId, proof, scope);
@@ -465,13 +597,25 @@ export default async function plugin(bb: BbPluginApi) {
       changed();
       return { ok: true as const };
     }),
-    "window.close": wrap(({ windowId }) => {
+    "window.close": wrap(async ({ windowId }) => {
+      if (guardLink) {
+        await gate.closeGuardWindow(windowId);
+        changed();
+        return { ok: true as const };
+      }
       gate.closeWindow(windowId);
       changed();
       return { ok: true as const };
     }),
     "approval.revoke": wrap(async ({ approvalId }) => {
-      const a = gate.revoke(approvalId);
+      let a: { pluginId: string };
+      if (guardLink) {
+        const found = (await guardLink.state()).approvals.find((x) => x.id === approvalId);
+        if (!found) throw new GateError("not_found", "no such active approval");
+        await guardLink.revoke({ approvalId });
+        store.log("revoked", found.pluginId, found.contentHash, { version: found.version, at: "guard" });
+        a = found;
+      } else a = gate.revoke(approvalId);
       try {
         await bb.sdk.plugins.disable({ pluginId: a.pluginId });
       } catch (err) {
@@ -539,6 +683,7 @@ export default async function plugin(bb: BbPluginApi) {
       return { ok: true as const, sources };
     }),
     "session.open": wrap(async ({ code }) => {
+      if (guardLink) throw new GateError("conflict", "в режиме сторожа сессий нет: сторож проверяет свежий код для каждого одобрения");
       const opened = await gate.openSession(code);
       changed();
       return opened;
@@ -563,7 +708,12 @@ export default async function plugin(bb: BbPluginApi) {
     "ai.scan": wrap(async ({ pluginId, queueId }) => {
       if ((pluginId === undefined) === (queueId === undefined)) throw new ScanError("invalid", "укажите плагин или запись очереди");
       let target: ScanTarget;
-      if (queueId !== undefined) {
+      if (queueId !== undefined && guardLink) {
+        const g = await guardEntry(queueId).catch(() => null);
+        if (!g) throw new ScanError("invalid", `нет записи #${queueId}`);
+        const proposal = await proposalOfEntry(g);
+        target = { pluginId: g.pluginId, version: g.version, dir: proposal?.snapshotDir ?? g.rootDir, contentHash: g.contentHash, trigger: "manual" };
+      } else if (queueId !== undefined) {
         const q = store.getQueue(queueId);
         if (!q) throw new ScanError("invalid", `нет записи #${queueId}`);
         const proposal = q.proposalId === null ? null : store.getProposal(q.proposalId);
@@ -594,12 +744,40 @@ export default async function plugin(bb: BbPluginApi) {
       changed();
       return { ok: true as const };
     }),
-    "policy.set": wrap(({ code, ...patch }) => {
-      gate.setPolicy(patch, code);
+    "policy.set": wrap(async ({ code, ...patch }) => {
+      if (!guardLink) {
+        gate.setPolicy(patch, code);
+        changed();
+        return { ok: true as const };
+      }
+      // Guard mode: window size, ceiling and mode are the guard's (widening needs a code there); thread scope and the
+      // configuration windows are this plugin's; "safe class passes without a touch" does not exist.
+      if (patch.autoSafe === true) throw new GateError("invalid", "в режиме сторожа автопропуск безопасного класса не существует: каждое одобрение даёт человек");
+      const cur = await guardLink.policy();
+      const wanted: Partial<GuardPolicy> = {};
+      if (patch.windowMin !== undefined && patch.windowMin !== cur.windowMin) wanted.windowMin = patch.windowMin;
+      if (patch.capMin !== undefined && patch.capMin !== cur.capMin) wanted.capMin = patch.capMin;
+      if (patch.mode !== undefined && patch.mode !== cur.mode) wanted.mode = patch.mode;
+      let verified = false;
+      if (Object.keys(wanted).length > 0) {
+        await guardLink.policy(wanted, code);
+        verified = code !== undefined; // a widening spent the code at the guard; a narrowing did not need one
+      }
+      const { windowMin: _w, capMin: _c, mode: _m, autoSafe: _a, ...local } = patch;
+      let proof: string | undefined = code === undefined ? undefined : VERIFIED;
+      if (code !== undefined && !verified) {
+        // Only the local part may widen (thread scope, configuration windows): then the guard checks the code.
+        const probe = { ...store.policy(), ...local };
+        const cp = store.policy();
+        const widens = probe.scope === "tree" && cp.scope === "thread" || probe.cfgWindowMin > cp.cfgWindowMin || probe.cfgCapMin > cp.cfgCapMin || (probe.cfgMode === "sliding" && cp.cfgMode === "fixed");
+        if (widens) await guardLink.touch("policy.set", code);
+        else proof = undefined;
+      }
+      gate.setPolicy(local, proof);
       changed();
       return { ok: true as const };
     }),
-  });
+  }));
 
   // ---- CLI for agents ------------------------------------------------------
   bb.cli.register(
@@ -778,6 +956,7 @@ export default async function plugin(bb: BbPluginApi) {
                 },
                 afterInstall: (dir) => gate.recordBuilt(dir),
                 changed,
+                guarded: guardLink !== null,
               },
               { path: input.positionals.path, cwd: ctx.cwd, threadId: ctx.threadId ?? null },
             );
@@ -886,6 +1065,14 @@ export default async function plugin(bb: BbPluginApi) {
         if (now() - lastSlow < SWEEP_MS) continue;
         lastSlow = now();
         await task("heartbeat", () => alive.beat());
+        await task("guard windows", async () => {
+          if (!guardLink) return;
+          try {
+            gate.syncGuardWindows(await guardLink.state());
+          } catch {
+            /* the guard is not answering: the core holds everything unbuilt-in meanwhile, and the page says so */
+          }
+        });
         await task("window sweep", () => {
           if (gate.sweep() > 0) changed();
           if (gate.sweepSessions() > 0) changed();
