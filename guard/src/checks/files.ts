@@ -317,7 +317,7 @@ export async function scanTree(root: string, opts: ScanOptions = {}): Promise<Tr
       } else if (AGENT_DIRS.has(name)) {
         // Inside a dependency it is a file of that package's repository, not a configuration anyone loads for this plugin.
         if (dep) findings.push({ rule: "agent-config", severity: "info", file: rel, line: 0, excerpt: `${name}/ inside a dependency (not a configuration of this plugin)` });
-        else findings.push({ rule: "agent-config", severity: "block", file: rel, line: 0, excerpt: `${name}/ (agent / IDE configuration inside a plugin)` });
+        else findings.push({ rule: "agent-config", severity: "review", file: rel, line: 0, excerpt: `${name}/ (agent / IDE configuration inside a plugin)` });
       }
       return;
     }
@@ -334,7 +334,7 @@ export async function scanTree(root: string, opts: ScanOptions = {}): Promise<Tr
       if (!isCodeFile(rel) && name !== "package.json") return;
     }
     if (!verified) {
-      if (AGENT_FILES.has(name)) findings.push({ rule: "agent-config", severity: dep ? "info" : "block", file: rel, line: 0, excerpt: dep ? `${name} inside a dependency (not a configuration of this plugin)` : name });
+      if (AGENT_FILES.has(name)) findings.push({ rule: "agent-config", severity: dep ? "info" : "review", file: rel, line: 0, excerpt: dep ? `${name} inside a dependency (not a configuration of this plugin)` : name });
       if (name === ".npmrc") findings.push({ rule: "npmrc", severity: "block", file: rel, line: 0, excerpt: ".npmrc inside a plugin" });
       if (name === "binding.gyp") findings.push({ rule: "native-module", severity: "block", file: rel, line: 0, excerpt: "binding.gyp (native build)" });
     }

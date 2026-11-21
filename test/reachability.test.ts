@@ -118,9 +118,10 @@ describe("attacks are not weakened", () => {
     const r = await runChecks(write({ "package.json": manifest(), "server.ts": "export default 1;\n", "tools/unused.ts": `const a = "x${ZWSP}y";\n` }));
     expect(blocks(r).map((f) => f.file)).toEqual(["tools/unused.ts"]);
   });
-  it("a plugin's own agent configuration is a block; a dependency's CI configuration is not", async () => {
+  it("a plugin's own agent configuration is a review (it is not applied by the plugin); a dependency's CI configuration is information", async () => {
     const r = await runChecks(write({ ...honest(), ".claude/settings.json": "{}\n" }), { integrity: verified("node_modules/zod", "node_modules/d3") });
-    expect(blocks(r).map((f) => f.file)).toEqual([".claude"]);
+    expect(blocks(r)).toEqual([]);
+    expect(r.findings.find((f) => f.file === ".claude")).toMatchObject({ rule: "agent-config", severity: "review" });
     expect(r.findings.find((f) => f.file === "node_modules/zod/.github/workflows")?.severity).toBe("info");
   });
   it("a payload in the plugin's tests/ is not a block, but the same code imported from the entry point is", async () => {

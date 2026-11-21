@@ -2203,7 +2203,7 @@ export class Guard {
       closedWindows: rows(`SELECT * FROM windows WHERE closed_at IS NOT NULL ORDER BY id DESC LIMIT 10`, windowOf),
       journal: {
         head: head ? { id: head.id, hash: head.hash } : null,
-        recent: (this.db.prepare(`SELECT id, ts, kind, plugin_id, content_hash, detail FROM journal ORDER BY id DESC LIMIT 30`).all() as Raw[]).map((r) => ({
+        recent: (this.db.prepare(`SELECT id, ts, kind, plugin_id, content_hash, detail FROM journal ORDER BY id DESC LIMIT 200`).all() as Raw[]).map((r) => ({
           id: Number(r.id),
           ts: Number(r.ts),
           kind: String(r.kind),

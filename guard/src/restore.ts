@@ -11,9 +11,10 @@
 // (plus `restore-json-key`, below, for one section of .claude.json) and only on a path that the guard's watch looks at (agents-scan.ts: the same lists), inside the agents' home. It reads nothing and returns
 // nothing but `ok` or an error: no content, no listing, no hash of what was there. Zero dependencies (node:*); the code is root-owned, in the same archive.
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, renameSync, statSync, unlinkSync, writeSync, chownSync } from "node:fs";
+import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs";
 import net from "node:net";
 import { basename, dirname, isAbsolute, join, normalize, sep } from "node:path";
+import { chownGroup, SocketGroupError, type ChownFn } from "./chown.ts";
 import { KEEP_BYTES, MAX_DEPTH, MAX_READ_BYTES, globalKind, workspaceKind } from "./agents-scan.ts";
 
 export const VERSION = "0.1.0";
@@ -368,6 +369,8 @@ export interface ServeOptions {
   socketGid: number | null;
   home: string;
   timeoutMs?: number;
+  /** Tests: stands in for chown. */
+  chown?: ChownFn;
   /** Where the service says what it did (never content). */
   log?: (line: string) => void;
 }
@@ -423,7 +426,7 @@ export async function listen(o: ServeOptions): Promise<net.Server> {
   } else {
     mkdirSync(dir, { recursive: true, mode: 0o750 });
     chmodSync(dir, 0o750);
-    if (o.socketGid !== null) chownSync(dir, -1, o.socketGid);
+    if (o.socketGid !== null) chownGroup({ program: "sbb-restore" }, dir, o.socketGid, o.chown);
   }
   if (await isLive(o.socket)) throw new Error(`another sbb-restore is already listening on ${o.socket}`);
   try {
@@ -456,8 +459,13 @@ export async function listen(o: ServeOptions): Promise<net.Server> {
     server.once("error", reject);
     server.listen(o.socket, resolve);
   });
-  if (o.socketGid !== null) chownSync(o.socket, -1, o.socketGid);
-  chmodSync(o.socket, 0o660);
+  try {
+    if (o.socketGid !== null) chownGroup({ program: "sbb-restore" }, o.socket, o.socketGid, o.chown);
+    chmodSync(o.socket, 0o660);
+  } catch (err) {
+    server.close(); // not listening in a state nobody asked for (the group is wrong)
+    throw err;
+  }
   return server;
 }
 
@@ -503,7 +511,17 @@ export async function main(argv: string[]): Promise<number> {
     process.stderr.write("sbb-restore: --agents-home and --socket are absolute paths, --socket-gid a group id\n");
     return 64;
   }
-  const server = await listen({ socket, socketGid, home, log: (l) => process.stderr.write(`sbb-restore: ${l}\n`) });
+  let server: net.Server;
+  try {
+    server = await listen({ socket, socketGid, home, log: (l) => process.stderr.write(`sbb-restore: ${l}\n`) });
+  } catch (err) {
+    // The administrator's to fix (the user is not in the socket's group): a sentence, not a stack.
+    if (err instanceof SocketGroupError) {
+      process.stderr.write(`${err.message}\n`);
+      return 78;
+    }
+    throw err;
+  }
   process.stderr.write(`sbb-restore ${VERSION}: listening on ${socket}, writing under ${home}\n`);
   for (const sig of ["SIGINT", "SIGTERM"] as const) process.once(sig, () => (server.close(), process.exit(0)));
   return await new Promise<number>(() => undefined);

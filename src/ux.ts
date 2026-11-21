@@ -69,7 +69,25 @@ export interface CapLike {
   paths?: string[];
 }
 /** The capabilities of a check result, with the file paths of the result put on the `fs` one (so that a card can name them). */
-export const capsWithPaths = (r: { capabilities: CapLike[]; fsPaths?: string[] } | undefined): CapLike[] => (r?.capabilities ?? []).map((c) => (c.kind === "fs" && r?.fsPaths && r.fsPaths.length > 0 ? { ...c, paths: r.fsPaths } : c));
+export const capsWithPaths = (r: { capabilities: CapLike[]; fsPaths?: string[] } | undefined): CapLike[] => meaningfulCaps(r?.capabilities ?? []).map((c) => (c.kind === "fs" && r?.fsPaths && r.fsPaths.length > 0 ? { ...c, paths: r.fsPaths } : c));
+
+/**
+ * What of a plugin's rights is worth a person's attention. «dynamic_code» is raised by many harmless things (bundles, `Function("return this")`, property
+ * access by a computed name); the person is shown it only for `eval`, `new Function`, `vm` with an argument that is not a plain string literal. The rest of the
+ * checks (the findings, the technical part of the card) are not touched: this chooses only what is told in the main text.
+ */
+export function meaningfulCaps(caps: CapLike[]): CapLike[] {
+  const out: CapLike[] = [];
+  for (const c of caps) {
+    if (c.kind !== "dynamic_code") {
+      out.push(c);
+      continue;
+    }
+    const real = c.detail.filter((d) => /^(eval|Function|new Function|vm(\.|$)|node:vm)/.test(d) && !/\(literal\)$/.test(d));
+    if (real.length > 0) out.push({ ...c, detail: real });
+  }
+  return out;
+}
 /** A piece of a phrase; `red` marks the word that must catch the eye («все»). */
 export interface Segment {
   text: string;
@@ -149,7 +167,7 @@ export function capabilityPhrase(c: CapLike): string {
     case "server_access":
       return "получать расширенный доступ к серверу bb";
     case "database":
-      return "работать с базами данных";
+      return "хранить свои настройки и данные в bb";
     default:
       return "использовать возможность «" + c.kind + "»";
   }
@@ -202,7 +220,7 @@ const RED: Record<string, { title: string; line: string }> = {
   minified: { title: "код плагина нарочно нечитаем", line: "Он сжат так, что человек не может его проверить." },
   binary: { title: "в плагине лежит готовая программа", line: "Это не текст, прочитать и проверить её нельзя." },
   "native-module": { title: "плагин содержит собираемую программу", line: "Её нельзя проверить так же, как обычный код." },
-  "agent-config": { title: "плагин приносит настройки для агентов", line: "Так можно изменить, что агенты вам разрешают и чего не спрашивают." },
+  "agent-config": { title: "в папке плагина лежат свои настройки для агентов", line: "Это файлы вроде .claude или CLAUDE.md внутри самого плагина. Плагин сам их не применяет; посмотрите, что в них написано, прежде чем включать." },
   npmrc: { title: "плагин приносит файл с настройками загрузки пакетов", line: "Через него можно подменить место, откуда берутся пакеты." },
   "writable-by-others": { title: "файлы плагина может менять кто угодно", line: "После проверки их можно подменить, поэтому проверка ничего не значит." },
   "escaping-symlink": { title: "плагин ссылается на файлы вне своей папки", line: "Он может прочитать или подменить то, что ему не принадлежит." },
@@ -419,6 +437,7 @@ export function classifyAway(e: AwayEvent, guardMode: boolean): AwayClass | null
     case "approved.window":
       return "window";
     case "approved.touch":
+    case "approved.trust":
     case "approved.guard":
       return "approved";
     case "hold": {
@@ -1133,3 +1152,105 @@ export function uniqueSentences(notes: Array<string | null | undefined>): string
   }
   return out;
 }
+
+// ---- round 4: what a card says first, and a page that holds still ------------------------------------------------------------
+export type RiskLevel = "safe" | "caution" | "danger";
+export interface Risk {
+  level: RiskLevel;
+  /** One plain line: the essence of what the plugin can do. */
+  text: string;
+}
+const SAFE_KINDS = new Set(["ui", "database"]);
+/**
+ * The first line of a card: what the worst thing the plugin can do means for a person. `caps` are the rights worth showing (`meaningfulCaps`);
+ * `reviewRules` the rules of the checks that asked for a look (only `agent-config`, a folder of settings the plugin does not apply itself, does not spoil «безопасно»).
+ */
+export function riskHeadline(caps: CapLike[], reviewRules: string[] = []): Risk {
+  const has = (k: string): CapLike | undefined => caps.find((c) => c.kind === k);
+  const env = has("env");
+  if (env) {
+    const names = [...new Set(env.detail.map((d) => d.replace(/^env:/, "")))].filter((n) => n !== "");
+    if (names.length === 0 || names.includes("*") || names.some((n) => SECRETISH.test(n))) return { level: "danger", text: "Может читать ваши пароли и токены" };
+  }
+  const fs = has("fs");
+  if (fs && !(fs.paths && fs.paths.length > 0)) return { level: "danger", text: "Может читать и менять ваши документы" };
+  if (has("server_access") || has("builtin_rpc")) return { level: "danger", text: "Может управлять самим bb: аккаунтом, подключениями, инструкциями" };
+  if (fs) return { level: "caution", text: `Может читать и менять файлы: ${fs.paths!.slice(0, 2).join(", ")}${fs.paths!.length > 2 ? ", …" : ""}` };
+  if (has("child_process")) return { level: "caution", text: "Может запускать программы на вашем компьютере" };
+  if (has("contribute_env") || has("host_artifact")) return { level: "caution", text: "Может менять окружение запускаемых программ и класть свои файлы на компьютер" };
+  const net = has("network");
+  if (net) {
+    const hosts = hostsOf(caps);
+    return { level: "caution", text: hosts.length === 0 ? "Может выходить в интернет на любые адреса" : `Может обращаться по сети к ${hosts.slice(0, 2).join(", ")}${hosts.length > 2 ? ", …" : ""}` };
+  }
+  if (has("http_routes")) return { level: "caution", text: "Может открывать свои адреса на сервере bb" };
+  if (env) return { level: "caution", text: "Может узнавать некоторые сведения о вашем компьютере (имя пользователя, язык)" };
+  if (caps.some((c) => !SAFE_KINDS.has(c.kind)) || reviewRules.some((r) => r !== "agent-config")) return { level: "caution", text: "Похоже на оформление, но в коде есть особенности: откройте «Подробнее»" };
+  return { level: "safe", text: "Безопасно: только оформление — ничего не читает" };
+}
+/** The main button of a yellow card: a harmless plugin is simply switched on. */
+export const approveVerb = (risk: Risk): string => (risk.level === "safe" ? "Включить" : "Разрешить");
+/** What the «Готово» stub says after an allow. */
+export const enabledWhat = (pluginId: string, version: string): string => `включён ${pluginId} ${version}`;
+/** A line about the plugin's own agent settings (not a stop: it does not run them), for the main text of a yellow card; null when there are none. */
+export function agentConfigNote(findings: Array<{ rule: string }>): string | null {
+  return findings.some((f) => f.rule === "agent-config") ? "В папке плагина лежат свои настройки для агентов (например .claude). Плагин сам их не применяет; подробности — в «Подробнее»." : null;
+}
+/** The explanation moved off the first lines of a card into «Подробнее». */
+export const scopeText = (version: string): string => `Версия ${version}: всё, что вы нажмёте на этой карточке, относится только к ней.`;
+
+/** A resolved card is replaced by a stub of the same height, and the stub stays until the person closes it. */
+export interface Stub {
+  key: string;
+  text: string;
+  height: number;
+}
+export const MIN_STUB_HEIGHT = 56;
+export function makeStub(key: string, what: string, height: number): Stub {
+  return { key, text: doneMessage(what), height: Number.isFinite(height) ? Math.max(MIN_STUB_HEIGHT, Math.round(height)) : MIN_STUB_HEIGHT };
+}
+/**
+ * The order of a list while the page is open: what was there keeps its place, what is new goes to the end and is marked «новое». The first call (`prev` null)
+ * takes the list as it comes, and marks nothing. Keys in `keep` (a stub stands there) keep their place though the entry is gone.
+ */
+export function stableOrder(prev: string[] | null, cur: string[], keep: string[] = []): { order: string[]; fresh: string[] } {
+  if (prev === null) return { order: [...cur], fresh: [] };
+  const alive = new Set([...cur, ...keep]);
+  const order = prev.filter((k) => alive.has(k));
+  const have = new Set(order);
+  const fresh = cur.filter((k) => !have.has(k));
+  return { order: [...order, ...fresh], fresh };
+}
+export interface ListItem {
+  key: string;
+  stub?: Stub;
+}
+/** The list as drawn: a card where there is one, the stub where it was resolved. */
+export function layoutItems(order: string[], present: ReadonlySet<string>, stubs: Stub[]): ListItem[] {
+  const out: ListItem[] = [];
+  for (const key of order) {
+    if (present.has(key)) out.push({ key });
+    else {
+      const stub = stubs.find((s) => s.key === key);
+      if (stub) out.push({ key, stub });
+    }
+  }
+  return out;
+}
+
+/** Wizard, step 2: a source in words a person knows. */
+export function friendlySource(entry: string): string {
+  const gh = /^github:([^/\s]+\/[^\s]+)$/i.exec(entry);
+  if (gh) return `${gh[1]} (на GitHub)`;
+  if (/^path:/.test(entry)) return `папка ${entry.slice(5)}`;
+  return entry;
+}
+export const WIZARD_SOURCES_TEXT = "Ставили плагины из каталога bb? Тогда здесь ничего отмечать не нужно: защита спросит вас про каждую новую версию. Отмечайте только то, что вы сами пишете или ведёте: новые версии оттуда будут проходить без вопросов, пока плагин не попросит новых прав.";
+/** Wizard, step 3: the second factor in words, without a count of keys. */
+export function secondFactorText(i: { codes: boolean; keys: number }): string {
+  if (i.codes && i.keys > 0) return "Второй фактор настроен: коды из приложения на телефоне и ключ.";
+  if (i.codes) return "Второй фактор настроен: коды из приложения на телефоне.";
+  if (i.keys > 0) return "Второй фактор настроен: ключ (отпечаток или ключ безопасности).";
+  return "Второй фактор ещё не настроен.";
+}
+export const AWAY_HIDE_LABEL = "Понятно, скрыть";
