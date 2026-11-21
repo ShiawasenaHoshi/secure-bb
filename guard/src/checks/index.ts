@@ -116,6 +116,8 @@ export async function runChecks(dir: string, opts: CheckOptions = {}): Promise<C
   // No entry point found (a tree without a manifest, a headless plugin): everything counts as loaded, as before.
   const everything = ep.entries.length === 0;
   const reached = new Set<string>();
+  /** Code built on the fly that the plugin's OWN files do (a dependency's is not: see where `dynamic` is worked out). */
+  const ownDynamic: Array<{ file: string; detail: string }> = [];
   const queue: string[] = everything ? codeFiles.filter(inSub) : [...ep.entries];
   const enqueue = (rel: string): void => {
     if (!reached.has(rel) && byRel.has(rel)) {
@@ -159,7 +161,10 @@ export async function runChecks(dir: string, opts: CheckOptions = {}): Promise<C
     }
     perFile.push({ rel: src.rel, facts });
     findings.push(...facts.findings);
-    for (const s of facts.sites as Site[]) addCap(caps, s.kind, s.detail, src.rel, s.line);
+    for (const s of facts.sites as Site[]) {
+      addCap(caps, s.kind, s.detail, src.rel, s.line);
+      if (s.kind === "dynamic_code" && !/\(literal\)$/.test(s.detail) && isOwn(posixOf(src.rel)) && inSub(posixOf(src.rel))) ownDynamic.push({ file: posixOf(src.rel), detail: s.detail });
+    }
 
     // Edges of the import graph. Over-approximate on purpose: what is not followed is not checked.
     for (const spec of facts.specs) {
@@ -325,8 +330,13 @@ export async function runChecks(dir: string, opts: CheckOptions = {}): Promise<C
     const own = flowFiles.filter((f) => isOwn(f.rel) && inSub(f.rel) && !distDerived(f.rel));
     const dynamicRules = new Set(["dynamic-access", "require-alias", "module-load", "dynamic-constructor", "global-proxy", "native-load", "webassembly", "dynamic-import", "dynamic-require", "url-import"]);
     // Code built on the fly, a worker, a vm, a computed module: what runs there is not what the analysis read (a plain `Function("return this")` is only text).
-    const dynamicCaps = [...(caps.get("dynamic_code")?.detail ?? [])].some((d) => !/\(literal\)$/.test(d));
-    const dynamic = dynamicCaps || perFile.some((f) => f.facts.execSink || f.facts.specs.includes(null)) || findings.some((f) => dynamicRules.has(f.rule));
+    // Only in the plugin's own code. A dependency that does it (zod tests `new Function("")`) is code that data goes into only through a call the analysis already
+    // counts as «не видно» (a package it has not read); what is inside it does not change where what is not handed to it goes.
+    const ownFile = (rel: string): boolean => isOwn(posixOf(rel)) && inSub(posixOf(rel)) && !distDerived(posixOf(rel));
+    const dynamic =
+      ownDynamic.some((d) => !distDerived(d.file)) ||
+      perFile.some((f) => ownFile(f.rel) && (f.facts.execSink || f.facts.specs.includes(null))) ||
+      findings.some((f) => dynamicRules.has(f.rule) && ownFile(f.file));
     const incomplete = findings.some((f) => (f.rule === "parse-failed" || f.rule === "limit-exceeded") && isOwn(f.file) && !distDerived(f.file));
     const navClick = [...(caps.get("ui_click")?.detail ?? [])].includes(UI_CLICK_NAV);
     return analyzeFlows({ files: own, graph: ctx, expect, dynamic, incomplete, navClick, entries: new Set(ep.entries) });

@@ -740,6 +740,44 @@ describe("the verdict does not depend on the clock", () => {
   });
 });
 
+describe("code built on the fly in a dependency is not the plugin's", () => {
+  const dep = {
+    "node_modules/dyn-lib/package.json": JSON.stringify({ name: "dyn-lib", version: "1.0.0", main: "index.js" }),
+    "node_modules/dyn-lib/index.js": `exports.ping = function () { return 1; };\nexports.send = function (x) { return x; };\nexports.ok = (function () { try { new Function(""); return true; } catch (e) { return false; } })();\nexports.run = function (s) { return eval(s); };\n`,
+  };
+  const handler = (use: string, head = `import { ping, send } from "dyn-lib";`): Record<string, string> => ({
+    "server.ts": `${head}\nexport default function (bb: any) {\n bb.events.on("thread.idle", async ({ thread }: any) => {\n const t = JSON.stringify(await bb.sdk.threads.timeline({ threadId: thread.id }));\n ${use}\n });\n}`,
+    ...dep,
+  });
+
+  it("a dependency with `new Function` / `eval`, and no data handed to it: «никуда» (and the checks still see it as a right)", async () => {
+    const r = await check(handler(`ping(); void t.length;`));
+    expect(r.capabilities.some((c) => c.kind === "dynamic_code")).toBe(true);
+    expect(flowOf(r, "threads").verdict).toBe("nowhere");
+  });
+
+  it("the plugin hands what it read to that dependency: «из кода не видно»", async () => {
+    const r = await check(handler(`send(t);`));
+    const f = flowOf(r, "threads");
+    expect(f.verdict).toBe("unknown");
+    expect(f.why).toMatch(/send/);
+  });
+
+  it("`new Function` in the plugin's own code: «из кода не видно» for the whole plugin", async () => {
+    const r = await check(handler(`ping(); const f = new Function("a", "return a"); void f;`));
+    const f = flowOf(r, "threads");
+    expect(f.verdict).toBe("unknown");
+    expect(f.why).toMatch(/builds code/);
+  });
+
+  it("a computed module in the plugin's own code counts; in a dependency it does not", async () => {
+    const own = await check(handler(`ping(); await import(String(Math.random()));`));
+    expect(flowOf(own, "threads").verdict).toBe("unknown");
+    const viaDep = await check({ ...handler(`ping();`), "node_modules/dyn-lib/index.js": `exports.ping = function () { return require(String(Math.random())); };\n` });
+    expect(flowOf(viaDep, "threads").verdict).toBe("nowhere");
+  });
+});
+
 describe("«зачем» by the pair access → sink", () => {
   it("a thread event → a sound or a notification: «чтобы сообщить вам, когда агент закончил»", async () => {
     const r = await check({
