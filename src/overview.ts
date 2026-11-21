@@ -8,6 +8,9 @@ import { isThirdParty, runningThirdParty } from "./probe.js";
 import type { Availability, Scanner } from "./scan/scanner.js";
 import { scanView, type ScanView } from "./scan/view.js";
 import type { AiSettings } from "./scan/types.js";
+import { normalizeSettings } from "./sentinel/store.js";
+import type { Sentinel } from "./sentinel/sentinel.js";
+import { questionViews, type SentinelView } from "./sentinel/view.js";
 import type { Publisher } from "./publish/publisher.js";
 import type { PublishRow, PublishSettings, PublishState } from "./publish/types.js";
 import type { SkillGuard, SkillsView } from "./skills/guard.js";
@@ -86,6 +89,8 @@ export interface Overview {
   tainted: Array<{ threadId: string; kinds: string[]; first: number; last: number }>;
   /** Repositories whose use does not taint a thread. */
   trustedRepos: string[];
+  /** Stage 7: the sentinel (observation only). */
+  sentinel: SentinelView;
 }
 const EMPTY_SKILLS: SkillsView = { baselineAt: null, lastScanAt: null, pinned: { total: 0, builtin: 0, baseline: 0, approved: 0 }, open: [], recent: [], trusted: [], blind: [], unchecked: [] };
 
@@ -100,6 +105,8 @@ export interface JournalView {
 }
 
 export interface OverviewDeps {
+  /** Absent in tests that do not touch the sentinel. */
+  sentinel?: Sentinel;
   /** Absent in tests that do not touch the AI scan. */
   scanner?: Scanner;
   /** Absent in tests that do not touch publishing. */
@@ -234,5 +241,17 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
     journal: journalView(d),
     tainted: d.taintedThreads?.() ?? [],
     trustedRepos: d.store.trustedRepos(),
+    sentinel: sentinelView(d),
+  };
+}
+
+function sentinelView(d: OverviewDeps): SentinelView {
+  const settings = d.sentinel?.settings() ?? normalizeSettings({});
+  return {
+    settings,
+    keyConfigured: d.sentinel?.keyConfigured() ?? false,
+    solver: d.sentinel ? "jev" : "—",
+    questions: questionViews(settings),
+    feed: d.sentinel?.recent(30) ?? [],
   };
 }

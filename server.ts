@@ -36,6 +36,11 @@ import { scanLine, scanView } from "./src/scan/view.js";
 import { encodeQr } from "./src/qr.js";
 import { MIGRATIONS, Store, type ApprovalRow } from "./src/store.js";
 import { hashTree } from "./src/tree.js";
+import { bbSentinelSource } from "./src/sentinel/bb-source.js";
+import { JEV_KEY_FILE_ENV, JevSolver, type JevFetch } from "./src/sentinel/jev.js";
+import { Sentinel, SentinelError } from "./src/sentinel/sentinel.js";
+import { SentinelStore } from "./src/sentinel/store.js";
+import { feedText, verdictText } from "./src/sentinel/view.js";
 import { bbTaintSource } from "./src/taint/bb-source.js";
 import { TaintMonitor } from "./src/taint/monitor.js";
 import { bbWatchActions, bbWatchSource } from "./src/watch/bb-source.js";
@@ -57,6 +62,7 @@ function refusal(err: unknown): never {
     throw new experimental_PluginRpcRefusal({ code, message: err.message });
   }
   if (err instanceof ScanError) throw new experimental_PluginRpcRefusal({ code: err.code === "invalid" ? "invalid" : "conflict", message: err.message });
+  if (err instanceof SentinelError) throw new experimental_PluginRpcRefusal({ code: err.code === "invalid_code" ? "forbidden" : err.code, message: err.message });
   if (err instanceof WatchError) throw new experimental_PluginRpcRefusal({ code: err.code, message: err.message });
   if (err instanceof SkillError) throw new experimental_PluginRpcRefusal({ code: err.code, message: err.message });
   throw err;
@@ -201,6 +207,32 @@ export default async function plugin(bb: BbPluginApi) {
   };
   const changed = () => bb.realtime.publish("changed", {});
 
+  // ---- sentinel (stage 7, spec §9): observation only, off until a human turns it on with a code -------
+  const sentinelStore = new SentinelStore(db, now);
+  sentinelStore.failEvaluating();
+  const jev = new JevSolver({
+    // Only the path comes from the environment; the key is read from the file at each call and goes into one header.
+    keyFile: process.env[JEV_KEY_FILE_ENV]?.trim() || null,
+    provider: () => sentinelStore.settings().provider,
+    fetch: ((url, init) => globalThis.fetch(url, init)) as JevFetch,
+  });
+  const sentinel = new Sentinel({
+    store: sentinelStore,
+    now,
+    solver: jev,
+    source: bbSentinelSource(bb.sdk, threads),
+    windowCovering: async (threadId) => {
+      for (const w of gate.openWindows()) if (await gate.windowCovering(w.pluginId, threadId)) return w.pluginId;
+      return null;
+    },
+    touch: (purpose, code) => gate.touch(purpose, code),
+    log: (m) => bb.log.warn(m),
+    keyConfigured: () => jev.keyConfigured(),
+    onChange: changed,
+  });
+  // Every provider's approval card arrives as this one event. The handler only records and scores: it never answers a card.
+  bb.events.on("interaction.pending", (payload) => sentinel.handle(payload));
+
   const probe = () =>
     collectProbe({
       hookRegistered,
@@ -255,7 +287,7 @@ export default async function plugin(bb: BbPluginApi) {
   };
   journal(true);
   const overview = () =>
-    buildOverview({ scanner: aiScanner, publisher, store, gate, now, hookRegistered, listPlugins, probe, descendants: threads.descendants, watch, skills: skillGuard, journal: () => journal(), taintedThreads: () => store.taintedThreads(20) });
+    buildOverview({ sentinel, scanner: aiScanner, publisher, store, gate, now, hookRegistered, listPlugins, probe, descendants: threads.descendants, watch, skills: skillGuard, journal: () => journal(), taintedThreads: () => store.taintedThreads(20) });
 
   // ---- after-the-fact mode ------------------------------------------------
   const scanner = new AfterFactScanner({
@@ -442,6 +474,11 @@ export default async function plugin(bb: BbPluginApi) {
       changed();
       return { ok: true as const, status: r.row?.status ?? "skipped", note: r.note };
     }),
+    "sentinel.settings": wrap(({ code, ...patch }) => {
+      sentinel.setSettings(patch, code);
+      changed();
+      return { ok: true as const };
+    }),
     "policy.set": wrap(({ code, ...patch }) => {
       gate.setPolicy(patch, code);
       changed();
@@ -578,6 +615,17 @@ export default async function plugin(bb: BbPluginApi) {
             return { exitCode: 0, stdout: formatReport(result) };
           },
         }),
+        watchman: cliCommand({
+          summary: "Sentinel feed (observation only; it never answers approval cards): recent actions, categories that fired, what the human did with the card",
+          options: { limit: { type: "integer", min: 1, max: 50, default: 10, description: "How many entries (1-50)" } },
+          async run(input) {
+            await sentinel.refreshOutcomes().catch(() => 0);
+            const s = sentinel.settings();
+            const head = `watchman: ${s.enabled ? `on (${s.allThreads ? "all threads" : "threads with an open trust window"}); observation only, cards are not answered` : "off"}${jev.keyConfigured() ? "" : "; solver key not set"}`;
+            const rows = sentinelStore.list(input.options.limit);
+            return { exitCode: 0, stdout: [head, ...(rows.length > 0 ? rows.map((r) => feedText(r, s.riskThreshold)) : ["(feed is empty)"])].join("\n") };
+          },
+        }),
         propose: cliCommand({
           summary: "Install or update a plugin through the gate (the only allowed way)",
           positionals: [{ name: "path", description: "Plugin directory on this machine", required: true }],
@@ -660,6 +708,7 @@ export default async function plugin(bb: BbPluginApi) {
         unsubscribeThreads = bb.sdk.subscribe({
           event: "thread:changed",
           callback: (event) => {
+            if (event.changes?.includes("interactions-changed") && event.id) void sentinel.refreshOutcomes(event.id).catch((e) => bb.log.warn(`sentinel outcomes: ${String(e)}`));
             if (!event.changes?.includes("events-appended") || !event.id) return;
             taint.note(event.id);
             if (gate.openWindows().length > 0 || watch.openWindows().length > 0) kickTaint();
@@ -679,6 +728,7 @@ export default async function plugin(bb: BbPluginApi) {
           if (gate.sweep() > 0) changed();
           if (watch.sweep() > 0) changed();
           if (gate.openWindows().length > 0 || watch.openWindows().length > 0) sweepTaint();
+          await sentinel.refreshOutcomes();
           journal(now() - journalReport.checkedAt > 60_000);
           if (!hookRegistered && now() - lastScan >= AFTER_FACT_MS) {
             lastScan = now();
