@@ -6,7 +6,7 @@ import { dirname } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { resolvePaths, type GuardPaths } from "./config.ts";
 import { openDb, privateDir } from "./db.ts";
-import { Guard, GuardError, type ImportItem, type PasskeyRow } from "./guard.ts";
+import { Guard, GuardError, SETUP_CHECK_PURPOSE, type ImportItem, type PasskeyRow } from "./guard.ts";
 import { encodeQr } from "./qr.ts";
 import { listen } from "./server.ts";
 import { generateSecret, otpauthUri } from "./totp.ts";
@@ -44,6 +44,7 @@ const USAGE = `sbb-guard ${VERSION} — decision guard for secure-bb
                   [--plugins-root DIR]... [--known-source ENTRY]...
   sbb-guard totp-register [--data DIR] [--code CODE] [--replacing-code CODE]
   sbb-guard totp-disable [--data DIR] [--yes]
+  sbb-guard setup [--data DIR] [--label NAME] [--rp-id ID] [--origin URL]
   sbb-guard passkey-enroll [--data DIR] [--label NAME] [--rp-id ID] [--origin URL]
   sbb-guard passkey-list [--data DIR]
   sbb-guard passkey-remove ID [--data DIR] [--yes]
@@ -60,6 +61,7 @@ only from there (the guard's user needs read access: the installer's ACL), and w
 SBB_GUARD_KNOWN_SOURCES: sources of the official catalog (github:owner/name or github:owner/*), the level "known". The owner's own sources are kept by the guard (a touch adds one).
 Troubleshooting (console only, with a code): "troubleshoot 30" (or "30m") makes the guard pass everything for that long (at most 240 minutes), write every
 decision into the journal and return by itself; the page shows a red bar with the time left. It is not an off switch: the guard has none. "troubleshoot off" ends it earlier.
+Setup: a step-by-step wizard in Russian (a code from an app, a passkey with a link to the page, a test touch); run again, it does only what is missing.
 Paths: --data / SBB_GUARD_DATA (default /var/sbb-guard), --socket / SBB_GUARD_SOCKET (default <data>/run/guard.sock),
 --socket-gid / SBB_GUARD_SOCKET_GID.
 Passkeys: --rp-id / SBB_GUARD_RP_ID (default localhost) and --origin / SBB_GUARD_ORIGIN (default http://localhost:38886): the page must be opened
@@ -191,48 +193,273 @@ export interface EnrollDeps {
   /** Waits between looks at the database; tests make it fast and move their clock. */
   sleep?: (ms: number) => Promise<void>;
   pollMs?: number;
+  /** How long `setup` waits for the test touch (2 minutes by default). */
+  checkTimeoutMs?: number;
 }
 
-/**
- * Opens the registration window (5 minutes), prints the one-time token, waits for the page to register a key, shows what it registered
- * and asks for `y`. No flag skips the question: a key that a harmful plugin managed to register first must be seen by a person.
- */
-export async function passkeyEnroll(paths: GuardPaths, io: Io, opts: Opts, now: () => number = Date.now, deps: EnrollDeps = {}): Promise<number> {
-  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  const { guard, close } = open(paths, now);
-  try {
-    const label = optStr(opts, "label") ?? `key-${new Date(now()).toISOString().slice(0, 16).replace(/[-:T]/g, "")}`;
-    const e = guard.enrollStart(label);
-    io.out(`Registration window is open until ${new Date(e.expiresAt).toISOString()} (5 minutes).`);
+/** What the console says while a key is being registered (`passkey-enroll` in English, `setup` in Russian for a person who is not an engineer). */
+interface EnrollText {
+  opened: (until: string) => void;
+  announce: (e: { token: string; label: string }) => void;
+  found: (k: PasskeyRow) => void;
+  ask: string;
+  yes: (a: string | null) => boolean;
+  declined: (a: string | null) => string;
+  confirmed: (label: string) => string;
+  closed: (state: string) => string;
+}
+const ENROLL_EN = (io: Io, paths: GuardPaths): EnrollText => ({
+  opened: (until) => io.out(`Registration window is open until ${until} (5 minutes).`),
+  announce: (e) => {
     io.out(`Key label:  ${e.label}`);
     io.out(`Token:      ${e.token}`);
     io.out(`Open ${paths.rp.origin} (exactly this address, not 127.0.0.1), the secure-bb page, "Добавить passkey", enter the token and touch the sensor.`);
     io.out("Waiting for the key…");
-    for (;;) {
-      const st = guard.enrollmentStatus(e.id);
-      if (st.key) {
-        io.out("");
-        io.out(`A key was registered:  ${st.key.label}`);
-        io.out(`  AAGUID:       ${st.key.aaguid}`);
-        io.out(`  fingerprint:  ${groups(st.key.fingerprint)}`);
-        io.out("If you did not just do this yourself, answer no: something else used the token.");
-        const a = await io.ask("Activate this key? [y/N] ");
-        if (!yes(a)) {
-          guard.rejectEnrollment(e.id, a === null ? "no answer" : "declined");
-          io.err("not confirmed; the key is discarded and the window is closed");
-          return 1;
-        }
-        guard.confirmEnrollment(e.id);
-        io.out(`Key ${st.key.label} is active.`);
-        return 0;
-      }
-      if (st.state !== "open") {
-        io.err(st.state === "expired" ? "the registration window expired; nothing was registered" : `the registration window is ${st.state}; nothing was registered (five wrong tokens close it)`);
-        guard.rejectEnrollment(e.id, st.state);
+  },
+  found: (k) => {
+    io.out("");
+    io.out(`A key was registered:  ${k.label}`);
+    io.out(`  AAGUID:       ${k.aaguid}`);
+    io.out(`  fingerprint:  ${groups(k.fingerprint)}`);
+    io.out("If you did not just do this yourself, answer no: something else used the token.");
+  },
+  ask: "Activate this key? [y/N] ",
+  yes,
+  declined: () => "not confirmed; the key is discarded and the window is closed",
+  confirmed: (label) => `Key ${label} is active.`,
+  closed: (state) => (state === "expired" ? "the registration window expired; nothing was registered" : `the registration window is ${state}; nothing was registered (five wrong tokens close it)`),
+});
+
+/**
+ * Opens the registration window (5 minutes), tells the person the token, waits for the page to register a key, shows what it registered
+ * and asks for `y`. No flag skips the question: a key that a harmful plugin managed to register first must be seen by a person.
+ */
+async function enrollWith(guard: Guard, io: Io, label: string, now: () => number, deps: EnrollDeps, text: EnrollText): Promise<number> {
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const e = guard.enrollStart(label);
+  text.opened(new Date(e.expiresAt).toISOString());
+  text.announce(e);
+  for (;;) {
+    const st = guard.enrollmentStatus(e.id);
+    if (st.key) {
+      text.found(st.key);
+      const a = await io.ask(text.ask);
+      if (!text.yes(a)) {
+        guard.rejectEnrollment(e.id, a === null ? "no answer" : "declined");
+        io.err(text.declined(a));
         return 1;
       }
-      await sleep(deps.pollMs ?? 500);
+      guard.confirmEnrollment(e.id);
+      io.out(text.confirmed(st.key.label));
+      return 0;
     }
+    if (st.state !== "open") {
+      io.err(text.closed(st.state));
+      guard.rejectEnrollment(e.id, st.state);
+      return 1;
+    }
+    await sleep(deps.pollMs ?? 500);
+  }
+}
+
+export async function passkeyEnroll(paths: GuardPaths, io: Io, opts: Opts, now: () => number = Date.now, deps: EnrollDeps = {}): Promise<number> {
+  const { guard, close } = open(paths, now);
+  try {
+    return await enrollWith(guard, io, optStr(opts, "label") ?? defaultLabel(now), now, deps, ENROLL_EN(io, paths));
+  } catch (err) {
+    if (err instanceof GuardError) {
+      io.err(err.message);
+      return 1;
+    }
+    throw err;
+  } finally {
+    close();
+  }
+}
+const defaultLabel = (now: () => number): string => `key-${new Date(now()).toISOString().slice(0, 16).replace(/[-:T]/g, "")}`;
+
+// ---- setup: one command, step by step, in plain Russian ------------------------------------------------------------------
+const yesRu = (a: string | null): boolean => a !== null && /^(y|yes|д|да)$/i.test(a.trim());
+const noRu = (a: string | null): boolean => a !== null && /^(n|no|н|нет)$/i.test(a.trim());
+/** Where the page lives: the origin the guard was told (WebAuthn works only there), then the plugin's path. */
+export const GATE_PATH = "/plugins/secure-bb/gate";
+export const gateUrl = (origin: string): string => `${origin.replace(/\/+$/, "")}${GATE_PATH}`;
+/**
+ * The link for adding a key: the token is in the fragment (#), which a browser never sends to a server; the page reads it and clears the
+ * address bar at once. The token is also printed apart, in case the link cannot be opened where the page is.
+ */
+export const enrollLink = (origin: string, token: string): string => `${gateUrl(origin)}#enroll=${token}`;
+export const SETUP_CHECK_WAIT_MS = 2 * 60_000;
+
+/** Asks until the answer is "yes" or "no"; an empty answer is the default. null (no terminal) is reported as null. */
+async function askYesNo(io: Io, question: string, dflt: boolean): Promise<boolean | null> {
+  for (let i = 0; i < 3; i++) {
+    const a = await io.ask(`${question} ${dflt ? "[Д/н]" : "[д/Н]"} `);
+    if (a === null) return null;
+    if (a.trim() === "") return dflt;
+    if (yesRu(a)) return true;
+    if (noRu(a)) return false;
+    io.out("Ответьте «д» (да) или «н» (нет).");
+  }
+  return dflt;
+}
+
+/** Step: codes from an app. Returns true when the second factor now exists by this step. */
+async function setupTotp(guard: Guard, io: Io, opts: Opts): Promise<"done" | "failed"> {
+  const secret = generateSecret();
+  io.out("");
+  io.out(renderQr(encodeQr(otpauthUri(secret))));
+  io.out("");
+  io.out("Откройте на телефоне приложение для кодов (Aegis, 1Password, Google Authenticator, Яндекс Ключ…) и наведите камеру на этот квадрат.");
+  io.out(`Если не получается считать, введите ключ вручную: ${secret}`);
+  io.out("Ключ показан один раз, здесь. Он хранится только у сторожа и не проходит через bb.");
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const code = optStr(opts, "code") ?? (await io.ask("Введите шесть цифр из приложения, чтобы подтвердить: ")) ?? undefined;
+    if (code === undefined) {
+      io.err("Ответа нет, ничего не сохранено. Запустите `sbb-guard setup` снова.");
+      return "failed";
+    }
+    try {
+      guard.registerSecret(secret, code.trim());
+      io.out("Готово: коды из приложения подключены. Секрет заперт и больше нигде не покажется.");
+      return "done";
+    } catch (err) {
+      if (!(err instanceof GuardError)) throw err;
+      io.err(`Код не подошёл (${attempt} из 3). Подождите, пока в приложении появится новый, и введите его.`);
+      if (optStr(opts, "code") !== undefined) break;
+    }
+  }
+  io.err("Не получилось подтвердить коды. Запустите `sbb-guard setup` снова: покажу новый QR.");
+  return "failed";
+}
+
+/** Step: the test touch. Waits until the guard sees a good signature for the action `touch {purpose: "setup-check"}`. */
+async function setupCheck(guard: Guard, io: Io, paths: GuardPaths, now: () => number, deps: EnrollDeps): Promise<boolean> {
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const since = guard.lastJournalId();
+  const until = now() + (deps.checkTimeoutMs ?? SETUP_CHECK_WAIT_MS);
+  io.out("");
+  io.out("Шаг: проверочное касание. Так мы убедимся, что ключ правда работает с этой страницей.");
+  io.out(`  1. Откройте страницу: ${gateUrl(paths.rp.origin)}`);
+  io.out("  2. Найдите блок «Passkey» и нажмите «Проверить касание».");
+  io.out("  3. Приложите палец (или подтвердите так, как у вас принято). Ничего не одобряется и не меняется, это только проверка.");
+  io.out("Жду до 2 минут…");
+  for (;;) {
+    const t = guard.passkeyTouches(SETUP_CHECK_PURPOSE, since)[0];
+    if (t) {
+      io.out(`Всё работает: касание принято (ключ «${t.key}»).`);
+      return true;
+    }
+    if (now() >= until) {
+      io.err("Касание не пришло за 2 минуты.");
+      io.err("Чаще всего виноват менеджер паролей: его расширение в браузере перехватывает запрос. Посмотрите, нет ли его окна, и выберите ключ устройства (Touch ID / Windows Hello).");
+      io.err("Страницу надо открывать ровно по адресу выше (localhost, не 127.0.0.1). Когда разберётесь, запустите `sbb-guard setup` ещё раз: пройдут только недостающие шаги.");
+      return false;
+    }
+    await sleep(deps.pollMs ?? 500);
+  }
+}
+
+function setupLeaflet(io: Io, paths: GuardPaths, guard: Guard): void {
+  io.out("");
+  io.out("Памятка");
+  io.out(`  • Страница secure-bb: ${gateUrl(paths.rp.origin)} (открывайте именно по этому адресу).`);
+  io.out("  • Одобряете вы: касанием пальца, а если ключ не под рукой — кодом из приложения (если он подключён).");
+  io.out("  • Касание не срабатывает или «ничего не происходит»: чаще всего запрос перехватил менеджер паролей (расширение в браузере). Выберите в его окне ключ устройства или временно выключите расширение для этой страницы.");
+  io.out(guard.totpRegistered() ? "  • Коды из приложения можно выключить позже: `sbb-guard totp-disable` (нужен хотя бы один рабочий ключ). Включить снова: `sbb-guard totp-register`." : "  • Коды из приложения сейчас не подключены; добавить их можно командой `sbb-guard totp-register`.");
+  io.out("  • Список и удаление ключей: `sbb-guard passkey-list`, `sbb-guard passkey-remove НОМЕР`. Всё ли в порядке: `sbb-guard status`.");
+}
+
+/**
+ * `sbb-guard setup`: the whole registration in one command. Every step looks at what already exists, so a second run does only what is missing and
+ * breaks nothing (it never replaces a secret, never removes a key). The key is still activated only by `y` here, on the console.
+ */
+export async function setup(paths: GuardPaths, io: Io, opts: Opts, now: () => number = Date.now, deps: EnrollDeps = {}): Promise<number> {
+  const { guard, close } = open(paths, now);
+  try {
+    const hadTotp = guard.totpRegistered();
+    let hasKey = guard.activeKeys().length > 0;
+    io.out("Настройка защиты secure-bb. Я задам несколько вопросов; каждый шаг можно пройти позже, запустив эту команду снова.");
+    if (hadTotp || hasKey) {
+      io.out(`Уже есть: ${[hadTotp ? "коды из приложения" : "", hasKey ? `ключи (${guard.activeKeys().length})` : ""].filter(Boolean).join(", ")}. Эти шаги пропускаю.`);
+    }
+
+    // Step 1: a second factor at all. Codes from an app, or (skip it) a passkey alone.
+    let skippedTotp = false;
+    if (!hadTotp && !hasKey && !guard.totpDisabled()) {
+      io.out("");
+      io.out("Шаг 1. Коды из приложения. Это запасной способ подтверждать решения, если ключ (касание пальцем) не под рукой.");
+      const want = await askYesNo(io, "Подключить коды из приложения?", true);
+      if (want === null) {
+        io.err("Нужен терминал: мастер задаёт вопросы. Запустите `sbb-guard setup` в обычном окне терминала.");
+        return 64;
+      }
+      if (want) {
+        if ((await setupTotp(guard, io, opts)) === "failed") return 1;
+      } else {
+        skippedTotp = true;
+        io.out("Хорошо, без кодов: подтверждать будет только ключ. Это надёжнее, но ключ придётся добавить сейчас.");
+      }
+    }
+
+    // Step 2: a passkey.
+    if (!hasKey) {
+      const haveOther = guard.totpRegistered();
+      io.out("");
+      io.out("Шаг 2. Ключ passkey: подтверждение касанием пальца (Touch ID и подобное). Подпись нельзя перехватить в bb, поэтому это самый надёжный способ.");
+      let go: boolean | null = true;
+      if (haveOther && !skippedTotp) go = await askYesNo(io, "Добавить ключ сейчас?", true);
+      if (go === null) {
+        io.err("Нужен терминал: мастер задаёт вопросы.");
+        return 64;
+      }
+      if (!go) io.out("Пропускаю ключ. Добавить его позже можно, запустив `sbb-guard setup` снова.");
+      else {
+        const label = optStr(opts, "label") ?? defaultLabel(now);
+        const ru: EnrollText = {
+          opened: (until) => io.out(`Окно регистрации открыто на 5 минут (до ${until}).`),
+          announce: (e) => {
+            io.out("Откройте эту ссылку в браузере на этом компьютере и нажмите «Добавить passkey», затем приложите палец:");
+            io.out("");
+            io.out(`  ${enrollLink(paths.rp.origin, e.token)}`);
+            io.out("");
+            io.out("Токен уже вписан в ссылку и пропадёт из адресной строки сразу после открытия. Если ссылка не открывается, откройте страницу сами и введите токен вручную:");
+            io.out(`  страница: ${gateUrl(paths.rp.origin)}`);
+            io.out(`  токен:    ${e.token}`);
+            io.out(`Метка ключа: ${e.label}. Жду ключ…`);
+          },
+          found: (k) => {
+            io.out("");
+            io.out(`Зарегистрирован ключ «${k.label}».`);
+            io.out(`  AAGUID:     ${k.aaguid}`);
+            io.out(`  отпечаток:  ${groups(k.fingerprint)}`);
+            io.out("Если вы сейчас сами этого не делали, ответьте «н»: значит, токеном воспользовался кто-то другой.");
+          },
+          ask: "Это ваш ключ, включить его? Введите y (да) или n (нет): ",
+          yes: yesRu,
+          declined: () => "Ключ не подтверждён: он удалён, окно регистрации закрыто. Запустите `sbb-guard setup` снова, когда будете готовы.",
+          confirmed: (l) => `Ключ «${l}» включён.`,
+          closed: (st) => (st === "expired" ? "Окно регистрации закрылось за 5 минут, ничего не зарегистрировано. Запустите `sbb-guard setup` снова." : `Окно регистрации стало «${st}», ничего не зарегистрировано (пять неверных токенов закрывают окно). Запустите \`sbb-guard setup\` снова.`),
+        };
+        if ((await enrollWith(guard, io, label, now, deps, ru)) !== 0) return 1;
+        hasKey = true;
+      }
+    }
+
+    // Step 3: the test touch — only when there is a key that has not passed it yet.
+    let ok = true;
+    const keys = guard.activeKeys();
+    if (keys.length > 0) {
+      const passed = new Set(guard.passkeyTouches(SETUP_CHECK_PURPOSE).map((t) => t.key));
+      if (keys.every((k) => passed.has(k.label))) io.out("Проверочное касание уже проходило успешно: этот шаг пропускаю.");
+      else ok = await setupCheck(guard, io, paths, now, deps);
+    }
+    if (!guard.totpRegistered() && guard.activeKeys().length === 0) {
+      io.err("Ни кодов, ни ключа: подтверждать решения пока нечем. Запустите `sbb-guard setup` снова.");
+      return 1;
+    }
+    setupLeaflet(io, paths, guard);
+    return ok ? 0 : 1;
   } catch (err) {
     if (err instanceof GuardError) {
       io.err(err.message);
@@ -562,6 +789,8 @@ export async function main(argv: string[], io: Io = terminalIo): Promise<number>
         return await totpRegister(paths, io, opts);
       case "totp-disable":
         return await totpDisable(paths, io, opts);
+      case "setup":
+        return await setup(paths, io, opts);
       case "passkey-enroll":
         return await passkeyEnroll(paths, io, opts);
       case "passkey-list":

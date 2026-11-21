@@ -42,6 +42,7 @@ const EXPECTED: Record<string, RpcGroup> = {
   "ai.settings": "dangerous",
   "publish.settings": "dangerous",
   "sentinel.settings": "dangerous",
+  "setup-check": "dangerous",
   "approvals.export": "dangerous",
   "agents.accept": "dangerous", // a touch for exactly these differences, at the guard: a session does not do
   "trust.mode": "dangerous", // weakening the mode is a touch at the guard; strengthening needs none (the guard says which)

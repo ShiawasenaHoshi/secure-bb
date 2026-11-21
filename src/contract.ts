@@ -25,6 +25,8 @@ export const rpcContract = defineRpcContract({
   overview: { input: s.nullValue(), output: s.json<Overview>() },
   "journal.verify": { input: s.nullValue(), output: s.json<JournalReport>() },
   "guard.verify": { input: s.nullValue(), output: s.json<GuardJournalReport | { error: string }>() },
+  // Guard mode: the test touch of `sbb-guard setup` («Проверить касание»). Changes nothing: the guard writes "touch setup-check" into its journal, the console sees it.
+  "setup-check": { input: s.object({ ...factor }), output: s.json<{ ok: true }>() },
   "approvals.export": { input: s.object({ ...factor }), output: s.json<{ path: string; digest: string; count: number }>() },
   "trusted.set": { input: s.object({ add: s.optional(s.string({ min: 1, max: 140 })), remove: s.optional(s.string({ min: 1, max: 140 })), ...factor }), output: s.json<{ ok: true; repos: string[] }>() },
   // Guard mode: trust by source. The mode and "my sources" are the guard's; weakening the mode and adding a source take a touch (code or key), the rest does not.

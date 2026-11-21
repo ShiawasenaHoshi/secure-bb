@@ -694,6 +694,14 @@ export default async function plugin(bb: BbPluginApi) {
         return { error: err instanceof Error ? err.message : String(err) };
       }
     },
+    "setup-check": wrap(({ code }) => {
+      // The test touch of `sbb-guard setup`. The touch itself was checked at the guard (and is in its journal, which is what the console waits for);
+      // with no touch (nothing came, or this is a bb without a guard) nothing happens and the answer says so. No side effect but a line in our journal.
+      needGuard();
+      if (code !== VERIFIED) throw new GateError("invalid_code", "a touch is needed: press «Проверить касание» on the page");
+      store.log("setup.check", null, null, { via: "guard touch" });
+      return { ok: true as const };
+    }),
     "approvals.export": wrap(({ code }) => {
       // The code was checked by the guard (guard mode) or is checked here (without a guard): either way `touch` takes it.
       gate.touch("approvals.export", needCode(code));
