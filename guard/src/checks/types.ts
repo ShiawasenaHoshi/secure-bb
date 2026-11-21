@@ -140,6 +140,8 @@ export interface CheckResult {
   flows?: FlowSummary[];
   /** «Зачем» by the pair access → sink: short sentences with the capability kinds whose lines they belong to. */
   purposes?: Purpose[];
+  /** The clock stopped the flow analysis: this result is not finished. It is not kept, it counts for no right, and the check is made again later. */
+  flowsTimedOut?: true;
 }
 /** The detail of a `network` capability: a network call whose address the code does not show. */
 export const UNRESOLVED_HOST = "unresolved-host";

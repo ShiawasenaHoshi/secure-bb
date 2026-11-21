@@ -343,7 +343,7 @@ export async function runChecks(dir: string, opts: CheckOptions = {}): Promise<C
   const sorted = [...uniq.values()].sort(
     (a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity] || (a.file < b.file ? -1 : a.file > b.file ? 1 : 0) || a.line - b.line || (a.rule < b.rule ? -1 : 1),
   );
-  return { v: CHECKS_VERSION, findings: sorted, capabilities, stats: { files: tree.files, parsed, bytes: tree.bytes, ms: Date.now() - t0 }, dependencies, ...(caps.has("fs") && fsPaths.length > 0 ? { fsPaths } : {}), ...(caps.has("child_process") && (programs.length > 0 || programsUnknown) ? { programs, ...(programsUnknown ? { programsUnknown } : {}) } : {}), ...(credentials.length > 0 ? { credentials } : {}), ...(flowResult ? { flows: flowResult.summaries, ...(flowResult.purposes.length > 0 ? { purposes: flowResult.purposes } : {}) } : {}) };
+  return { v: CHECKS_VERSION, findings: sorted, capabilities, stats: { files: tree.files, parsed, bytes: tree.bytes, ms: Date.now() - t0 }, dependencies, ...(caps.has("fs") && fsPaths.length > 0 ? { fsPaths } : {}), ...(caps.has("child_process") && (programs.length > 0 || programsUnknown) ? { programs, ...(programsUnknown ? { programsUnknown } : {}) } : {}), ...(credentials.length > 0 ? { credentials } : {}), ...(flowResult?.timedOut ? { flowsTimedOut: true as const } : {}), ...(flowResult && !flowResult.timedOut ? { flows: flowResult.summaries, ...(flowResult.purposes.length > 0 ? { purposes: flowResult.purposes } : {}) } : {}) };
 }
 
 /**

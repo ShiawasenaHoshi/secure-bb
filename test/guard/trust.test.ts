@@ -185,6 +185,22 @@ describe("what sends a version to the queue", () => {
     writeFileSync(join(v, "server.ts"), quiet + "// again\n");
     expect(await g.send(decideOf(v))).toMatchObject({ action: "proceed", via: "source" });
   });
+  it("the clock stopped the flow analysis: the version is held, «проверка не успела», and no right comes of it", async () => {
+    let stop = false;
+    const g = await guard({ checks: async (dir, o) => (stop ? { ...(await runChecks(dir, o)), flows: undefined, flowsTimedOut: true as const } : runChecks(dir, o)) });
+    const dir = tmp();
+    const v = plugin(dir, "demo", BASE);
+    await addMine(g, [`path:${dir}`]);
+    await approveFirst(g, decideOf(v));
+    writeFileSync(join(v, "server.ts"), BASE + "// v2\n");
+    stop = true;
+    const d = await g.send(decideOf(v));
+    expect(d).toMatchObject({ action: "wait" });
+    expect(journal(g, "approved.source")).toHaveLength(0);
+    // the next evaluation, when the analysis finishes, lets it in as before: the rights did not change
+    stop = false;
+    expect(await g.send(decideOf(v))).toMatchObject({ action: "proceed", via: "source" });
+  });
   it("a right that was approved before stays free: a version with it passes", async () => {
     const { g, v } = await ready();
     writeFileSync(join(v, "server.ts"), FETCH);

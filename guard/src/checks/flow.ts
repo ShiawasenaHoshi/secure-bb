@@ -35,6 +35,8 @@ export const SOURCE_KINDS: readonly SourceKind[] = ["threads", "questions", "env
 
 export interface FlowSink {
   kind: SinkKind;
+  /** Only the choice reaches it: what is sent, to where, or whether at all depends on what was read (a branch, a comparison, a length, a delay), though the content itself is not in it. */
+  choice?: boolean;
   /** The host, the program, the path, the call: what the code names. */
   target?: string;
   file: string;
@@ -64,6 +66,8 @@ export interface FlowAnalysis {
   /** The whole fixed point was reached and all the code was read. */
   complete: boolean;
   notes: string[];
+  /** The clock stopped the analysis (an emergency stop, not a verdict): nothing of it is kept, nothing counts as a right, and the check is made again later. */
+  timedOut?: boolean;
 }
 /**
  * The part of the flow result that counts as a right: where a source reaches a dangerous sink (`flow:threads>network:stats.example`) and that it
@@ -73,7 +77,7 @@ export function flowTokens(flows: readonly FlowSummary[] | undefined): string[] 
   const out = new Set<string>();
   for (const f of flows ?? []) {
     const secret = f.source === "env" || f.source === "credentials";
-    if (f.verdict === "leaves") for (const s of f.sinks) if (DANGEROUS_SINKS.has(s.kind) || (secret && s.kind === "route")) out.add(`flow:${f.source}>${s.kind}${s.target ? `:${s.target}` : ""}`);
+    if (f.verdict === "leaves") for (const s of f.sinks) if (DANGEROUS_SINKS.has(s.kind) || (secret && s.kind === "route")) out.add(`flow:${f.source}>${s.choice ? "choice-" : ""}${s.kind}${s.target ? `:${s.target}` : ""}`);
     if (f.verdict === "unknown") out.add(`flow:${f.source}>unknown`);
   }
   if (out.size > 0) out.add("flow");
@@ -191,6 +195,9 @@ class Engine {
   private cells = new Map<string, Set<string>>();
   private dirty = false;
   private record = false;
+  /** The data the branch we are in depends on (`k:` labels): what is called under it is called, or not, by what was read. */
+  private ctl = new Set<string>();
+  private timedOut = false;
   /** Phase two: what a call the analysis cannot resolve does to its arguments. Not before the callees are settled, or a callee resolved later would stay tainted by the guess. */
   private fallback = false;
   private visits = 0;
@@ -237,6 +244,26 @@ class Engine {
       this.dirty = true;
     }
   }
+  /** The choice a value makes: what it says depends on what was read (a comparison, a length, a condition), the content itself is not in it. */
+  private kOf(v: Iterable<string>): Set<string> {
+    const out = new Set<string>();
+    for (const l of this.labels(v)) out.add(l.startsWith("t:") ? `k:${l.slice(2)}` : l);
+    return out;
+  }
+  private under<T>(extra: Iterable<string>, f: () => T): T {
+    const saved = this.ctl;
+    const next = new Set(saved);
+    for (const x of extra) next.add(x);
+    this.ctl = next;
+    try {
+      return f();
+    } finally {
+      this.ctl = saved;
+    }
+  }
+  private ctlV(v: Set<string>): Set<string> {
+    return this.ctl.size > 0 ? new Set([...v, ...this.ctl]) : v;
+  }
   private idOf(n: object): number {
     let i = this.ids.get(n);
     if (i === undefined) this.ids.set(n, (i = ++this.idSeq));
@@ -249,7 +276,7 @@ class Engine {
     let names = this.fieldNames.get(tok);
     if (!names) this.fieldNames.set(tok, (names = new Set()));
     names.add(name);
-    this.add(this.fieldKey(tok, name), v);
+    this.add(this.fieldKey(tok, name), this.ctl.size > 0 ? [...v, ...this.ctl] : v);
   }
   private readField(tok: string, name: string, out: Set<string>, depth = 0): void {
     if (depth > 8) return;
@@ -283,12 +310,17 @@ class Engine {
         else if (!ORDINARY_ENV.test(name)) out.add(`t:env:${name}`);
         continue;
       }
-      if (t.startsWith("t:")) {
-        if (name === null || !META_FIELD.test(name)) out.add(t);
+      if (t.startsWith("t:") || t.startsWith("k:")) {
+        // the length of what was read is a choice made by it, not its content
+        if (name !== null && /^(length|size|count)$/.test(name)) for (const x of this.kOf([t])) out.add(x);
+        else if (name === null || !META_FIELD.test(name)) out.add(t);
       } else if (t.startsWith("x:")) {
         out.add(t);
       } else if (t.startsWith("o:") || t.startsWith("c:") || t.startsWith("f:") || t.startsWith("ns:")) {
-        if (name === null) {
+        if (name !== null && /^(length|size|count)$/.test(name)) {
+          for (const x of this.kOf([t])) out.add(x);
+          this.readField(t, name, out);
+        } else if (name === null) {
           this.allFields(t, out);
           this.readField(t, "*", out);
         } else this.readField(t, name, out);
@@ -300,7 +332,7 @@ class Engine {
   private labels(v: Iterable<string>, out = new Set<string>(), seen = new Set<string>(), depth = 0): Set<string> {
     for (const t of v) {
       this.tick();
-      if (t.startsWith("t:")) out.add(t);
+      if (t.startsWith("t:") || t.startsWith("k:")) out.add(t);
       else if (t === "x:env") out.add("t:env:*");
       else if ((t.startsWith("o:") || t.startsWith("c:") || t.startsWith("ns:")) && depth < 7 && !seen.has(t)) {
         seen.add(t);
@@ -692,9 +724,11 @@ class Engine {
   }
 
   // ---- sinks -----------------------------------------------------------------------------------------------------------------------
-  private sink(kind: SinkKind, target: string | undefined, vals: Iterable<Iterable<string>>, n: N, sc: Scope): void {
+  private sink(kind: SinkKind, target: string | undefined, vals: Iterable<Iterable<string>>, n: N, sc: Scope, noChoice = false): void {
     const labels = new Set<string>();
     for (const v of vals) this.labels(v, labels);
+    for (const l of this.ctl) labels.add(l);
+    if (noChoice) for (const l of labels) if (l.startsWith("k:")) labels.delete(l);
     if (kind === "ui" || kind === "store" || kind === "route") this.add(R_CELL, labels);
     if (!this.record) return;
     const fnId = this.enclosingFn(sc)?.id ?? -1;
@@ -704,6 +738,8 @@ class Engine {
   }
   private addFlows(labels: Iterable<string>, kind: SinkKind, target: string | undefined, file: string, line: number): void {
     for (const label of labels) {
+      // A choice that reaches a notification, a sound, the page, a log or the plugin's own storage sends nothing out.
+      if (label.startsWith("k:") && !DANGEROUS_SINKS.has(kind) && kind !== "unknown") continue;
       const key = `${label}|${kind}|${target ?? ""}`;
       const prev = this.flows.get(key);
       if (!prev || file < prev.sink.file || (file === prev.sink.file && line < prev.sink.line)) this.flows.set(key, { label, sink: { kind, ...(target !== undefined ? { target } : {}), file, line } });
@@ -716,14 +752,18 @@ class Engine {
       const ns = `ns:${f.index}`;
       for (const name of this.fieldNames.get(ns) ?? []) {
         const v = this.cell(this.fieldKey(ns, name));
-        const labels = this.labels(v);
-        for (const t of this.tokens(v, "f:")) this.labels(this.cell(`ret:${t.slice(2)}`), labels);
+        const labels = new Set([...this.labels(v)].filter((l) => l.startsWith("t:")));
+        for (const t of this.tokens(v, "f:")) for (const l of this.labels(this.cell(`ret:${t.slice(2)}`))) if (l.startsWith("t:")) labels.add(l);
         if (labels.size > 0) this.addFlows(labels, "unknown", `a value that ${f.rel} hands to bb`, f.rel, 0);
       }
     }
   }
-  private unknownSink(why: string, vals: Iterable<Iterable<string>>, n: N, sc: Scope): void {
-    this.sink("unknown", why, vals, n, sc);
+  /**
+   * What is handed to code the analysis cannot read. A choice counts there only where the callee is a function of a package or a computed one:
+   * a call that is only unresolved (`audio.play()`, a parameter nothing was bound to) under a branch is not a way out by itself.
+   */
+  private unknownSink(why: string, vals: Iterable<Iterable<string>>, n: N, sc: Scope, choiceCounts = false): void {
+    this.sink("unknown", why, vals, n, sc, !choiceCounts);
   }
   private source(kind: SourceKind, sc: Scope): void {
     if (!this.record) return;
@@ -744,6 +784,7 @@ class Engine {
     const fn = this.fns[this.fnIndex(id)];
     if (!fn) return new Set();
     if (sc) this.edge(sc, id);
+    if (this.ctl.size > 0) this.add(`ctx:${id}`, this.ctl);
     for (const a of args) this.add(`args:${id}`, a);
     for (let i = 0; i < args.length; i++) {
       const idx = fn.restIndex >= 0 && i >= fn.restIndex ? fn.restIndex : i;
@@ -789,7 +830,7 @@ class Engine {
     switch (p.type) {
       case "Identifier": {
         const k = this.lookup(sc, p.name);
-        if (k) this.add(k, v);
+        if (k) this.add(k, this.ctlV(v));
         else if (v.size > 0) {
           this.add(`g:${p.name}`, v);
           // an undeclared name is a global: other code can read it
@@ -839,7 +880,7 @@ class Engine {
     while (root && root.type === "MemberExpression") root = unwrap(root.object);
     if (root?.type !== "Identifier") return;
     const k = this.lookup(sc, root.name);
-    if (k) this.add(k, [...v].filter((x) => x.startsWith("t:") || x === "x:env"));
+    if (k) this.add(k, this.ctlV(new Set([...v].filter((x) => x.startsWith("t:") || x.startsWith("k:") || x === "x:env"))));
   }
   private assignMember(target: N, v0: Set<string>, sc: Scope, rhs?: N): void {
     const base = this.ev(target.object, sc);
@@ -862,16 +903,24 @@ class Engine {
       }
     }
     // An object we know nothing of (a result of bb's API, a parameter): the data now belongs to it, whoever holds it.
-    if (!placed || [...v].some((x) => x.startsWith("t:") || x === "x:env")) this.taintRoot(target.object, v, sc);
+    if (!placed || [...v].some((x) => x.startsWith("t:") || x.startsWith("k:") || x === "x:env")) this.taintRoot(target.object, v, sc);
     const chain = this.sdkChainRaw(target, sc.file);
     if (chain && /(^|\.)(location\.href|location|window\.location\.href)$/.test(chain)) this.sink("network", this.hostOfText(this.foldPrefix(target, sc.file)) ?? undefined, [v], target, sc);
   }
 
   // ---- expressions -------------------------------------------------------------------------------------------------------------------
   private started = Date.now();
+  /** The clock is an emergency stop only: it never makes a verdict, it makes the whole result «not finished» (see `timedOut`). */
+  private checkClock(): void {
+    if (Date.now() - this.started > MAX_MS) {
+      this.timedOut = true;
+      throw new RangeError("flow time");
+    }
+  }
   private tick(by = 1): void {
     this.visits += by;
-    if (this.visits > MAX_VISITS || ((this.visits & 0x3fff) < by && Date.now() - this.started > MAX_MS)) {
+    if ((this.visits & 0x3fff) < by) this.checkClock();
+    if (this.visits > MAX_VISITS) {
       this.aborted = true;
       throw new RangeError("flow budget");
     }
@@ -924,19 +973,25 @@ class Engine {
         return last;
       }
       case "ConditionalExpression": {
-        this.ev(n.test, sc);
-        return new Set([...this.ev(n.consequent, sc), ...this.ev(n.alternate, sc)]);
+        // which branch is taken is a choice made by the test: the value and what is called in the branches carry it
+        const k = this.kOf(this.ev(n.test, sc));
+        return this.under(k, () => new Set([...this.ev(n.consequent, sc), ...this.ev(n.alternate, sc), ...k]));
       }
-      case "LogicalExpression":
-        return new Set([...this.ev(n.left, sc), ...this.ev(n.right, sc)]);
+      case "LogicalExpression": {
+        const l = this.ev(n.left, sc);
+        const k = this.kOf(l);
+        return this.under(k, () => new Set([...l, ...this.ev(n.right, sc), ...k]));
+      }
       case "BinaryExpression": {
         const l = this.ev(n.left, sc);
         const r = this.ev(n.right, sc);
-        return n.operator === "+" ? new Set([...this.flat(l), ...this.flat(r)]) : new Set();
+        // text made of text is text; a comparison, a sum, a shift is a choice made by what it was made of
+        return n.operator === "+" ? new Set([...this.flat(l), ...this.flat(r)]) : this.kOf([...l, ...r]);
       }
-      case "UnaryExpression":
-        this.ev(n.argument, sc);
-        return n.operator === "void" ? new Set() : new Set();
+      case "UnaryExpression": {
+        const a = this.ev(n.argument, sc);
+        return n.operator === "void" ? new Set() : this.kOf(a);
+      }
       case "UpdateExpression":
         this.ev(n.argument, sc);
         return new Set();
@@ -1315,7 +1370,7 @@ class Engine {
     if (!isNew && this.builtinMethod(n, member ? methodName : null, recvV, calleeV, args, argNodes, out, sc, member !== null)) handled = true;
 
     if (dynamicCall) {
-      this.unknownSink("a call by a computed name", args, n, sc);
+      this.unknownSink("a call by a computed name", args, n, sc, true);
       if (this.fallback) for (const a of args) for (const x of this.flat(a)) out.add(x);
       handled = true;
     }
@@ -1382,7 +1437,12 @@ class Engine {
     }
     if (TIMER_CLEARS.has(name) && !isNew) return out;
     if (TIMERS.has(name) && !isNew) {
-      for (const f of this.tokens(args[0] ?? [], "f:")) for (const x of this.bindCall(f, [], null, sc)) void x;
+      // the delay is a choice made by what it was computed from, and what runs after it is called by that choice
+      const delay = this.kOf(args[1] ?? []);
+      for (const f of this.tokens(args[0] ?? [], "f:")) {
+        this.add(`ctx:${f.slice(2)}`, delay);
+        this.bindCall(f, [], null, sc);
+      }
       return out;
     }
     if (name === "eval" || name === "Function") {
@@ -1681,7 +1741,7 @@ class Engine {
       case "ext": {
         const any = args.some((a) => this.labels(a).size > 0) || this.labels(recvV).size > 0;
         if (any || args.some((a) => this.tokens(a, "f:").length > 0)) {
-          this.unknownSink(`a call to ${method ?? simple ?? "a function"} of a package whose code is not read`, [...args, recvV], n, sc);
+          this.unknownSink(`a call to ${method ?? simple ?? "a function"} of a package whose code is not read`, [...args, recvV], n, sc, true);
           this.escape(args, n, sc);
         }
         for (const a of args) for (const t of this.flat(a)) out.add(t);
@@ -1737,7 +1797,7 @@ class Engine {
     }
     if (method === null) return false;
     const hasObj = [...recvV].some((t) => t.startsWith("o:") || t.startsWith("c:"));
-    const knownRecv = [...recvV].every((t) => t.startsWith("t:") || t.startsWith("o:") || t === "x:env" || t === "x:pure") && (recvV.size > 0 || PURE_METHODS.has(method) || HOF_METHODS.has(method));
+    const knownRecv = [...recvV].every((t) => t.startsWith("t:") || t.startsWith("k:") || t.startsWith("o:") || t === "x:env" || t === "x:pure") && (recvV.size > 0 || PURE_METHODS.has(method) || HOF_METHODS.has(method));
     // methods of values the analysis holds as plain data or containers
     if (!knownRecv && !(recvNodeIsGlobal(callee, sc, this) && PURE_GLOBALS.has((unwrap(callee.object) as N).name))) return false;
     if (HOF_METHODS.has(method) || PURE_METHODS.has(method) || recvNodeIsGlobal(callee, sc, this)) {
@@ -1818,49 +1878,61 @@ class Engine {
       case "ReturnStatement":
         if (s.argument) {
           const fn = this.enclosingFn(sc);
-          if (fn) this.add(`ret:${fn.id}`, this.ev(s.argument, sc));
+          if (fn) this.add(`ret:${fn.id}`, this.ctlV(this.ev(s.argument, sc)));
         }
         return;
       case "ThrowStatement":
-        this.add(EXC_CELL, this.ev(s.argument, sc));
+        this.add(EXC_CELL, this.ctlV(this.ev(s.argument, sc)));
         return;
-      case "IfStatement":
-        this.ev(s.test, sc);
-        this.exec(s.consequent, sc);
-        this.exec(s.alternate, sc);
+      case "IfStatement": {
+        const k = this.kOf(this.ev(s.test, sc));
+        this.under(k, () => {
+          this.exec(s.consequent, sc);
+          this.exec(s.alternate, sc);
+        });
         return;
+      }
       case "BlockStatement":
       case "StaticBlock":
-        for (const x of s.body) this.exec(x, sc);
+        this.execSeq(s.body, sc);
         return;
-      case "ForStatement":
+      case "ForStatement": {
         if (s.init) s.init.type === "VariableDeclaration" ? this.exec(s.init, sc) : this.ev(s.init, sc);
-        if (s.test) this.ev(s.test, sc);
-        if (s.update) this.ev(s.update, sc);
-        this.exec(s.body, sc);
+        const k = s.test ? this.kOf(this.ev(s.test, sc)) : new Set<string>();
+        this.under(k, () => {
+          if (s.update) this.ev(s.update, sc);
+          this.exec(s.body, sc);
+        });
         return;
+      }
       case "ForOfStatement":
       case "ForInStatement": {
         const right = this.ev(s.right, sc);
         const el = s.type === "ForOfStatement" ? this.member(right, "*") : new Set<string>();
-        if (s.type === "ForOfStatement") for (const t of right) if (t.startsWith("t:")) el.add(t);
+        if (s.type === "ForOfStatement") for (const t of right) if (t.startsWith("t:") || t.startsWith("k:")) el.add(t);
         const left = s.left.type === "VariableDeclaration" ? s.left.declarations[0].id : s.left;
         this.bindPattern(left, el, sc);
-        this.exec(s.body, sc);
+        // how many times the body runs is a choice made by what is walked
+        this.under(this.kOf(right), () => this.exec(s.body, sc));
         return;
       }
       case "WhileStatement":
-      case "DoWhileStatement":
-        this.ev(s.test, sc);
-        this.exec(s.body, sc);
+      case "DoWhileStatement": {
+        const k = this.kOf(this.ev(s.test, sc));
+        this.under(k, () => this.exec(s.body, sc));
         return;
-      case "SwitchStatement":
-        this.ev(s.discriminant, sc);
-        for (const c of s.cases) {
-          if (c.test) this.ev(c.test, sc);
-          for (const x of c.consequent) this.exec(x, sc);
-        }
+      }
+      case "SwitchStatement": {
+        const k = this.kOf(this.ev(s.discriminant, sc));
+        this.under(k, () => {
+          const seen = new Set<string>();
+          for (const c of s.cases) {
+            if (c.test) for (const x of this.kOf(this.ev(c.test, sc))) seen.add(x);
+            this.under(seen, () => this.execSeq(c.consequent, sc));
+          }
+        });
         return;
+      }
       case "TryStatement":
         this.exec(s.block, sc);
         if (s.handler) {
@@ -1948,19 +2020,55 @@ class Engine {
     }
   }
 
+  /** A statement list. After a branch on what was read that can leave (`if (bit) return;`), what follows is run, or not, by that choice. */
+  private execSeq(stmts: N[], sc: Scope): void {
+    const saved = this.ctl;
+    try {
+      for (const s of stmts) {
+        this.exec(s, sc);
+        const k = this.exitGuard(s, sc);
+        if (k.size > 0) this.ctl = new Set([...this.ctl, ...k]);
+      }
+    } finally {
+      this.ctl = saved;
+    }
+  }
+  private exitGuard(s: N, sc: Scope): Set<string> {
+    if (!s) return new Set();
+    const loopish = s.type === "ForStatement" || s.type === "ForOfStatement" || s.type === "ForInStatement" || s.type === "WhileStatement" || s.type === "DoWhileStatement" || s.type === "SwitchStatement";
+    if (s.type !== "IfStatement" && !loopish) return new Set();
+    let exits = false;
+    const walk = (n: N): void => {
+      if (exits || !n || typeof n.type !== "string" || isFnNode(n)) return;
+      if (n.type === "ReturnStatement" || n.type === "ThrowStatement" || (!loopish && (n.type === "BreakStatement" || n.type === "ContinueStatement"))) exits = true;
+      else this.children(n, walk);
+    };
+    this.children(s, walk);
+    if (!exits) return new Set();
+    const test = s.type === "SwitchStatement" ? s.discriminant : s.type === "ForOfStatement" || s.type === "ForInStatement" ? s.right : s.test;
+    return test ? this.kOf(this.ev(test, sc)) : new Set();
+  }
+
   // ---- running ---------------------------------------------------------------------------------------------------------------------
   private runFn(fn: FnInfo): void {
     const sc = fn.scope;
-    if (fn.isModule) {
-      for (const s of fn.node.body) this.exec(s, sc);
-      return;
+    // what calls this function (and the choices that made them) decides whether it runs
+    this.ctl = new Set(this.cell(`ctx:${fn.id}`));
+    try {
+      if (fn.isModule) {
+        this.execSeq(fn.node.body, sc);
+        return;
+      }
+      fn.params.forEach((p, i) => this.bindPattern(p, new Set(this.cell(`p:${fn.id}:${i}`)), sc));
+      const node = fn.node;
+      if (node.body.type === "BlockStatement") this.execSeq(node.body.body, sc);
+      else this.add(`ret:${fn.id}`, this.ctlV(this.ev(node.body, sc)));
+    } finally {
+      this.ctl = new Set();
     }
-    fn.params.forEach((p, i) => this.bindPattern(p, new Set(this.cell(`p:${fn.id}:${i}`)), sc));
-    const node = fn.node;
-    if (node.body.type === "BlockStatement") for (const s of node.body.body) this.exec(s, sc);
-    else this.add(`ret:${fn.id}`, this.ev(node.body, sc));
   }
   private pass(): void {
+    this.checkClock();
     this.passNo++;
     for (const fn of [...this.fns]) this.runFn(fn);
   }
@@ -1992,6 +2100,7 @@ class Engine {
       this.pass();
       this.entryExports();
     } catch (err) {
+      if (this.timedOut) return { summaries: [], purposes: [], complete: false, notes: ["the clock stopped the analysis"], timedOut: true };
       complete = false;
       notes.push(this.aborted ? "the analysis ran out of budget" : `the analysis failed: ${String(err instanceof Error ? err.message : err).slice(0, 120)}`);
     }
@@ -2031,12 +2140,16 @@ class Engine {
       if (!kinds.has(source)) continue;
       const details = new Set<string>();
       const sinks: FlowSink[] = [];
+      const dataSeen = new Set<string>();
       for (const { label, sink } of this.flows.values()) {
         const k = this.kindOfLabel(label);
         if (!k || k.source !== source) continue;
         if (k.detail) details.add(k.detail);
-        if (!sinks.some((s) => s.kind === sink.kind && s.target === sink.target)) sinks.push(sink);
+        const id = `${sink.kind}|${sink.target ?? ""}`;
+        if (label.startsWith("t:")) dataSeen.add(id);
+        if (!sinks.some((s) => s.kind === sink.kind && s.target === sink.target)) sinks.push({ ...sink });
       }
+      for (const s of sinks) if (!dataSeen.has(`${s.kind}|${s.target ?? ""}`)) s.choice = true;
       const rank = (s: FlowSink): number => (DANGEROUS_SINKS.has(s.kind) || ((source === "env" || source === "credentials") && s.kind === "route") ? 0 : s.kind === "unknown" ? 1 : s.kind === "store" ? 3 : 2);
       sinks.sort((a, b) => rank(a) - rank(b) || (a.file < b.file ? -1 : a.file > b.file ? 1 : a.line - b.line));
       // What a plugin hands out through its own route or RPC reaches any client of bb's server: for the person's conversations that is the plugin's own page, for secrets it is a way out.

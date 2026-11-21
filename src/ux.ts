@@ -81,7 +81,7 @@ export interface FlowLike {
   source: string;
   detail: string[];
   verdict: "nowhere" | "shown" | "kept" | "leaves" | "unknown";
-  sinks: Array<{ kind: string; target?: string }>;
+  sinks: Array<{ kind: string; target?: string; choice?: boolean }>;
   why?: string;
 }
 export interface PurposeLike {
@@ -186,7 +186,10 @@ export function flowClause(flow: FlowLike, inf = false, maxVerbs = 3): { text: s
   const sinks = flow.sinks.filter((k) => k.kind !== "unknown");
   const bad = sinks.filter((k) => DANGEROUS_KINDS.has(k.kind) || (secret && k.kind === "route"));
   if (flow.verdict === "leaves" && bad.length > 0) {
-    const verbs = leaveVerbs(bad, i);
+    const data = bad.filter((k) => !k.choice);
+    const verbs = leaveVerbs(data, i);
+    // Only the choice goes: what is sent, where, or whether at all is decided by what was read
+    if (data.length < bad.length) verbs.push(i === 0 ? "по содержимому выбирает, что и куда отправить" : "по содержимому выбирать, что и куда отправлять");
     return { text: `и ${joinAnd(verbs.slice(0, maxVerbs))}${verbs.length > maxVerbs ? ` и ещё ${verbs.length - maxVerbs}` : ""}`, level: "danger" };
   }
   if (flow.verdict === "nowhere") return { text: inf ? "и никуда не отправлять" : "и никуда не отправляет", level: "ok" };
@@ -376,13 +379,15 @@ function capabilityBase(c: CapLike): string {
 }
 /** `threads>network:stats.example` in a person's words: «переписки → сеть stats.example». */
 function flowTokenText(t: string): string {
-  const [src, sink = ""] = t.split(">");
+  const [src, rawSink = ""] = t.split(">");
+  const choice = rawSink.startsWith("choice-");
+  const sink = choice ? rawSink.slice(7) : rawSink;
   const source = ({ threads: "переписки", questions: "вопросы агентов", env: "переменные окружения", credentials: "учётные данные", files: "файлы" } as Record<string, string>)[src!] ?? src!;
   const i = sink.indexOf(":");
   const kind = i < 0 ? sink : sink.slice(0, i);
   const target = i < 0 ? "" : sink.slice(i + 1);
   const where = ({ network: "сеть", process: "программа", file: "файл", send: "сообщение в тред", settings: "настройки bb", route: "адрес плагина на сервере bb", unknown: "не видно из кода" } as Record<string, string>)[kind] ?? kind;
-  return `${source} → ${where}${target ? ` ${target}` : ""}`;
+  return `${source} → ${choice ? "выбор, что и куда отправить: " : ""}${where}${target ? ` ${target}` : ""}`;
 }
 /** Tokens of the guard's rights (`network:stats.example`, `env:HOME`, `fs`) in the words of a person; hosts and names stay as they are. */
 function tokensText(tokens: string[]): string {
