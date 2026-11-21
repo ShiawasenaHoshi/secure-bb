@@ -58,6 +58,8 @@ describe("registration: only through the console, and only with its confirmation
     const key = g.guard.confirmEnrollment(enrollment.id);
     expect(key).toMatchObject({ label: "laptop", state: "active" });
     expect((await g.send({ op: "state" })).passkeys.keys).toHaveLength(1);
+    // The page shows where the key is stored: the state carries the key's AAGUID (the one the console prints), nothing secret.
+    expect((await g.send({ op: "state" })).passkeys.keys[0]).toMatchObject({ label: "laptop", aaguid: auth.aaguid.toString("hex") });
     expect((await journal()).find((j) => j.kind === "passkey.enrolled")).toMatchObject({ detail: { key: "laptop", via: "console" } });
   });
 

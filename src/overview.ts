@@ -20,6 +20,9 @@ import type { PublishRow, PublishSettings, PublishState } from "./publish/types.
 import type { SkillGuard, SkillsView } from "./skills/guard.js";
 import type { Watchdog, WatchView } from "./watch/watchdog.js";
 import type { ApprovalRow, LogRow, Policy, QueueRow, Store, WindowRow } from "./store.js";
+import { identityOf } from "../guard/src/trust.ts";
+import { suggestSources } from "./ux.js";
+import { queueUx, type QueueUx, type QueueUxDeps } from "./uxview.js";
 
 export interface WindowView {
   id: number;
@@ -76,7 +79,7 @@ export interface GuardView {
   /** Passkeys: where the page must be opened for them to work, the keys that can touch, whether the console has a registration window open. */
   /** Trust by source and rights: the mode and "my sources", as the guard holds them. Null: a guard that predates it. */
   trust: GuardTrust | null;
-  passkey: { rpId: string; origin: string; keys: Array<{ id: number; label: string; createdAt: number; lastUsedAt: number | null }>; enrollmentOpen: boolean; totpOff: boolean } | null;
+  passkey: { rpId: string; origin: string; keys: Array<{ id: number; label: string; createdAt: number; lastUsedAt: number | null; aaguid?: string }>; enrollmentOpen: boolean; totpOff: boolean } | null;
 }
 export interface Overview {
   /** Present in guard mode only. */
@@ -115,6 +118,10 @@ export interface Overview {
   alive: AliveView;
   /** Agent watch (guard mode only): what the guard found in the agents' configurations and memory. */
   agents?: AgentsView;
+  /** UX v1: by queue id, the plain-words facts of a held version (the author's why, the thread chain, how far the source is trusted). */
+  ux: Record<number, QueueUx>;
+  /** Sources of the installed plugins that "my sources" could take, as the guard names them (for the first-run wizard). */
+  sourceSuggestions: string[];
 }
 const EMPTY_SKILLS: SkillsView = { baselineAt: null, lastScanAt: null, pinned: { total: 0, builtin: 0, baseline: 0, approved: 0 }, open: [], recent: [], trusted: [], blind: [], unchecked: [] };
 
@@ -153,6 +160,8 @@ export interface OverviewDeps {
   taintedThreads?: () => Array<{ threadId: string; kinds: string[]; first: number; last: number }>;
   /** Guard mode: the agent watch's view (asked fresh at each overview: one cheap request to the guard). */
   agents?: () => Promise<AgentsView>;
+  /** Where a held version came from (thread chain, titles). Absent in tests that do not touch it. */
+  threadsUx?: QueueUxDeps;
 }
 
 export async function windowView(d: Pick<OverviewDeps, "descendants" | "now">, w: WindowRow): Promise<WindowView> {
@@ -346,6 +355,12 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
     const row = d.store.latestScanFor({ contentHash: q.contentHash, localHash: proposal?.localHash ?? null });
     if (row) queueScans[q.id] = scanView(row);
   }
+  const ux: Record<number, QueueUx> = {};
+  for (const q of queue) {
+    if (q.status !== "held") continue;
+    const proposal = q.proposalId === null ? null : d.store.getProposal(q.proposalId);
+    ux[q.id] = await queueUx(d.threadsUx ?? {}, { rootDir: q.rootDir ?? proposal?.snapshotDir ?? null, source: q.source, sourceKind: q.sourceKind, threadId: q.threadId }, guarded?.view.trust ?? null);
+  }
   const ai: AiView = {
     settings,
     availability: d.scanner?.availability(settings) ?? { claude: { mode: "unavailable", detail: "скан не подключён" }, cursor: null },
@@ -381,6 +396,8 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
     trustedRepos: d.store.trustedRepos(),
     sentinel: sentinelView(d),
     alive: d.alive?.view() ?? { lastBeat: null, gaps: [], safeMode: null, safeModeSeen: false },
+    ux,
+    sourceSuggestions: suggestSources(plugins.filter(isThirdParty).map((p) => ({ source: p.source })), (k, src) => identityOf(k, src)?.id ?? null),
   };
 }
 

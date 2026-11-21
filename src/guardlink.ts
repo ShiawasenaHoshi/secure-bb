@@ -152,7 +152,7 @@ export interface GuardState {
   now: number;
   totp: { registered: boolean; disabled?: boolean; blockedUntil: number };
   /** Absent in a guard that predates passkeys. */
-  passkeys?: { rpId: string; origin: string; keys: Array<{ id: number; label: string; createdAt: number; lastUsedAt: number | null }>; enrollmentOpen: boolean };
+  passkeys?: { rpId: string; origin: string; keys: Array<{ id: number; label: string; createdAt: number; lastUsedAt: number | null; aaguid?: string }>; enrollmentOpen: boolean };
   policy: GuardPolicy;
   /** Absent in a guard that predates trust by source. */
   trust?: GuardTrust;

@@ -128,6 +128,11 @@ export default async function plugin(bb: BbPluginApi) {
     },
   };
 
+  const threadTitle = async (threadId: string): Promise<string | null> => {
+    const t = (await bb.sdk.threads.get({ threadId })) as unknown as { title?: unknown } | null;
+    return typeof t?.title === "string" ? t.title : null;
+  };
+
   // ---- skills (stage 6): read whole through bb's API, pinned and checked by the guard below ---------------
   const skillSource = bbSkillSource(bb.sdk);
   const skillReader = new SkillReader(skillSource);
@@ -374,7 +379,7 @@ export default async function plugin(bb: BbPluginApi) {
   const alive = new Alive({ store, now, safeMode: () => watchSource.safeMode().catch(() => null), log: (m) => bb.log.error(m) });
   if ((await alive.start()) !== null) changed();
   const overview = () =>
-    buildOverview({ guard: guardLink ?? undefined, ...(agents ? { agents: () => agents.refresh(false) } : {}), alive, sentinel, scanner: aiScanner, publisher, store, gate, now, hookRegistered, listPlugins, probe, descendants: threads.descendants, watch, skills: skillGuard, journal: () => journal(), taintedThreads: () => store.taintedThreads(20) });
+    buildOverview({ guard: guardLink ?? undefined, ...(agents ? { agents: () => agents.refresh(false) } : {}), alive, sentinel, scanner: aiScanner, publisher, store, gate, now, hookRegistered, listPlugins, probe, descendants: threads.descendants, threadsUx: { ancestors: threads.ancestors, threadTitle }, watch, skills: skillGuard, journal: () => journal(), taintedThreads: () => store.taintedThreads(20) });
 
   // ---- after-the-fact mode ------------------------------------------------
   const scanner = new AfterFactScanner({
