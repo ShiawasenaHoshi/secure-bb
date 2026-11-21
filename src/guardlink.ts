@@ -62,9 +62,38 @@ export interface GuardPolicy {
   capMin: number;
   mode: "sliding" | "fixed";
 }
+/** What a passkey touch sends back to the guard (all base64url, as the browser gives it). */
+export interface PasskeyAssertion {
+  credentialId: string;
+  clientDataJSON: string;
+  authenticatorData: string;
+  signature: string;
+}
+/** A touch: a TOTP code (a plain string) or a passkey assertion. */
+export type GuardProof = string | { passkey: PasskeyAssertion };
+const proofFields = (p: GuardProof): Record<string, unknown> => (typeof p === "string" ? { code: p } : { passkey: p.passkey });
+
+/** An action the guard issues a challenge for (see the guard's design: the signature is good for this action only). */
+export type GuardAction =
+  | { op: "approve"; requestId: number }
+  | { op: "open-window"; pluginId: string; minutes?: number; scope?: "tree" | "thread" }
+  | { op: "policy"; patch: Partial<GuardPolicy> }
+  | { op: "touch"; purpose: string };
+export interface GuardChallenge {
+  challenge: string;
+  allowCredentials: Array<{ type: "public-key"; id: string }>;
+  /** The guard's own words about what is about to be approved (the page shows them next to the touch). */
+  description: string;
+  rpId: string;
+  origin: string;
+  expiresAt: number;
+}
+
 export interface GuardState {
   now: number;
-  totp: { registered: boolean; blockedUntil: number };
+  totp: { registered: boolean; disabled?: boolean; blockedUntil: number };
+  /** Absent in a guard that predates passkeys. */
+  passkeys?: { rpId: string; origin: string; keys: Array<{ id: number; label: string; createdAt: number; lastUsedAt: number | null }>; enrollmentOpen: boolean };
   policy: GuardPolicy;
   queue: GuardQueueEntry[];
   approvals: GuardApproval[];
@@ -103,14 +132,18 @@ export interface GuardPort {
   /** Asks the guard to keep a version for a human; `stop`: even if a window is open (a window does not lift it). Tightening: no code. */
   hold(ctx: GuardHoldRequest, stop: boolean): Promise<void>;
   annotate(target: { requestId?: number; contentHash?: string }, findings: unknown): Promise<void>;
-  approve(requestId: number, code: string): Promise<{ approval: GuardApproval }>;
+  approve(requestId: number, proof: GuardProof): Promise<{ approval: GuardApproval }>;
   /** Tightening: no code. */
   dismiss(requestId: number): Promise<void>;
-  openWindow(pluginId: string, minutes: number | undefined, code: string): Promise<GuardWindow>;
+  openWindow(pluginId: string, minutes: number | undefined, proof: GuardProof, scope?: "tree" | "thread"): Promise<GuardWindow>;
   closeWindow(target: { windowId?: number; pluginId?: string }): Promise<void>;
   revoke(target: { approvalId?: number; pluginId?: string }): Promise<number>;
-  policy(patch?: Partial<GuardPolicy>, code?: string): Promise<GuardPolicy>;
-  touch(purpose: string, code: string): Promise<void>;
+  policy(patch?: Partial<GuardPolicy>, proof?: GuardProof): Promise<GuardPolicy>;
+  touch(purpose: string, proof: GuardProof): Promise<void>;
+  /** A challenge for one action; the touch that answers it goes with the command itself. */
+  challenge(action: GuardAction): Promise<GuardChallenge>;
+  /** Registering a key: `{token}` → creation options; `{token, clientDataJSON, attestationObject}` → the key waits for the console. */
+  passkeyRegister(body: { token: string; clientDataJSON?: string; attestationObject?: string }): Promise<Record<string, any>>;
   verifyJournal(): Promise<GuardJournalReport>;
 }
 
@@ -173,14 +206,14 @@ export class GuardLink implements GuardPort {
   async annotate(target: { requestId?: number; contentHash?: string }, findings: unknown): Promise<void> {
     await this.call({ op: "annotate", ...target, findings });
   }
-  async approve(requestId: number, code: string): Promise<{ approval: GuardApproval }> {
-    return (await this.call({ op: "approve", requestId, code })) as unknown as { approval: GuardApproval };
+  async approve(requestId: number, proof: GuardProof): Promise<{ approval: GuardApproval }> {
+    return (await this.call({ op: "approve", requestId, ...proofFields(proof) })) as unknown as { approval: GuardApproval };
   }
   async dismiss(requestId: number): Promise<void> {
     await this.call({ op: "dismiss", requestId });
   }
-  async openWindow(pluginId: string, minutes: number | undefined, code: string): Promise<GuardWindow> {
-    const r = await this.call({ op: "open-window", pluginId, ...(minutes === undefined ? {} : { minutes }), code });
+  async openWindow(pluginId: string, minutes: number | undefined, proof: GuardProof, scope?: "tree" | "thread"): Promise<GuardWindow> {
+    const r = await this.call({ op: "open-window", pluginId, ...(minutes === undefined ? {} : { minutes }), ...(scope === undefined ? {} : { scope }), ...proofFields(proof) });
     return r.window as GuardWindow;
   }
   async closeWindow(target: { windowId?: number; pluginId?: string }): Promise<void> {
@@ -189,12 +222,20 @@ export class GuardLink implements GuardPort {
   async revoke(target: { approvalId?: number; pluginId?: string }): Promise<number> {
     return Number((await this.call({ op: "revoke", ...target })).revoked);
   }
-  async policy(patch?: Partial<GuardPolicy>, code?: string): Promise<GuardPolicy> {
-    const r = await this.call({ op: "policy", ...(patch === undefined ? {} : { patch }), ...(code === undefined ? {} : { code }) });
+  async policy(patch?: Partial<GuardPolicy>, proof?: GuardProof): Promise<GuardPolicy> {
+    const r = await this.call({ op: "policy", ...(patch === undefined ? {} : { patch }), ...(proof === undefined ? {} : proofFields(proof)) });
     return r.policy as GuardPolicy;
   }
-  async touch(purpose: string, code: string): Promise<void> {
-    await this.call({ op: "touch", purpose, code });
+  async touch(purpose: string, proof: GuardProof): Promise<void> {
+    await this.call({ op: "touch", purpose, ...proofFields(proof) });
+  }
+  async challenge(action: GuardAction): Promise<GuardChallenge> {
+    const r = await this.call({ op: "challenge", action });
+    return { challenge: r.challenge, allowCredentials: r.allowCredentials, description: r.description, rpId: r.rpId, origin: r.origin, expiresAt: r.expiresAt };
+  }
+  async passkeyRegister(body: { token: string; clientDataJSON?: string; attestationObject?: string }): Promise<Record<string, any>> {
+    const { ok: _ok, id: _id, ...rest } = await this.call({ op: "passkey-register", ...body });
+    return { ok: true, ...rest };
   }
   async verifyJournal(): Promise<GuardJournalReport> {
     return (await this.call({ op: "journal-verify" })) as unknown as GuardJournalReport;

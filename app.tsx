@@ -19,6 +19,8 @@ import { OUTCOME_LABEL, firedText, verdictText } from "./src/sentinel/view";
 import type { QuestionView } from "./src/sentinel/view";
 import type { FeedRow } from "./src/sentinel/types";
 import { T } from "./src/text";
+import { createCredential, getAssertion, originProblem, type CreationOptions } from "./src/webauthn";
+import type { PasskeyAssertion } from "./src/guardlink";
 
 // ---------------------------------------------------------------- helpers --
 
@@ -120,6 +122,39 @@ function CodeField({ value, onChange }: { value: string; onChange: (v: string) =
 }
 
 type Rpc = ReturnType<typeof useRpc<SecureBbRpc>>;
+
+// ------------------------------------------------------------------ passkey --
+// Guard mode only. The guard issues a challenge bound to ONE action and describes it in its own words; the browser signs it with a key
+// that never leaves the device (Touch ID); the signature goes with the command in place of a code. A captured signature is good for that
+// action only, once. The touch dialog of the system does not say what is signed, so the guard's sentence is shown here, before and after.
+interface PasskeyState {
+  /** At least one key can touch. */
+  has: boolean;
+  /** Codes are switched off at the guard: only keys work. */
+  keyOnly: boolean;
+  /** Why a touch cannot be made from this page right now (wrong address, no WebAuthn), or null. */
+  problem: string | null;
+}
+function usePasskey(ov: Overview): PasskeyState {
+  const pk = ov.guard?.passkey ?? null;
+  if (!pk) return { has: false, keyOnly: false, problem: null };
+  const supported = typeof navigator !== "undefined" && typeof navigator.credentials?.get === "function";
+  const problem = !supported ? "В этом браузере нет WebAuthn." : originProblem(window.location.origin, pk.origin);
+  return { has: pk.keys.length > 0, keyOnly: pk.keys.length > 0 && pk.totpOff, problem };
+}
+type TouchQuery = Record<string, unknown>;
+/** Asks the guard for a challenge for this action, shows its description, and gets the touch. `null`: the change needs no touch. */
+async function touchFor(rpc: Rpc, query: TouchQuery, shown: (description: string) => void): Promise<{ passkey: PasskeyAssertion; description: string } | null> {
+  const c = await rpc.call("passkey.challenge", query as never);
+  if (!c.needed) return null;
+  shown(c.description);
+  const passkey = await getAssertion(c, navigator.credentials as never, window.location.origin);
+  return { passkey, description: c.description };
+}
+/** Under a button that touches: what the guard says is being approved (before the touch), and what it said after. */
+function TouchNote({ text }: { text: string | null }) {
+  return text ? <p className={`mt-1 text-sm ${muted}`}>{text}</p> : null;
+}
 
 // ----------------------------------------------------- approval session ----
 // The session token lives ONLY in this component's memory (state): not localStorage, not a cookie, not the URL. Reloading the page
@@ -746,7 +781,7 @@ function Registration({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<type
     ) : (
       <div className={`${card} border-2 border-destructive`}>
         <h3 className="text-base font-semibold text-destructive">Второй фактор не зарегистрирован у сторожа</h3>
-        <p className="mt-1">Регистрация — только на консоли машины, где работает сторож: <span className="font-mono">sudo sbb-guard totp-register</span> (QR выводится в терминал). Через bb секрет не проходит, поэтому его не может перехватить плагин.</p>
+        <p className="mt-1">Регистрация — только на консоли машины, где работает сторож: <span className="font-mono">sudo sbb-guard totp-register</span> (QR выводится в терминал) или passkey: <span className="font-mono">sbb-guard passkey-enroll</span>. Через bb секрет не проходит, поэтому его не может перехватить плагин.</p>
         {ov.guard.connected ? null : <p className="mt-1 text-destructive">Сторож сейчас не отвечает.</p>}
       </div>
     );
@@ -921,6 +956,20 @@ function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; rpc: Re
   const liftingBlock = blocked && ack;
   const disabled = act.busy || !ap.ready(code, liftingBlock) || !registered || unsafeDirNow;
   const done = () => setCode("");
+  const pk = usePasskey(ov);
+  const [touching, setTouching] = useState<string | null>(null);
+  /** Approves or opens a window with a touch instead of a code. */
+  const touch = (kind: "approve" | "window.open", ack = false) =>
+    void act.run(async () => {
+      setTouching(null);
+      const t = await touchFor(rpc, { kind, queueId: q.id, ...(kind === "approve" ? { acknowledgeBlock: ack } : {}) }, (d) => setTouching(`Подтвердите касанием. Сторож: «${d}»`));
+      if (!t) throw new Error("касание не требуется");
+      if (kind === "approve") await rpc.call("queue.approve", { id: q.id, passkey: t.passkey, acknowledgeBlock: ack });
+      else await rpc.call("window.open", { queueId: q.id, passkey: t.passkey });
+      setTouching(null);
+      setAck(false);
+      return { note: `Одобрено касанием. Сторож описал действие так: «${t.description}» (системное окно Touch ID этого не показывает; точное действие записано в журнале сторожа).` };
+    });
   // The directory can be changed by someone other than the server's user: no code approves it; fix the directory, then it is looked at again.
   const unsafeDir = q.reason?.startsWith("каталог доступен на запись другим") ?? false;
   return (
@@ -958,13 +1007,20 @@ function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; rpc: Re
               <details className="rounded-md border border-red-300 p-2 dark:border-red-900">
                 <summary className="cursor-pointer text-red-700 dark:text-red-400">Всё равно одобрить (опасно)…</summary>
                 <div className="mt-2 flex flex-wrap items-center gap-2">
-                  <RoutineCode value={code} onChange={setCode} dangerous />
+                  {pk.keyOnly ? null : <RoutineCode value={code} onChange={setCode} dangerous />}
                   <label className="flex items-center gap-1 text-xs">
                     <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} /> понимаю риск: проверки нашли жёсткий признак
                   </label>
-                  <button className={btnDanger} disabled={disabled || !ack} onClick={() => void act.run(async () => { const r = await ap.routine(code, (proof) => rpc.call("queue.approve", { id: q.id, ...proof, acknowledgeBlock: ack }), true); done(); setAck(false); return r; })}>
-                    Снять блок и одобрить
-                  </button>
+                  {pk.has ? (
+                    <button className={btnDanger} disabled={act.busy || !ack || pk.problem !== null || !registered || unsafeDirNow} onClick={() => touch("approve", true)}>
+                      Снять блок и одобрить касанием
+                    </button>
+                  ) : null}
+                  {pk.keyOnly ? null : (
+                    <button className={btnDanger} disabled={disabled || !ack} onClick={() => void act.run(async () => { const r = await ap.routine(code, (proof) => rpc.call("queue.approve", { id: q.id, ...proof, acknowledgeBlock: ack }), true); done(); setAck(false); return r; })}>
+                      {pk.has ? "Снять блок и одобрить кодом" : "Снять блок и одобрить"}
+                    </button>
+                  )}
                 </div>
               </details>
             </>
@@ -973,12 +1029,31 @@ function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; rpc: Re
               <button className={btn} disabled={act.busy} onClick={() => void act.run(async () => { await rpc.call("queue.dismiss", { id: q.id }); })}>
                 Отклонить
               </button>
-              <RoutineCode value={code} onChange={setCode} dangerous={false} />
+              {pk.has ? (
+                <>
+                  <button className={btnPrimary} disabled={act.busy || pk.problem !== null || !registered || unsafeDirNow} onClick={() => touch("approve")}>
+                    Одобрить касанием
+                  </button>
+                  {q.threadId && q.id > 0 ? (
+                    <button className={btn} disabled={act.busy || pk.problem !== null || !registered} onClick={() => touch("window.open")}>
+                      Открыть окно касанием
+                    </button>
+                  ) : null}
+                </>
+              ) : null}
+              {pk.keyOnly ? null : (
+                <>
+                  {pk.has ? <span className={muted}>запасной путь — код:</span> : null}
+                  <RoutineCode value={code} onChange={setCode} dangerous={false} />
+                </>
+              )}
               <ScanButton ov={ov} target={{ queueId: q.id }} rpc={rpc} refetch={refetch} />
-              <button className={btnPrimary} disabled={disabled} onClick={() => void act.run(async () => { const r = await ap.routine(code, (proof) => rpc.call("queue.approve", { id: q.id, ...proof, acknowledgeBlock: false }), false); done(); return r; })}>
-                Одобрить версию
-              </button>
-              {q.threadId ? (
+              {pk.keyOnly ? null : (
+                <button className={pk.has ? btn : btnPrimary} disabled={disabled} onClick={() => void act.run(async () => { const r = await ap.routine(code, (proof) => rpc.call("queue.approve", { id: q.id, ...proof, acknowledgeBlock: false }), false); done(); return r; })}>
+                  Одобрить версию{pk.has ? " кодом" : ""}
+                </button>
+              )}
+              {q.threadId && !pk.keyOnly ? (
                 <button className={btn} disabled={disabled} onClick={() => void act.run(async () => { await ap.routine(code, (proof) => rpc.call("window.open", { queueId: q.id, ...proof })); done(); })}>
                   Открыть окно
                 </button>
@@ -988,6 +1063,8 @@ function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; rpc: Re
         </div>
       ) : null}
       {held && !registered ? <p className={`mt-2 ${muted}`}>Сначала зарегистрируйте второй фактор.</p> : null}
+      {held && pk.has && pk.problem ? <p className="mt-2 text-destructive">{pk.problem}</p> : null}
+      <TouchNote text={touching} />
       <Msg error={act.error} ok={act.ok} />
     </div>
   );
@@ -1057,6 +1134,8 @@ function PolicyCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof
   const [autoSafe, setAutoSafe] = useState(p.autoSafe);
   const [code, setCode] = useState("");
   const act = useCodeAction(refetch);
+  const pk = usePasskey(ov);
+  const [touching, setTouching] = useState<string | null>(null);
   useEffect(() => {
     setAutoSafe(p.autoSafe);
     setWindowMin(String(p.windowMin));
@@ -1114,22 +1193,30 @@ function PolicyCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof
           <p className="mt-1 rounded-md border border-destructive p-2 text-destructive">{T.autoSafeWarning}</p>
         </>
       )}
-      <div className="mt-3 flex items-center gap-2">
-        <CodeField value={code} onChange={setCode} />
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        {pk.has ? <span className={muted}>касание или код:</span> : null}
+        {pk.keyOnly ? null : <CodeField value={code} onChange={setCode} />}
         <button
           className={btnPrimary}
-          disabled={act.busy}
+          disabled={act.busy || (pk.has && pk.problem !== null && pk.keyOnly)}
           onClick={() =>
             void act.run(async () => {
-              await rpc.call("policy.set", { autoSafe, windowMin: Number(windowMin), capMin: Number(capMin), mode, scope, cfgWindowMin: Number(cfgWindowMin), cfgCapMin: Number(cfgCapMin), cfgMode, ...(code.length === 6 ? { code } : {}) });
+              const change = { autoSafe, windowMin: Number(windowMin), capMin: Number(capMin), mode, scope, cfgWindowMin: Number(cfgWindowMin), cfgCapMin: Number(cfgCapMin), cfgMode };
+              // With a key and no code typed: the touch (if the change widens anything; a narrowing needs none).
+              const t = pk.has && code.length !== 6 ? await touchFor(rpc, { kind: "policy", ...change, autoSafe: undefined }, (d) => setTouching(`Подтвердите касанием. Сторож: «${d}»`)) : null;
+              await rpc.call("policy.set", { ...change, ...(t ? { passkey: t.passkey } : code.length === 6 ? { code } : {}) });
               setCode("");
+              setTouching(null);
+              return t ? { note: `Сохранено касанием. Сторож описал действие так: «${t.description}».` } : undefined;
             })
           }
         >
-          Сохранить
+          {pk.has && code.length !== 6 ? "Сохранить (касанием, если расширяет)" : "Сохранить"}
         </button>
       </div>
-      <Msg error={act.error} />
+      {pk.has && pk.problem ? <p className="mt-1 text-destructive">{pk.problem}</p> : null}
+      <TouchNote text={touching} />
+      <Msg error={act.error} ok={act.ok} />
     </div>
   );
 }
@@ -1554,12 +1641,52 @@ function GuardAlarm({ ov }: { ov: Overview }) {
   return null;
 }
 
+/** Registering a key: the token comes from the console of the machine where the guard runs; the key is not active until it is confirmed there. */
+function PasskeyCard({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; refetch: () => void }) {
+  const pk = ov.guard?.passkey ?? null;
+  const [token, setToken] = useState("");
+  const act = useCodeAction(refetch);
+  const state = usePasskey(ov);
+  if (!pk) return null;
+  const add = () =>
+    void act.run(async () => {
+      const first = await rpc.call("passkey.register", { token });
+      const options = first.options as CreationOptions | undefined;
+      if (!options) throw new Error("сторож не выдал параметры регистрации");
+      const made = await createCredential(options, navigator.credentials as never, window.location.origin, pk.origin);
+      const done = await rpc.call("passkey.register", { token, ...made });
+      setToken("");
+      return { note: typeof done.note === "string" ? done.note : "Ключ зарегистрирован; подтвердите его на консоли (y)." };
+    });
+  return (
+    <div className={card}>
+      <h3 className="font-semibold">Passkey (касание вместо кода)</h3>
+      <p className={`mt-1 ${muted}`}>
+        Подпись привязана к действию, которое описал сторож, и годится один раз: код, который прошёл через процесс bb, мог перехватить плагин, подпись — нет.
+        Ключи: {pk.keys.length === 0 ? "нет" : pk.keys.map((k) => `${k.label}${k.lastUsedAt ? ` (последний раз ${when(k.lastUsedAt)})` : ""}`).join("; ")}.
+        {pk.totpOff ? " Коды (TOTP) у сторожа выключены: подтверждает только ключ." : " Код остаётся запасным путём."}
+      </p>
+      {state.problem ? <p className="mt-2 text-destructive">{state.problem}</p> : null}
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <input className="w-52 rounded-md border border-border bg-background px-2 py-1.5 font-mono text-sm" placeholder="XXXX-XXXX-XXXX" aria-label="Токен с консоли сторожа" value={token} onChange={(e) => setToken(e.target.value.slice(0, 40))} />
+        <button className={btn} disabled={act.busy || token.trim() === "" || state.problem !== null || !pk.enrollmentOpen} onClick={add}>
+          Добавить passkey
+        </button>
+        {pk.enrollmentOpen ? null : <span className={muted}>Окно регистрации закрыто: на консоли сторожа выполните <span className="font-mono">sbb-guard passkey-enroll</span> (5 минут, одноразовый токен).</span>}
+      </div>
+      <p className={`mt-1 ${muted}`}>Ключ заработает только после подтверждения <span className="font-mono">y</span> на консоли: так вредный плагин не сможет зарегистрировать свой ключ раньше вас. Список и удаление ключей — только консоль (<span className="font-mono">passkey-list</span>, <span className="font-mono">passkey-remove</span>).</p>
+      <Msg error={act.error} ok={act.ok} />
+    </div>
+  );
+}
+
 function GuardCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void }) {
   const g = ov.guard;
   const act = useCodeAction(refetch);
   if (!g) return null;
   return (
     <div className="space-y-3">
+      <PasskeyCard ov={ov} rpc={rpc} refetch={refetch} />
       <div className={card}>
         <p>
           Одобрения, окна доверия и секрет второго фактора — у <b>сторожа</b> (отдельный процесс и пользователь ОС). Здесь только интерфейс, проверки и «стоп по новой возможности»: этот плагин может лишь <b>добавить</b> удержание, разрешает только сторож.
@@ -1567,7 +1694,7 @@ function GuardCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof 
         <p className={`mt-1 ${muted}`}>
           {g.connected ? "Сторож отвечает." : "Сторож не отвечает."}
           {g.journal ? ` Журнал сторожа: ${g.journal.valid ? "цепочка цела" : "НАРУШЕН"}, записей ${g.journal.entries}, голова ${g.journal.head ?? "—"}.` : ""}
-          {" "}Код, введённый здесь, проходит через процесс bb, поэтому вредный плагин мог бы его перехватить; после действия в журнале видно, что именно одобрено.
+          {" "}Код, введённый здесь, проходит через процесс bb, поэтому вредный плагин мог бы его перехватить (с passkey подпись привязана к действию); после действия в журнале видно, что именно одобрено и чем.
         </p>
         <div className="mt-2">
           <button className={btn} disabled={act.busy} onClick={() => void act.run(async () => { await rpc.call("guard.verify"); })}>Проверить журнал сторожа</button>

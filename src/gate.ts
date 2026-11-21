@@ -13,7 +13,7 @@ import type { AiSettings } from "./scan/types.js";
 import { normalizePattern } from "./taint/repos.js";
 import { checkBranch, checkRepoUrl, sameSettings } from "./publish/validate.js";
 import type { PublishSettings } from "./publish/types.js";
-import type { GuardLookup, GuardPort, GuardState } from "./guardlink.js";
+import type { GuardLookup, GuardPort, GuardProof, GuardState } from "./guardlink.js";
 import { T } from "./text.js";
 import { generateSecret, otpauthUri, verifyTotp, stepAt } from "./totp.js";
 import type { ApprovalRow, Policy, ProposalRow, QueueRow, Store, WindowRow } from "./store.js";
@@ -689,7 +689,7 @@ export class Gate {
    * Opens a window at the guard (with a code, checked there), then remembers here which thread it belongs to and what the plugin could do at that moment.
    * The queue entry is the guard's; the thread comes from the proposal whose snapshot directory is the entry's directory.
    */
-  async openGuardWindow(entry: { id: number; pluginId: string; contentHash: string; rootDir: string }, code: string, scope?: "tree" | "thread"): Promise<WindowRow> {
+  async openGuardWindow(entry: { id: number; pluginId: string; contentHash: string; rootDir: string }, proof: GuardProof, scope?: "tree" | "thread"): Promise<WindowRow> {
     const guard = this.d.guard!;
     let proposal: ProposalRow | null = null;
     try {
@@ -703,7 +703,8 @@ export class Gate {
     if (found !== null && bySeverity(found, "block").length > 0)
       throw new GateError("invalid", "this version was blocked by the checks; a window cannot be opened on it (approve the version knowingly, or fix the plugin)");
     const policy = this.store.policy();
-    const gw = await guard.openWindow(entry.pluginId, undefined, code);
+    // The thread scope travels with the touch (a passkey signature covers it): the page asked for a challenge with the same one.
+    const gw = await guard.openWindow(entry.pluginId, undefined, proof, scope ?? policy.scope);
     for (const old of this.store.unclosedWindows()) if (old.pluginId === entry.pluginId) this.store.closeWindow(old.id, "reopened");
     const w = this.store.insertWindow({
       pluginId: entry.pluginId,

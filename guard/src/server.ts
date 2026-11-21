@@ -3,6 +3,9 @@
 //   → {"op":"decide","pluginId":"x","version":"1.0.0","contentHash":"…","rootDir":"…","source":"…","sourceKind":"path","trigger":"install"}
 //   ← {"ok":true,"action":"wait","reason":"held by secure-bb guard: review #3","requestId":3}
 //   ← {"ok":false,"error":{"code":"invalid_code","message":"…"}}
+//   → {"op":"challenge","action":{"op":"approve","requestId":3}}
+//   ← {"ok":true,"challenge":"…","allowCredentials":[{"type":"public-key","id":"…"}],"description":"…","rpId":"localhost","origin":"http://localhost:38886","expiresAt":…}
+//   → {"op":"approve","requestId":3,"passkey":{"credentialId":"…","clientDataJSON":"…","authenticatorData":"…","signature":"…"}}   (instead of "code")
 //
 // Access control is the socket's file mode (0660, the group that holds only the bb user), the way the design doc
 // says. Node cannot read the peer's uid, so the guard does not try to tell callers apart: every op it serves is
@@ -51,8 +54,14 @@ export function dispatch(guard: Guard, req: unknown, version: string): Record<st
     case "policy": {
       if (r.patch === undefined) return { policy: guard.policy() };
       if (typeof r.patch !== "object" || r.patch === null) throw new GuardError("invalid", "patch is an object");
-      return { policy: guard.setPolicy(r.patch as Record<string, never>, r.code) };
+      return { policy: guard.setPolicy(r.patch as Record<string, never>, { code: r.code, passkey: r.passkey }) };
     }
+    // Passkeys: the page asks for a challenge bound to an action, and registers a key with the console's one-time token. Listing, confirming and
+    // removing keys, and switching codes off, are console commands and have no op here.
+    case "challenge":
+      return guard.challenge(r);
+    case "passkey-register":
+      return guard.passkeyRegister(r);
     case "touch":
       return guard.touch(r);
     case "journal-verify": {

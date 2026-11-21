@@ -7,13 +7,31 @@
 //    decide nothing a human has not already decided): decide, state, lookup, annotate, close-window, revoke, dismiss (held entries only);
 //  - with a touch (a TOTP code): approve, open-window, policy, touch.
 // The TOTP secret is only ever written by `sbb-guard totp-register` on the console, and is never returned
-// by anything in this file.
-import { readFileSync, renameSync, writeFileSync, openSync, closeSync, writeSync, constants } from "node:fs";
+// by anything in this file. A touch is either a TOTP code or a passkey signature over a challenge the guard issued for exactly
+// that action (see "Passkeys" below); passkeys are registered only through the console (`sbb-guard passkey-enroll`).
+import { readFileSync, renameSync, unlinkSync, writeFileSync, openSync, closeSync, writeSync, constants } from "node:fs";
+import { timingSafeEqual } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
+import { DEFAULT_ORIGIN, DEFAULT_RP_ID, type RelyingParty } from "./config.ts";
 import { append, HeadFile, readHead, verify, type JournalHead, type JournalReport } from "./journal.ts";
+import {
+  b64u,
+  fromB64u,
+  newNonce,
+  newToken,
+  parseAttestationObject,
+  parseAuthData,
+  parseClientData,
+  PasskeyError,
+  sha256,
+  tokenDigest,
+  verifyEs256,
+  FLAG_UP,
+  FLAG_UV,
+} from "./passkey.ts";
 import { verifyTotp } from "./totp.ts";
 
-export type GuardErrorCode = "invalid" | "not_found" | "conflict" | "not_registered" | "invalid_code" | "blocked" | "unknown_op";
+export type GuardErrorCode = "invalid" | "not_found" | "conflict" | "not_registered" | "invalid_code" | "invalid_passkey" | "expired" | "blocked" | "unknown_op";
 
 export class GuardError extends Error {
   readonly code: GuardErrorCode;
@@ -25,6 +43,10 @@ export class GuardError extends Error {
 
 export const HOUR_MS = 3_600_000;
 export const MAX_FAILURES = 5;
+/** The window the console opens for registering a passkey, and how long a challenge lives. */
+export const ENROLL_WINDOW_MS = 5 * 60_000;
+export const CHALLENGE_TTL_MS = 2 * 60_000;
+const MAX_OPEN_CHALLENGES = 200;
 const MAX_HOLDS_PER_HOUR = 200;
 const MAX_QUEUE_ROWS = 1000;
 const MAX_ANNOTATIONS = 500;
@@ -166,6 +188,32 @@ export interface GuardOptions {
   secretPath: string;
   /** The journal head, kept apart from the database. */
   headPath: string;
+  /** The relying party passkeys are bound to (default localhost). */
+  rp?: RelyingParty;
+}
+
+/** What a touch is made of: a TOTP code, or (instead of it) a passkey assertion. */
+export interface Proof {
+  code?: unknown;
+  passkey?: unknown;
+}
+/** Who touched: how, with which key, and for what exactly (written into the journal). */
+export interface Factor {
+  via: "totp" | "passkey";
+  key?: string;
+  action?: Record<string, unknown>;
+}
+const factorDetail = (f: Factor): Record<string, unknown> => ({ via: f.via, ...(f.key !== undefined ? { key: f.key } : {}), ...(f.action !== undefined ? { action: f.action } : {}) });
+
+export interface PasskeyRow {
+  id: number;
+  label: string;
+  aaguid: string;
+  fingerprint: string;
+  state: "pending" | "active" | "removed";
+  createdAt: number;
+  confirmedAt: number | null;
+  lastUsedAt: number | null;
 }
 
 export interface ImportItem {
@@ -184,8 +232,10 @@ export class Guard {
   private readonly now: () => number;
   private readonly secretPath: string;
   private readonly head: HeadFile;
+  private readonly rp: RelyingParty;
 
   constructor(o: GuardOptions) {
+    this.rp = o.rp ?? { rpId: DEFAULT_RP_ID, origin: DEFAULT_ORIGIN };
     this.db = o.db;
     this.now = o.now;
     this.secretPath = o.secretPath;
@@ -250,29 +300,42 @@ export class Guard {
     return until > this.now() ? until : 0;
   }
 
+  /** Blocked after too many wrong codes or signatures (one counter for both: a guess is a guess). */
+  private assertNotBlocked(): void {
+    const until = this.blockedUntil();
+    if (until > 0) throw new GuardError("blocked", `too many wrong codes or signatures; approvals are blocked until ${new Date(until).toISOString()}`);
+  }
+
+  /** A wrong code or signature: recorded, counted, and the fifth within an hour blocks every touch for an hour. Always commits before the caller throws. */
+  private recordFailure(kind: "totp.fail" | "passkey.fail", purpose: string, extra: Record<string, unknown> = {}): void {
+    this.tx(() => {
+      this.db.prepare(`INSERT INTO attempts (ts, ok, purpose) VALUES (?, 0, ?)`).run(this.now(), purpose);
+      const since = Math.max(this.now() - HOUR_MS, Number(this.meta("fail_epoch") ?? 0));
+      const n = (this.db.prepare(`SELECT COUNT(*) AS n FROM attempts WHERE ok = 0 AND ts > ?`).get(since) as { n: number }).n;
+      this.log(kind, null, null, { purpose, ...extra });
+      if (n >= MAX_FAILURES) {
+        this.setMeta("blocked_until", String(this.now() + HOUR_MS));
+        this.setMeta("fail_epoch", String(this.now()));
+        this.log("totp.blocked", null, null, { purpose, until: this.now() + HOUR_MS });
+      }
+    });
+  }
+
   /**
    * A touch: checks one TOTP code for `purpose`. A step (or any older one) is never accepted twice; five wrong
    * codes within an hour block every touch for an hour. Throws, so nothing after it runs on a bad code.
    */
   private verifyCode(purpose: string, code: unknown): void {
     const secret = this.secret();
-    if (secret === null) throw new GuardError("not_registered", "no second factor is registered; run `sbb-guard totp-register` on the console");
-    const until = this.blockedUntil();
-    if (until > 0) throw new GuardError("blocked", `too many wrong codes; approvals are blocked until ${new Date(until).toISOString()}`);
+    if (secret === null) {
+      if (this.totpDisabled()) throw new GuardError("not_registered", "codes are switched off at this guard: touch with a passkey (`sbb-guard totp-register` on the console switches them on again)");
+      throw new GuardError("not_registered", "no second factor is registered; run `sbb-guard totp-register` on the console");
+    }
+    this.assertNotBlocked();
     const given = typeof code === "string" ? code : "";
     const res = verifyTotp(secret, given, this.now(), Number(this.meta("last_step") ?? 0));
     if (!res.ok) {
-      this.tx(() => {
-        this.db.prepare(`INSERT INTO attempts (ts, ok, purpose) VALUES (?, 0, ?)`).run(this.now(), purpose);
-        const since = Math.max(this.now() - HOUR_MS, Number(this.meta("fail_epoch") ?? 0));
-        const n = (this.db.prepare(`SELECT COUNT(*) AS n FROM attempts WHERE ok = 0 AND ts > ?`).get(since) as { n: number }).n;
-        this.log("totp.fail", null, null, { purpose });
-        if (n >= MAX_FAILURES) {
-          this.setMeta("blocked_until", String(this.now() + HOUR_MS));
-          this.setMeta("fail_epoch", String(this.now()));
-          this.log("totp.blocked", null, null, { purpose, until: this.now() + HOUR_MS });
-        }
-      });
+      this.recordFailure("totp.fail", purpose);
       throw new GuardError("invalid_code", "invalid or already used code");
     }
     // The step is spent before the action runs, in a transaction of its own (a failure above also commits its record).
@@ -280,6 +343,28 @@ export class Guard {
     this.tx(() => {
       this.db.prepare(`INSERT INTO attempts (ts, ok, purpose) VALUES (?, 1, ?)`).run(this.now(), purpose);
       this.setMeta("last_step", String(res.step));
+    });
+  }
+
+  /** One touch for one action: a passkey assertion when one is given (and then only that), else a TOTP code. */
+  private verifyFactor(purpose: string, action: Record<string, unknown>, proof: Proof): Factor {
+    if (proof.passkey !== undefined) return this.verifyPasskey(purpose, action, proof.passkey);
+    this.verifyCode(purpose, proof.code);
+    return { via: "totp" };
+  }
+
+  totpDisabled(): boolean {
+    return this.meta("totp_disabled") === "1";
+  }
+
+  /** Console only: codes off. Needs a working passkey (else nobody could touch anything) and removes the secret for good; `totp-register` makes a new one. */
+  totpDisable(): void {
+    if (this.activePasskeys().length === 0) throw new GuardError("conflict", "no active passkey: switching codes off would leave no way to touch (`sbb-guard passkey-enroll` first)");
+    if (this.secret() === null) throw new GuardError("conflict", "no TOTP secret is registered; nothing to switch off");
+    this.tx(() => {
+      unlinkSync(this.secretPath);
+      this.setMeta("totp_disabled", "1");
+      this.log("totp.disabled", null, null, { via: "console" });
     });
   }
 
@@ -303,6 +388,7 @@ export class Guard {
       }
       renameSync(tmp, this.secretPath);
       this.setMeta("last_step", String(res.step));
+      this.setMeta("totp_disabled", "0");
       this.log(existing === null ? "totp.registered" : "totp.replaced", null, null, { via: "console" });
     });
   }
@@ -320,7 +406,7 @@ export class Guard {
   }
 
   /** Widening (a longer window, a higher ceiling, sliding instead of fixed) needs a code; narrowing does not. */
-  setPolicy(patch: Partial<Policy>, code: unknown): Policy {
+  setPolicy(patch: Partial<Policy>, proof: Proof): Policy {
     const cur = this.policy();
     const next: Policy = { ...cur };
     if (patch.windowMin !== undefined) next.windowMin = intOf(patch.windowMin, "windowMin", 1, 1440);
@@ -331,10 +417,10 @@ export class Guard {
     }
     if (next.windowMin > next.capMin) throw new GuardError("invalid", "the window size cannot exceed the ceiling");
     const widens = next.windowMin > cur.windowMin || next.capMin > cur.capMin || (next.mode === "sliding" && cur.mode === "fixed");
-    if (widens) this.verifyCode("policy", code);
+    const factor = widens ? this.verifyFactor("policy", this.normalizeAction({ op: "policy", patch }), proof) : null;
     return this.tx(() => {
       this.setMeta("policy", JSON.stringify(next));
-      this.log("policy", null, null, { from: cur, to: next, touched: widens });
+      this.log("policy", null, null, { from: cur, to: next, touched: widens, ...(factor ? factorDetail(factor) : {}) });
       return next;
     });
   }
@@ -488,12 +574,12 @@ export class Guard {
   approve(raw: Record<string, unknown>): { approval: ApprovalRow } {
     const id = intOf(raw.requestId, "requestId", 1, Number.MAX_SAFE_INTEGER);
     const q = this.heldRequest(id);
-    this.verifyCode(`approve:${q.pluginId}`, raw.code);
+    const factor = this.verifyFactor(`approve:${q.pluginId}`, this.normalizeAction({ op: "approve", requestId: id }), raw);
     return this.tx(() => {
       const a = this.addApproval({ contentHash: q.contentHash, pluginId: q.pluginId, version: q.version, source: q.source, sourceKind: q.sourceKind, gitCommit: null, npmIntegrity: null, via: "touch", windowId: null });
       this.resolveQueue(q.pluginId, q.contentHash, "approved");
       // The record says what exactly was approved: after the fact, this is what the owner reads.
-      this.log("approved.touch", q.pluginId, q.contentHash, { approval: a.id, review: q.id, version: q.version, source: q.source, sourceKind: q.sourceKind, rootDir: q.rootDir });
+      this.log("approved.touch", q.pluginId, q.contentHash, { approval: a.id, review: q.id, version: q.version, source: q.source, sourceKind: q.sourceKind, rootDir: q.rootDir, ...factorDetail(factor) });
       return { approval: a };
     });
   }
@@ -573,7 +659,7 @@ export class Guard {
     const policy = this.policy();
     const minutes = raw.minutes === undefined ? policy.windowMin : intOf(raw.minutes, "minutes", 1, 1440);
     if (minutes > policy.capMin) throw new GuardError("invalid", `a window is at most ${policy.capMin} minutes (the ceiling)`);
-    this.verifyCode(`window.open:${pluginId}`, raw.code);
+    const factor = this.verifyFactor(`window.open:${pluginId}`, this.normalizeAction({ op: "open-window", pluginId, minutes, ...(raw.scope !== undefined ? { scope: raw.scope } : {}) }), raw);
     return this.tx(() => {
       this.sweepInner();
       for (const old of this.unclosedWindows()) if (old.pluginId === pluginId) this.closeWindowInner(old, "reopened");
@@ -583,7 +669,7 @@ export class Guard {
         .prepare(`INSERT INTO windows (plugin_id, size_sec, cap_sec, mode, opened_at, expires_at, hard_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
         .run(pluginId, minutes * 60, policy.capMin * 60, policy.mode, now, Math.min(now + minutes * 60_000, hard), hard);
       const w = windowOf(this.db.prepare(`SELECT * FROM windows WHERE id = ?`).get(Number(info.lastInsertRowid)) as Raw);
-      this.log("window.open", pluginId, null, { windowId: w.id, minutes, mode: w.mode, ceilingMin: policy.capMin });
+      this.log("window.open", pluginId, null, { windowId: w.id, minutes, mode: w.mode, ceilingMin: policy.capMin, ...factorDetail(factor) });
       return w;
     });
   }
@@ -610,9 +696,329 @@ export class Guard {
   /** Checks one code for an action the plugin itself performs (its config watchdog, skills, settings). Decides nothing in the guard. */
   touch(raw: Record<string, unknown>): { ok: true } {
     const purpose = str(raw.purpose, "purpose", 80, 1);
-    this.verifyCode(`touch:${purpose}`, raw.code);
-    this.record("touch", null, null, { purpose });
+    const factor = this.verifyFactor(`touch:${purpose}`, this.normalizeAction({ op: "touch", purpose }), raw);
+    this.record("touch", null, null, { purpose, ...factorDetail(factor) });
     return { ok: true };
+  }
+
+  // ---- Passkeys -----------------------------------------------------------------------------------------------------
+  // Why: a code typed on the page passes through bb's process, where a harmful plugin can take it and spend it first. A passkey
+  // signature is made over a challenge the guard issued for ONE normalized action, so a captured signature is good for that action
+  // only, once, for two minutes. Keys are registered only through the console (`passkey-enroll`), never through bb.
+  private activePasskeys(): Array<Raw & { credential_id: string; public_key: string; label: string; sign_count: number; id: number }> {
+    return this.db.prepare(`SELECT * FROM passkeys WHERE state = 'active' ORDER BY id`).all() as never;
+  }
+  private passkeyOf(r: Raw): PasskeyRow {
+    return {
+      id: Number(r.id),
+      label: String(r.label),
+      aaguid: String(r.aaguid),
+      fingerprint: String(r.fingerprint),
+      state: r.state as PasskeyRow["state"],
+      createdAt: Number(r.created_at),
+      confirmedAt: r.confirmed_at === null ? null : Number(r.confirmed_at),
+      lastUsedAt: r.last_used_at === null ? null : Number(r.last_used_at),
+    };
+  }
+  /** Console: every key (active, waiting for confirmation, removed). */
+  listPasskeys(): PasskeyRow[] {
+    return (this.db.prepare(`SELECT * FROM passkeys ORDER BY id`).all() as Raw[]).map((r) => this.passkeyOf(r));
+  }
+
+  /** Console: removes a key. The last way to touch cannot be removed (no active passkey and no TOTP would lock the owner out). */
+  removePasskey(id: number): PasskeyRow {
+    const row = this.db.prepare(`SELECT * FROM passkeys WHERE id = ? AND state IN ('active', 'pending')`).get(id) as Raw | undefined;
+    if (!row) throw new GuardError("not_found", `no key #${id}`);
+    const rest = this.activePasskeys().filter((k) => k.id !== id).length;
+    if (row.state === "active" && rest === 0 && this.secret() === null) throw new GuardError("conflict", "this is the last way to touch: register a TOTP (`sbb-guard totp-register`) or another passkey first");
+    return this.tx(() => {
+      this.db.prepare(`UPDATE passkeys SET state = 'removed', removed_at = ? WHERE id = ?`).run(this.now(), id);
+      this.log("passkey.removed", null, null, { key: String(row.label), id, via: "console" });
+      return this.passkeyOf({ ...row, state: "removed" });
+    });
+  }
+
+  // ---- enrollment (console) ----
+  private enrollmentRow(id: number): Raw | undefined {
+    return this.db.prepare(`SELECT * FROM enrollments WHERE id = ?`).get(id) as Raw | undefined;
+  }
+  private openEnrollment(): Raw | undefined {
+    return this.db.prepare(`SELECT * FROM enrollments WHERE state = 'open' AND expires_at > ? ORDER BY id DESC LIMIT 1`).get(this.now()) as Raw | undefined;
+  }
+
+  /** Console only: opens the registration window (one at a time; an earlier one and its unconfirmed key are dropped) and returns the one-time token. */
+  enrollStart(label: string): { id: number; token: string; label: string; expiresAt: number } {
+    const name = str(label, "label", 64, 1);
+    const token = newToken();
+    return this.tx(() => {
+      this.db.prepare(`UPDATE enrollments SET state = 'closed' WHERE state IN ('open', 'registered')`).run();
+      this.db.prepare(`UPDATE passkeys SET state = 'removed', removed_at = ? WHERE state = 'pending'`).run(this.now());
+      const now = this.now();
+      const info = this.db
+        .prepare(`INSERT INTO enrollments (token_digest, label, user_handle, opened_at, expires_at, state) VALUES (?, ?, ?, ?, ?, 'open')`)
+        .run(tokenDigest(token), name, b64u(newNonce().subarray(0, 16)), now, now + ENROLL_WINDOW_MS);
+      const id = Number(info.lastInsertRowid);
+      this.log("passkey.enroll.open", null, null, { enrollment: id, label: name, expiresAt: now + ENROLL_WINDOW_MS, via: "console" });
+      return { id, token, label: name, expiresAt: now + ENROLL_WINDOW_MS };
+    });
+  }
+
+  /** Console: where the registration stands; `key` is what the page registered, waiting for the person at the console. */
+  enrollmentStatus(id: number): { state: string; expiresAt: number; key: (PasskeyRow & { keyId: number }) | null } {
+    const e = this.enrollmentRow(id);
+    if (!e) throw new GuardError("not_found", "no such enrollment");
+    let state = String(e.state);
+    if (state === "open" && Number(e.expires_at) <= this.now()) state = "expired";
+    const k = this.db.prepare(`SELECT * FROM passkeys WHERE enrollment_id = ? AND state = 'pending' ORDER BY id DESC LIMIT 1`).get(id) as Raw | undefined;
+    return { state, expiresAt: Number(e.expires_at), key: k ? { ...this.passkeyOf(k), keyId: Number(k.id) } : null };
+  }
+
+  /** Console: the person saw the key (label, AAGUID, fingerprint) and said yes. Only now can it touch. */
+  confirmEnrollment(id: number): PasskeyRow {
+    return this.tx(() => {
+      const e = this.enrollmentRow(id);
+      if (!e || e.state !== "registered") throw new GuardError("conflict", "there is nothing registered to confirm in this enrollment");
+      const k = this.db.prepare(`SELECT * FROM passkeys WHERE enrollment_id = ? AND state = 'pending' ORDER BY id DESC LIMIT 1`).get(id) as Raw | undefined;
+      if (!k) throw new GuardError("conflict", "the registered key is gone");
+      this.db.prepare(`UPDATE passkeys SET state = 'active', confirmed_at = ? WHERE id = ?`).run(this.now(), Number(k.id));
+      this.db.prepare(`UPDATE enrollments SET state = 'confirmed' WHERE id = ?`).run(id);
+      this.log("passkey.enrolled", null, null, { key: String(k.label), id: Number(k.id), aaguid: String(k.aaguid), fingerprint: String(k.fingerprint), via: "console" });
+      return this.passkeyOf({ ...k, state: "active", confirmed_at: this.now() });
+    });
+  }
+
+  /** Console: not confirmed (an answer of no, or the console gave up): the key is discarded and the window closes. */
+  rejectEnrollment(id: number, why: string): void {
+    this.tx(() => {
+      const e = this.enrollmentRow(id);
+      if (!e || (e.state !== "open" && e.state !== "registered")) return;
+      const k = this.db.prepare(`SELECT id, label FROM passkeys WHERE enrollment_id = ? AND state = 'pending'`).get(id) as { id: number; label: string } | undefined;
+      if (k) this.db.prepare(`UPDATE passkeys SET state = 'removed', removed_at = ? WHERE id = ?`).run(this.now(), k.id);
+      this.db.prepare(`UPDATE enrollments SET state = 'closed' WHERE id = ?`).run(id);
+      this.log("passkey.enroll.rejected", null, null, { enrollment: id, why, key: k?.label ?? null, via: "console" });
+    });
+  }
+
+  // ---- registration (socket) ----
+  private checkToken(token: unknown): Raw {
+    const e = this.openEnrollment();
+    if (!e) throw new GuardError("conflict", "no passkey registration is open; run `sbb-guard passkey-enroll` on the console");
+    const given = typeof token === "string" ? tokenDigest(token) : "";
+    const ok = given.length === String(e.token_digest).length && timingSafeEqual(Buffer.from(given), Buffer.from(String(e.token_digest)));
+    if (!ok) {
+      // Five wrong tokens close the window: a token is 60 bits, but whoever can reach the socket must not get to try without end.
+      const fails = Number(e.fails) + 1;
+      this.tx(() => {
+        this.db.prepare(`UPDATE enrollments SET fails = ?, state = CASE WHEN ? >= ${MAX_FAILURES} THEN 'closed' ELSE state END WHERE id = ?`).run(fails, fails, Number(e.id));
+        this.log("passkey.token.fail", null, null, { enrollment: Number(e.id), fails, ...(fails >= MAX_FAILURES ? { closed: true } : {}) });
+      });
+      throw new GuardError("invalid_code", fails >= MAX_FAILURES ? "wrong token; the registration window is closed" : "wrong token");
+    }
+    return e;
+  }
+
+  /**
+   * Step 1 (`{token}`): the token is right and the window is open → the creation options for `navigator.credentials.create`, with a challenge
+   * bound to this enrollment. Step 2 (`{token, clientDataJSON, attestationObject}`): checks them and stores the key as PENDING; the console decides.
+   */
+  passkeyRegister(raw: Record<string, unknown>): Record<string, unknown> {
+    const e = this.checkToken(raw.token);
+    const enrollment = Number(e.id);
+    if (raw.clientDataJSON === undefined && raw.attestationObject === undefined) {
+      if (e.state !== "open") throw new GuardError("conflict", "a key was already registered in this window; it waits for the console");
+      const nonce = newNonce();
+      this.tx(() => {
+        this.trimChallenges();
+        this.db.prepare(`INSERT INTO challenges (nonce, kind, enrollment_id, created_at, expires_at) VALUES (?, 'register', ?, ?, ?)`).run(b64u(nonce), enrollment, this.now(), Math.min(this.now() + CHALLENGE_TTL_MS, Number(e.expires_at)));
+      });
+      return {
+        options: {
+          challenge: b64u(nonce),
+          rp: { id: this.rp.rpId, name: "secure-bb guard" },
+          user: { id: String(e.user_handle), name: "secure-bb", displayName: String(e.label) },
+          pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+          authenticatorSelection: { userVerification: "required", residentKey: "preferred" },
+          attestation: "none",
+          excludeCredentials: this.activePasskeys().map((k) => ({ type: "public-key", id: k.credential_id })),
+          timeout: CHALLENGE_TTL_MS,
+        },
+      };
+    }
+    if (e.state !== "open") throw new GuardError("conflict", "a key was already registered in this window; it waits for the console");
+    let cdj: Buffer;
+    let att: ReturnType<typeof parseAttestationObject>;
+    let clientChallenge: string;
+    try {
+      cdj = fromB64u(raw.clientDataJSON, "clientDataJSON");
+      const cd = parseClientData(cdj);
+      if (cd.type !== "webauthn.create") throw new PasskeyError("the client data is not for a registration");
+      if (cd.origin !== this.rp.origin || cd.crossOrigin) throw new PasskeyError(`the page must be opened at ${this.rp.origin}`);
+      clientChallenge = cd.challenge;
+      att = parseAttestationObject(fromB64u(raw.attestationObject, "attestationObject"));
+    } catch (err) {
+      if (err instanceof PasskeyError) throw new GuardError("invalid_passkey", err.message);
+      throw err;
+    }
+    const ch = this.db.prepare(`SELECT * FROM challenges WHERE nonce = ? AND kind = 'register'`).get(clientChallenge) as Raw | undefined;
+    if (!ch || Number(ch.enrollment_id) !== enrollment) throw new GuardError("invalid_passkey", "this registration was not started here");
+    if (Number(ch.used) === 1) throw new GuardError("invalid_passkey", "this challenge was already used");
+    if (Number(ch.expires_at) <= this.now()) throw new GuardError("expired", "the challenge has expired; start again");
+    if (!att.rpIdHash.equals(sha256(this.rp.rpId))) throw new GuardError("invalid_passkey", "the key was made for another RP ID");
+    if ((att.flags & FLAG_UP) === 0 || (att.flags & FLAG_UV) === 0) throw new GuardError("invalid_passkey", "the key must be used with user presence and verification (Touch ID, PIN)");
+    if (!att.attested) throw new GuardError("invalid_passkey", "no credential in the attestation");
+    const cred = b64u(att.attested.credentialId);
+    if (this.db.prepare(`SELECT 1 FROM passkeys WHERE credential_id = ?`).get(cred)) throw new GuardError("conflict", "this credential is already known");
+    const label = String(e.label);
+    const aaguid = att.attested.aaguid.toString("hex");
+    const fingerprint = sha256(att.attested.publicKeySpki).toString("hex").slice(0, 32);
+    return this.tx(() => {
+      this.db.prepare(`UPDATE challenges SET used = 1 WHERE nonce = ?`).run(clientChallenge);
+      this.db
+        .prepare(`INSERT INTO passkeys (credential_id, public_key, label, aaguid, fingerprint, sign_count, state, enrollment_id, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`)
+        .run(cred, b64u(att.attested!.publicKeySpki), label, aaguid, fingerprint, att.signCount, enrollment, this.now());
+      this.db.prepare(`UPDATE enrollments SET state = 'registered' WHERE id = ?`).run(enrollment);
+      this.log("passkey.registered", null, null, { key: label, aaguid, fingerprint, enrollment, note: "waits for confirmation on the console" });
+      return { ok: true, label, note: "key registered; it is not active until you confirm it on the console" };
+    });
+  }
+
+  // ---- actions: normalized, described, challenged ----
+  /**
+   * What a signature is bound to: the action with only the fields that matter, in a fixed order, defaults resolved. The same function
+   * runs when the challenge is issued and when the command arrives, so the two are compared as strings.
+   */
+  private normalizeAction(raw: unknown): Record<string, unknown> {
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new GuardError("invalid", "an action is a JSON object");
+    const a = raw as Record<string, unknown>;
+    switch (a.op) {
+      case "approve":
+        return { op: "approve", requestId: intOf(a.requestId, "requestId", 1, Number.MAX_SAFE_INTEGER) };
+      case "open-window": {
+        const scope = a.scope;
+        if (scope !== undefined && scope !== "tree" && scope !== "thread") throw new GuardError("invalid", "scope is tree or thread");
+        return { op: "open-window", pluginId: pluginIdOf(a.pluginId), minutes: a.minutes === undefined ? this.policy().windowMin : intOf(a.minutes, "minutes", 1, 1440), ...(scope !== undefined ? { scope } : {}) };
+      }
+      case "policy": {
+        if (typeof a.patch !== "object" || a.patch === null || Array.isArray(a.patch)) throw new GuardError("invalid", "patch is an object");
+        const p = a.patch as Partial<Policy>;
+        const patch: Partial<Policy> = {};
+        if (p.windowMin !== undefined) patch.windowMin = intOf(p.windowMin, "windowMin", 1, 1440);
+        if (p.capMin !== undefined) patch.capMin = intOf(p.capMin, "capMin", 1, 1440);
+        if (p.mode !== undefined) {
+          if (p.mode !== "sliding" && p.mode !== "fixed") throw new GuardError("invalid", "mode is sliding or fixed");
+          patch.mode = p.mode;
+        }
+        return { op: "policy", patch };
+      }
+      case "touch":
+        return { op: "touch", purpose: str(a.purpose, "purpose", 80, 1) };
+      default:
+        throw new GuardError("invalid", "an action is approve, open-window, policy or touch");
+    }
+  }
+
+  /** The sentence the page shows next to the touch button (in the journal after the fact too): what is about to be approved, in the guard's own words. */
+  private describe(a: Record<string, unknown>): string {
+    switch (a.op) {
+      case "approve": {
+        const q = this.db.prepare(`SELECT * FROM queue WHERE id = ?`).get(Number(a.requestId)) as Raw | undefined;
+        if (!q) throw new GuardError("not_found", `no request #${String(a.requestId)}`);
+        if (q.status !== "held") throw new GuardError("conflict", `request #${String(a.requestId)} is already ${String(q.status)}`);
+        return `Одобрить загрузку плагина «${String(q.plugin_id)}» версии ${String(q.version)} (запись #${String(q.id)}, источник ${String(q.source)}, хеш ${String(q.content_hash).slice(0, 16)}…)`;
+      }
+      case "open-window":
+        return `Открыть окно доверия для плагина «${String(a.pluginId)}» на ${String(a.minutes)} мин${a.scope === "tree" ? " (охват: весь тред со всеми сабтредами)" : a.scope === "thread" ? " (охват: только этот тред)" : ""}: любые версии этого плагина будут загружаться без касания`;
+      case "policy": {
+        const cur = this.policy();
+        const parts = Object.entries(a.patch as Record<string, unknown>).map(([k, v]) => `${k}: ${String(cur[k as keyof Policy])} → ${String(v)}`);
+        return `Изменить политику окон доверия: ${parts.join(", ") || "без изменений"}`;
+      }
+      default:
+        return `Подтвердить действие плагина secure-bb: ${String(a.purpose)}`;
+    }
+  }
+
+  private trimChallenges(): void {
+    this.db.prepare(`DELETE FROM challenges WHERE expires_at < ?`).run(this.now() - HOUR_MS);
+    this.db.prepare(`DELETE FROM challenges WHERE kind = 'action' AND nonce NOT IN (SELECT nonce FROM challenges WHERE kind = 'action' ORDER BY created_at DESC, rowid DESC LIMIT ?)`).run(MAX_OPEN_CHALLENGES);
+  }
+
+  /** `challenge {action}`: no secret needed (it decides nothing: only a signature made by a registered key on the console's side of Touch ID does). */
+  challenge(raw: Record<string, unknown>): { challenge: string; allowCredentials: Array<{ type: "public-key"; id: string }>; description: string; rpId: string; origin: string; expiresAt: number } {
+    const keys = this.activePasskeys();
+    if (keys.length === 0) throw new GuardError("not_registered", "no passkey is registered; run `sbb-guard passkey-enroll` on the console");
+    const action = this.normalizeAction(raw.action);
+    const description = this.describe(action);
+    const nonce = b64u(newNonce());
+    const expiresAt = this.now() + CHALLENGE_TTL_MS;
+    this.tx(() => {
+      this.trimChallenges();
+      this.db.prepare(`INSERT INTO challenges (nonce, kind, action_json, created_at, expires_at) VALUES (?, 'action', ?, ?, ?)`).run(nonce, JSON.stringify(action), this.now(), expiresAt);
+    });
+    return { challenge: nonce, allowCredentials: keys.map((k) => ({ type: "public-key" as const, id: k.credential_id })), description, rpId: this.rp.rpId, origin: this.rp.origin, expiresAt };
+  }
+
+  /**
+   * Checks an assertion for `action` (the normalized command that just arrived). Order: shape → the challenge (unknown, used, expired: plain refusals,
+   * not counted) → everything the signature covers (counted as a wrong code is: one counter) → the challenge is spent in one transaction with the key's counter.
+   */
+  private verifyPasskey(purpose: string, action: Record<string, unknown>, assertion: unknown): Factor {
+    if (this.activePasskeys().length === 0) throw new GuardError("not_registered", "no passkey is registered; run `sbb-guard passkey-enroll` on the console");
+    this.assertNotBlocked();
+    if (typeof assertion !== "object" || assertion === null || Array.isArray(assertion)) throw new GuardError("invalid", "passkey is an object");
+    const p = assertion as Record<string, unknown>;
+    let credId: string;
+    let cdj: Buffer;
+    let authDataRaw: Buffer;
+    let sig: Buffer;
+    let clientChallenge: string;
+    let cd: ReturnType<typeof parseClientData>;
+    try {
+      credId = b64u(fromB64u(p.credentialId, "credentialId", 1400));
+      cdj = fromB64u(p.clientDataJSON, "clientDataJSON");
+      authDataRaw = fromB64u(p.authenticatorData, "authenticatorData");
+      sig = fromB64u(p.signature, "signature", 512);
+      cd = parseClientData(cdj);
+      clientChallenge = cd.challenge;
+    } catch (err) {
+      if (err instanceof PasskeyError) throw new GuardError("invalid", err.message);
+      throw err;
+    }
+    const ch = this.db.prepare(`SELECT * FROM challenges WHERE nonce = ? AND kind = 'action'`).get(clientChallenge) as Raw | undefined;
+    if (!ch) throw new GuardError("invalid_passkey", "unknown challenge (it was not issued by this guard, or it is long gone)");
+    if (Number(ch.used) === 1) throw new GuardError("invalid_passkey", "this challenge was already used");
+    if (Number(ch.expires_at) <= this.now()) throw new GuardError("expired", "the challenge has expired; ask for a new one");
+
+    const fail = (reason: string): never => {
+      this.recordFailure("passkey.fail", purpose, { reason });
+      throw new GuardError("invalid_passkey", reason);
+    };
+    const key = this.activePasskeys().find((k) => k.credential_id === credId);
+    if (!key) return fail("this key is not registered here");
+    if (cd.type !== "webauthn.get") return fail("the client data is not for a touch");
+    if (cd.origin !== this.rp.origin || cd.crossOrigin) return fail(`the touch was made on another origin than ${this.rp.origin}`);
+    let auth: ReturnType<typeof parseAuthData>;
+    try {
+      auth = parseAuthData(authDataRaw);
+    } catch {
+      return fail("malformed authenticator data");
+    }
+    if (!auth.rpIdHash.equals(sha256(this.rp.rpId))) return fail("the touch was made for another RP ID");
+    if ((auth.flags & FLAG_UP) === 0) return fail("no user presence");
+    if ((auth.flags & FLAG_UV) === 0) return fail("no user verification (Touch ID or PIN)");
+    if (!verifyEs256(Buffer.from(String(key.public_key), "base64url"), authDataRaw, cdj, sig)) return fail("invalid signature");
+    // The signature is genuine. Is it for THIS action? A captured signature spent on another action stops here.
+    if (String(ch.action_json) !== JSON.stringify(action)) return fail("the challenge was issued for another action");
+    // Authenticators that count must count up; those that do not (synced passkeys report 0) stay at 0.
+    if ((auth.signCount !== 0 || Number(key.sign_count) !== 0) && auth.signCount <= Number(key.sign_count)) return fail("the key's counter did not increase (a cloned key?)");
+
+    this.tx(() => {
+      const spent = this.db.prepare(`UPDATE challenges SET used = 1 WHERE nonce = ? AND used = 0`).run(clientChallenge);
+      if (Number(spent.changes) !== 1) throw new GuardError("invalid_passkey", "this challenge was already used");
+      this.db.prepare(`UPDATE passkeys SET sign_count = ?, last_used_at = ? WHERE id = ?`).run(auth.signCount, this.now(), key.id);
+      this.db.prepare(`INSERT INTO attempts (ts, ok, purpose) VALUES (?, 1, ?)`).run(this.now(), purpose);
+    });
+    return { via: "passkey", key: String(key.label), action };
   }
 
   // ---- migration ------------------------------------------------------------------------------------------
@@ -655,7 +1061,15 @@ export class Guard {
     const blockedUntil = this.blockedUntil();
     return {
       now,
-      totp: { registered: this.totpRegistered(), blockedUntil },
+      totp: { registered: this.totpRegistered(), disabled: this.totpDisabled(), blockedUntil },
+      passkeys: {
+        rpId: this.rp.rpId,
+        origin: this.rp.origin,
+        keys: this.listPasskeys()
+          .filter((k) => k.state === "active")
+          .map((k) => ({ id: k.id, label: k.label, createdAt: k.createdAt, lastUsedAt: k.lastUsedAt })),
+        enrollmentOpen: this.openEnrollment() !== undefined,
+      },
       policy: this.policy(),
       queue: rows(`SELECT * FROM queue ORDER BY (status = 'held') DESC, id DESC LIMIT 100`, queueOf).map(withNotes),
       approvals: rows(`SELECT * FROM approvals WHERE revoked_at IS NULL ORDER BY id DESC LIMIT 500`, approvalOf),

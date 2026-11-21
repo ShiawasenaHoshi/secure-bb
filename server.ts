@@ -14,7 +14,7 @@ import {
   type BbPluginApi,
 } from "@get-bb/plugin-sdk";
 import { Alive } from "./src/alive.js";
-import { GuardLink, GuardLinkError, guardSocketFromEnv, type GuardPolicy, type GuardQueueEntry } from "./src/guardlink.js";
+import { GuardLink, GuardLinkError, guardSocketFromEnv, type GuardAction, type GuardPolicy, type GuardProof, type GuardQueueEntry, type PasskeyAssertion } from "./src/guardlink.js";
 import { buildExport, writeExport } from "./src/export.js";
 import { localCheckKey } from "./src/decision.js";
 import { mintListProof } from "./src/approval.js";
@@ -74,7 +74,7 @@ function refusal(err: unknown): never {
     throw new experimental_PluginRpcRefusal({ code, message: err.message });
   }
   if (err instanceof GuardLinkError) {
-    const code = err.code === "invalid_code" || err.code === "blocked" ? "forbidden" : err.code === "not_found" || err.code === "invalid" ? err.code : "conflict";
+    const code = err.code === "invalid_code" || err.code === "invalid_passkey" || err.code === "blocked" ? "forbidden" : err.code === "not_found" || err.code === "invalid" ? err.code : "conflict";
     throw new experimental_PluginRpcRefusal({ code, message: err.message });
   }
   if (err instanceof ScanError) throw new experimental_PluginRpcRefusal({ code: err.code === "invalid" ? "invalid" : "conflict", message: err.message });
@@ -437,6 +437,11 @@ export default async function plugin(bb: BbPluginApi) {
   // ---- guard mode helpers ------------------------------------------------------------------------------------------
   /** A code the guard has already checked (once, for the call that carries it): the mark `Gate.touch` takes without looking at a secret. */
   const VERIFIED = mintListProof() as unknown as string;
+  /** Routes that always need a touch: with neither a code nor a passkey they are refused the way a wrong code is, but without counting it. */
+  const needCode = (code: string | undefined): string => {
+    if (code === undefined) throw new GateError("invalid_code", "a code is needed (in guard mode, a passkey touch works too)");
+    return code;
+  };
   const needGuard = (): GuardLink => {
     if (!guardLink) throw new GateError("invalid", "not in guard mode");
     return guardLink;
@@ -469,14 +474,15 @@ export default async function plugin(bb: BbPluginApi) {
       blocked: (reason?.startsWith(BLOCKED_REASON) ?? false) || (result !== null && bySeverity(result, "block").length > 0),
     };
   };
+  /** What a touch is spent on at the guard: a passkey assertion if the page sent one, else the code. */
+  const proofOf = (code: string | undefined, passkey: PasskeyAssertion | undefined): GuardProof | undefined => (passkey !== undefined ? { passkey } : code);
   /**
    * A proposal the core has not asked the guard about yet (nothing installed: the checks stopped it before install). What a human approves
    * is always the guard's entry for the hash the CORE computes, never a key of ours: so the snapshot is installed first, the guard's entry
-   * (made when the core asks) is waited for, and that entry is approved. The code is spent only once the entry exists.
+   * (made when the core asks) is waited for, and that entry is what a touch is spent on. Nothing is spent before the entry exists.
    */
-  const approvePendingProposal = async (localId: number, code: string | undefined, acknowledgeBlock: boolean | undefined): Promise<{ ok: true; note: string }> => {
+  const pendingEntry = async (localId: number, acknowledgeBlock: boolean | undefined): Promise<{ entry: GuardQueueEntry; localId: number }> => {
     const link = needGuard();
-    if (code === undefined) throw new GateError("invalid_code", "a code is needed: the guard checks it");
     const lq = store.getQueue(localId);
     if (!lq || lq.status !== "held" || lq.proposalId === null) throw new GateError("not_found", `no pending proposal #${localId}`);
     const proposal = store.getProposal(lq.proposalId);
@@ -500,19 +506,24 @@ export default async function plugin(bb: BbPluginApi) {
         if (!entry) await new Promise((r) => setTimeout(r, 250));
       }
     }
-    if (!entry) throw new GateError("conflict", "the core has not asked the guard about this snapshot yet; try again in a moment (the code was not spent)");
-    const res = await approveAtGuard(entry.id, code, acknowledgeBlock);
-    store.setQueueStatus(lq.id, "approved");
+    if (!entry) throw new GateError("conflict", "the core has not asked the guard about this snapshot yet; try again in a moment (the touch was not spent)");
+    return { entry, localId: lq.id };
+  };
+  const approvePendingProposal = async (localId: number, proof: GuardProof | undefined, acknowledgeBlock: boolean | undefined): Promise<{ ok: true; note: string }> => {
+    if (proof === undefined) throw new GateError("invalid_code", "a code or a touch is needed: the guard checks it");
+    const { entry, localId: lid } = await pendingEntry(localId, acknowledgeBlock);
+    const res = await approveAtGuard(entry.id, proof, acknowledgeBlock);
+    store.setQueueStatus(lid, "approved");
     return res;
   };
-  const approveAtGuard = async (id: number, code: string | undefined, acknowledgeBlock: boolean | undefined): Promise<{ ok: true; note: string }> => {
+  const approveAtGuard = async (id: number, proof: GuardProof | undefined, acknowledgeBlock: boolean | undefined): Promise<{ ok: true; note: string }> => {
     const link = needGuard();
-    if (code === undefined) throw new GateError("invalid_code", "a code is needed: the guard checks it");
+    if (proof === undefined) throw new GateError("invalid_code", "a code or a touch is needed: the guard checks it");
     const q = await guardEntry(id);
     const f = await entryFacts(q);
     if (f.unsafeDir) throw new GateError("invalid", "this version lies in a directory that others can write to; it cannot be approved from there (see the page)", { unsafeDir: true });
     if (f.blocked && !acknowledgeBlock) throw new GateError("invalid", "this version was blocked by the checks; confirm that you accept the risk to approve it anyway", { blocked: true });
-    await link.approve(id, code);
+    await link.approve(id, proof);
     if (f.blocked) store.log("block.lifted", q.pluginId, q.contentHash, { review: id, version: q.version, rules: f.result ? bySeverity(f.result, "block").map((x) => x.rule) : [] });
     // A capability accepted with a code inside an open window becomes part of the window's set; the window stays open.
     const w = store.unclosedWindows().find((x) => x.pluginId === q.pluginId && x.guardWindowId !== null);
@@ -530,24 +541,54 @@ export default async function plugin(bb: BbPluginApi) {
    */
   const OWN_GUARD_PATH = new Set(["queue.approve", "window.open", "policy.set", "session.open", "totp.begin", "totp.confirm"]);
   const withGuardTouch = <T extends object>(handlers: T): T => {
-    if (!guardLink) return handlers;
     const out: Record<string, unknown> = {};
+    if (!guardLink) {
+      // A passkey is the guard's: without one there is nothing to check it against, and it must not slip through as "no code".
+      for (const [name, fn] of Object.entries(handlers) as Array<[string, (input: any) => unknown]>)
+        out[name] = async (input: any) => {
+          if (input && typeof input === "object" && input.passkey !== undefined) return refusal(new GateError("invalid", "passkeys need the decision guard; this bb has none (use a code)"));
+          return fn(input);
+        };
+      return out as T;
+    }
     for (const [name, fn] of Object.entries(handlers) as Array<[string, (input: any) => unknown]>) {
       out[name] = OWN_GUARD_PATH.has(name)
         ? fn
         : async (input: any) => {
-            if (input && typeof input === "object" && typeof input.code === "string") {
+            // A passkey touch is checked at the guard for the action "touch <this RPC>" and wins over a code that came with it.
+            const proof = input && typeof input === "object" ? (input.passkey !== undefined ? { passkey: input.passkey as PasskeyAssertion } : typeof input.code === "string" ? input.code : undefined) : undefined;
+            if (proof !== undefined) {
               try {
-                await guardLink.touch(name, input.code);
+                await guardLink.touch(name, proof);
               } catch (err) {
                 return refusal(err);
               }
-              return fn({ ...input, code: VERIFIED });
+              const { passkey: _p, ...rest } = input;
+              return fn({ ...rest, code: VERIFIED });
             }
             return fn(input);
           };
     }
     return out as T;
+  };
+
+  /**
+   * What a policy change means in guard mode. Window size, ceiling and mode are the guard's (widening needs a touch there); thread scope and the
+   * configuration windows are this plugin's; "safe class passes without a touch" does not exist.
+   */
+  const policyPlan = async (patch: { windowMin?: number; capMin?: number; mode?: "sliding" | "fixed"; scope?: "tree" | "thread"; cfgWindowMin?: number; cfgCapMin?: number; cfgMode?: "sliding" | "fixed"; autoSafe?: boolean }) => {
+    if (patch.autoSafe === true) throw new GateError("invalid", "в режиме сторожа автопропуск безопасного класса не существует: каждое одобрение даёт человек");
+    const cur = await needGuard().policy();
+    const wanted: Partial<GuardPolicy> = {};
+    if (patch.windowMin !== undefined && patch.windowMin !== cur.windowMin) wanted.windowMin = patch.windowMin;
+    if (patch.capMin !== undefined && patch.capMin !== cur.capMin) wanted.capMin = patch.capMin;
+    if (patch.mode !== undefined && patch.mode !== cur.mode) wanted.mode = patch.mode;
+    const guardWidens = (wanted.windowMin ?? cur.windowMin) > cur.windowMin || (wanted.capMin ?? cur.capMin) > cur.capMin || (wanted.mode === "sliding" && cur.mode === "fixed");
+    const { windowMin: _w, capMin: _c, mode: _m, autoSafe: _a, ...local } = patch;
+    const cp = store.policy();
+    const next = { ...cp, ...local };
+    const localWidens = (next.scope === "tree" && cp.scope === "thread") || next.cfgWindowMin > cp.cfgWindowMin || next.cfgCapMin > cp.cfgCapMin || (next.cfgMode === "sliding" && cp.cfgMode === "fixed");
+    return { wanted, guardWidens, local, localWidens };
   };
 
   bb.rpc.register(rpcContract, withGuardTouch({
@@ -569,14 +610,14 @@ export default async function plugin(bb: BbPluginApi) {
     },
     "approvals.export": wrap(({ code }) => {
       // The code was checked by the guard (guard mode) or is checked here (without a guard): either way `touch` takes it.
-      gate.touch("approvals.export", code);
+      gate.touch("approvals.export", needCode(code));
       const result = buildExport(store.listApprovals(5000), now());
       const path = writeExport(dataDir, result, now());
       store.log("approvals.export", null, null, { count: result.count, digest: result.digest });
       return { path, digest: result.digest, count: result.count };
     }),
     "trusted.set": wrap(({ code, ...change }) => {
-      const repos = gate.setTrustedRepo(change, code);
+      const repos = gate.setTrustedRepo(change, needCode(code));
       changed();
       return { ok: true as const, repos };
     }),
@@ -599,8 +640,8 @@ export default async function plugin(bb: BbPluginApi) {
       changed();
       return { ok: true as const };
     }),
-    "queue.approve": wrap(async ({ id, code, session, acknowledgeBlock }) => {
-      if (guardLink) return id < 0 ? approvePendingProposal(-id, code, acknowledgeBlock) : approveAtGuard(id, code, acknowledgeBlock);
+    "queue.approve": wrap(async ({ id, code, passkey, session, acknowledgeBlock }) => {
+      if (guardLink) return id < 0 ? approvePendingProposal(-id, proofOf(code, passkey), acknowledgeBlock) : approveAtGuard(id, proofOf(code, passkey), acknowledgeBlock);
       // Lifting a block is the dangerous kind of this RPC: a fresh code, never a session.
       const proof = gate.proofFor("queue.approve", { code, session }, { escalate: acknowledgeBlock === true });
       const note = await approveQueueFull(id, proof, { acknowledgeBlock });
@@ -627,11 +668,12 @@ export default async function plugin(bb: BbPluginApi) {
       changed();
       return { ok: true as const };
     }),
-    "window.open": wrap(async ({ queueId, code, session, scope }) => {
+    "window.open": wrap(async ({ queueId, code, passkey, session, scope }) => {
       if (guardLink) {
-        if (code === undefined) throw new GateError("invalid_code", "a code is needed: the guard checks it");
+        const proof = proofOf(code, passkey);
+        if (proof === undefined) throw new GateError("invalid_code", "a code or a touch is needed: the guard checks it");
         if (queueId < 0) throw new GateError("invalid", "this proposal is not installed yet: approve it (or install it) first, then open a window from the guard's entry");
-        await gate.openGuardWindow(await guardEntry(queueId), code, scope);
+        await gate.openGuardWindow(await guardEntry(queueId), proof, scope);
         recheck();
         changed();
         return { ok: true as const };
@@ -724,7 +766,7 @@ export default async function plugin(bb: BbPluginApi) {
     }),
     "skills.removed": wrap(({ id }) => skillGuard.removedContent(id)),
     "skills.trusted": wrap(({ code, ...change }) => {
-      const sources = skillGuard.setTrustedSource(change, code);
+      const sources = skillGuard.setTrustedSource(change, needCode(code));
       changed();
       return { ok: true as const, sources };
     }),
@@ -790,38 +832,61 @@ export default async function plugin(bb: BbPluginApi) {
       changed();
       return { ok: true as const };
     }),
-    "policy.set": wrap(async ({ code, ...patch }) => {
+    "policy.set": wrap(async ({ code, passkey, ...patch }) => {
       if (!guardLink) {
         gate.setPolicy(patch, code);
         changed();
         return { ok: true as const };
       }
-      // Guard mode: window size, ceiling and mode are the guard's (widening needs a code there); thread scope and the
-      // configuration windows are this plugin's; "safe class passes without a touch" does not exist.
-      if (patch.autoSafe === true) throw new GateError("invalid", "в режиме сторожа автопропуск безопасного класса не существует: каждое одобрение даёт человек");
-      const cur = await guardLink.policy();
-      const wanted: Partial<GuardPolicy> = {};
-      if (patch.windowMin !== undefined && patch.windowMin !== cur.windowMin) wanted.windowMin = patch.windowMin;
-      if (patch.capMin !== undefined && patch.capMin !== cur.capMin) wanted.capMin = patch.capMin;
-      if (patch.mode !== undefined && patch.mode !== cur.mode) wanted.mode = patch.mode;
+      const plan = await policyPlan(patch);
+      const proof = proofOf(code, passkey);
+      // The guard checks the touch for what it holds (window size, ceiling, mode: widening needs one there). A touch the guard did not
+      // need for its part has not been checked by anybody yet; it is checked below if the local part widens.
       let verified = false;
-      if (Object.keys(wanted).length > 0) {
-        await guardLink.policy(wanted, code);
-        verified = code !== undefined; // a widening spent the code at the guard; a narrowing did not need one
+      if (Object.keys(plan.wanted).length > 0) {
+        await guardLink.policy(plan.wanted, proof);
+        verified = plan.guardWidens && proof !== undefined;
       }
-      const { windowMin: _w, capMin: _c, mode: _m, autoSafe: _a, ...local } = patch;
-      let proof: string | undefined = code === undefined ? undefined : VERIFIED;
-      if (code !== undefined && !verified) {
-        // Only the local part may widen (thread scope, configuration windows): then the guard checks the code.
-        const probe = { ...store.policy(), ...local };
-        const cp = store.policy();
-        const widens = probe.scope === "tree" && cp.scope === "thread" || probe.cfgWindowMin > cp.cfgWindowMin || probe.cfgCapMin > cp.cfgCapMin || (probe.cfgMode === "sliding" && cp.cfgMode === "fixed");
-        if (widens) await guardLink.touch("policy.set", code);
-        else proof = undefined;
+      let mark: string | undefined = verified ? VERIFIED : undefined;
+      if (!verified && plan.localWidens) {
+        // Only the local part (thread scope, configuration windows) widens: then the guard checks the touch for "policy.set".
+        if (proof === undefined) throw new GateError("invalid_code", "a code or a touch is needed: this widens the policy");
+        await guardLink.touch("policy.set", proof);
+        mark = VERIFIED;
       }
-      gate.setPolicy(local, proof);
+      gate.setPolicy(plan.local, mark);
       changed();
       return { ok: true as const };
+    }),
+    "passkey.register": wrap(async (body) => {
+      // The guard opens a registration window only when asked on the console; this relays the token and the browser's answer, nothing more.
+      return needGuard().passkeyRegister(body);
+    }),
+    "passkey.challenge": wrap(async (q) => {
+      const link = needGuard();
+      const out = (action: GuardAction) => link.challenge(action).then((c) => ({ needed: true as const, ...c }));
+      switch (q.kind) {
+        case "approve": {
+          if (q.queueId === undefined) throw new GateError("invalid", "queueId is needed");
+          // A proposal the core has not asked the guard about yet is installed first (as approving it would): the touch is for the guard's entry.
+          const entry = q.queueId < 0 ? (await pendingEntry(-q.queueId, q.acknowledgeBlock)).entry : await guardEntry(q.queueId);
+          return out({ op: "approve", requestId: entry.id });
+        }
+        case "window.open": {
+          if (q.queueId === undefined || q.queueId < 0) throw new GateError("invalid", "a window is opened from an installed entry of the guard's queue");
+          const entry = await guardEntry(q.queueId);
+          return out({ op: "open-window", pluginId: entry.pluginId, scope: q.scope ?? store.policy().scope });
+        }
+        case "policy": {
+          const plan = await policyPlan(q);
+          if (plan.guardWidens) return out({ op: "policy", patch: plan.wanted });
+          if (plan.localWidens) return out({ op: "touch", purpose: "policy.set" });
+          return { needed: false as const };
+        }
+        default:
+          if (q.purpose === undefined) throw new GateError("invalid", "purpose is needed");
+          return out({ op: "touch", purpose: q.purpose });
+      }
     }),
   }));
 

@@ -9,6 +9,8 @@ import { Guard } from "../../guard/src/guard.ts";
 import { request } from "../../guard/src/cli.ts";
 import { listen } from "../../guard/src/server.ts";
 import { base32Decode, generateSecret, hotp, stepAt } from "../../guard/src/totp.ts";
+import type { RelyingParty } from "../../guard/src/config.ts";
+import { SoftAuthenticator, type Assertion, type Overrides } from "./authenticator.ts";
 
 export class Clock {
   t = 1_800_000_000_000;
@@ -32,13 +34,13 @@ export interface TestGuard {
   close(): Promise<void>;
 }
 
-export async function startGuard(opts: { register?: boolean; serve?: boolean } = {}): Promise<TestGuard> {
+export async function startGuard(opts: { register?: boolean; serve?: boolean; rp?: RelyingParty } = {}): Promise<TestGuard> {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "sbb-guard-")));
   const paths = resolvePaths({ data: dir, socket: join(dir, "run", "guard.sock") });
   privateDir(paths.stateDir);
   const clock = new Clock();
   const db = openDb(paths.db);
-  const guard = new Guard({ db, now: clock.now, secretPath: paths.secret, headPath: paths.head });
+  const guard = new Guard({ db, now: clock.now, secretPath: paths.secret, headPath: paths.head, ...(opts.rp ? { rp: opts.rp } : {}) });
   const secret = generateSecret();
   const code = (): string => hotp(base32Decode(secret), stepAt(clock.t));
   if (opts.register !== false) {
@@ -205,3 +207,24 @@ export async function core(g: TestGuard, h: Booted, ctx: ReturnType<typeof hookC
   }
   return asked!.ok === true && asked!.action === "proceed" && hooked.action === "proceed" ? "load" : "held";
 }
+
+// ---- passkeys ----------------------------------------------------------------------------------------------------------
+/**
+ * The registration the way it happens: the console opens the window (`enrollStart`), the page registers over the socket with the token,
+ * the console confirms. `confirm: false` leaves the key waiting. Returns what the console printed.
+ */
+export async function enrollKey(g: TestGuard, auth: SoftAuthenticator, opts: { label?: string; confirm?: boolean; create?: Overrides } = {}) {
+  const e = g.guard.enrollStart(opts.label ?? "laptop");
+  const options = (await g.send({ op: "passkey-register", token: e.token })).options;
+  const reg = await g.send({ op: "passkey-register", token: e.token, ...auth.create(options, opts.create) });
+  if (reg.ok && opts.confirm !== false) g.guard.confirmEnrollment(e.id);
+  return { enrollment: e, options, reg };
+}
+
+/** Asks for a challenge for `action` and signs it. The result goes into the command as `passkey`. */
+export async function touchFor(g: TestGuard, auth: SoftAuthenticator, action: Record<string, unknown>, o: Overrides = {}): Promise<{ passkey: Assertion; challenge: Record<string, any> }> {
+  const c = await g.send({ op: "challenge", action });
+  if (!c.ok) throw new Error(`challenge refused: ${JSON.stringify(c.error)}`);
+  return { passkey: auth.get(c.challenge, o), challenge: c };
+}
+export { SoftAuthenticator };

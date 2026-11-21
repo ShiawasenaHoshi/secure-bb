@@ -68,6 +68,40 @@ export const MIGRATIONS: string[] = [
      hash TEXT NOT NULL)`,
   // A hold that a window does not lift: the plugin's hook stopped this version for its own reasons (a new capability, a tainted tree).
   `ALTER TABLE queue ADD COLUMN stop INTEGER NOT NULL DEFAULT 0`,
+  // Passkeys. A key is 'pending' from the moment the page registers it until the person at the console confirms it (then 'active'); 'removed' stays for the record.
+  `CREATE TABLE passkeys (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     credential_id TEXT NOT NULL UNIQUE,
+     public_key TEXT NOT NULL,
+     label TEXT NOT NULL,
+     aaguid TEXT NOT NULL,
+     fingerprint TEXT NOT NULL,
+     sign_count INTEGER NOT NULL DEFAULT 0,
+     state TEXT NOT NULL,
+     enrollment_id INTEGER,
+     created_at INTEGER NOT NULL,
+     confirmed_at INTEGER,
+     last_used_at INTEGER,
+     removed_at INTEGER)`,
+  // The registration window the console opens: one at a time, a one-time token (only its digest is kept), five wrong tokens close it.
+  `CREATE TABLE enrollments (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     token_digest TEXT NOT NULL,
+     label TEXT NOT NULL,
+     user_handle TEXT NOT NULL,
+     opened_at INTEGER NOT NULL,
+     expires_at INTEGER NOT NULL,
+     fails INTEGER NOT NULL DEFAULT 0,
+     state TEXT NOT NULL)`,
+  // A challenge is bound to what it was issued for: an action (its normalized JSON) or an enrollment. Used once, valid for two minutes.
+  `CREATE TABLE challenges (
+     nonce TEXT PRIMARY KEY,
+     kind TEXT NOT NULL,
+     action_json TEXT,
+     enrollment_id INTEGER,
+     created_at INTEGER NOT NULL,
+     expires_at INTEGER NOT NULL,
+     used INTEGER NOT NULL DEFAULT 0)`,
 ];
 
 export function openDb(path: string): DatabaseSync {
