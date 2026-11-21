@@ -1,0 +1,4 @@
+{
+  "name": "sdk-threads-read-spawn",
+  "bb": { "server": "./server.ts", "app": "./app.tsx" }
+}

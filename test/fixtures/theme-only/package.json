@@ -1,0 +1,4 @@
+{
+  "name": "theme-only",
+  "bb": { "app": "./app.tsx" }
+}

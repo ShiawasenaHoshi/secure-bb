@@ -16,7 +16,19 @@ export type CapabilityKind =
   | "builtin_rpc"
   | "server_access"
   /** `bb.storage.database()` / `node:sqlite`: a database handle in the gate's own process and uid can reach other databases (ATTACH, extensions). */
-  | "database";
+  | "database"
+  /** bb's own API (`sdk.threads.get/list/timeline/output`, `bb.events.on`): reads the person's conversations. */
+  | "sdk_read"
+  /** `sdk.threads.spawn/stop/archive/fork/delete…`: starts, stops and removes agents. */
+  | "sdk_agents"
+  /** `sdk.threads.send/message/editMessage…`: writes into conversations as the person. */
+  | "sdk_send"
+  /** `sdk.threads.interactions.respond/resolve/cancel`: answers an agent's questions and permission requests. */
+  | "sdk_answer"
+  /** `sdk.system/plugins/providers/skills/projects/environments/hosts` setters: changes how bb is set up (installs and enables plugins, sets machine variables). */
+  | "sdk_settings"
+  /** Presses buttons of bb's page that the plugin did not draw (`document.querySelector(…).click()`, `dispatchEvent`, `requestSubmit`): the channel by which a plugin can press the gate's buttons too. */
+  | "ui_click";
 
 export const CAPABILITY_KINDS: readonly CapabilityKind[] = [
   "network",
@@ -31,6 +43,12 @@ export const CAPABILITY_KINDS: readonly CapabilityKind[] = [
   "builtin_rpc",
   "server_access",
   "database",
+  "sdk_read",
+  "sdk_agents",
+  "sdk_send",
+  "sdk_answer",
+  "sdk_settings",
+  "ui_click",
 ];
 
 export interface Capability {

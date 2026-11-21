@@ -7,6 +7,7 @@ import * as acorn from "../../vendor/acorn.mjs";
 import jsx from "../../vendor/acorn-jsx.mjs";
 import { tsPlugin } from "../../vendor/acorn-typescript.mjs";
 import { excerptOf } from "./files.ts";
+import { classifySdkChain, DOM_LOOKUPS, DOM_PRESSES, isThreadsArea, looksLikeAnswerButton, SYNTHETIC_EVENTS, UI_CLICK_ANSWERS } from "./sdk-rights.ts";
 import type { CapabilityKind, Finding } from "./types.ts";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -52,6 +53,14 @@ export interface FileFacts {
   specs: Array<string | null>;
   /** Path-like string literals (`./worker.js`, `src/x.ts`): a file named this way may be loaded by other means (`new Worker`, `spawn("node", […])`). Capped. */
   pathStrings: string[];
+  /** Lines where the code looks up an element of the page (`document.querySelector`, `closest`, `getElementById`…). */
+  domLookups: number[];
+  /** Presses on an element (`.click()`, `.dispatchEvent(…)`, `.requestSubmit()`, `new MouseEvent(…)`), with the line. */
+  domPresses: Array<{ detail: string; line: number }>;
+  /** The code reaches the person's own folders: `os.homedir()`, `~/…`, `Documents` / `Desktop` / `Downloads`, `/Users/…`. Only then do «ваши документы» belong on a card. */
+  homeRef: boolean;
+  /** A string in this file names a button of an agent's question («Next», «Submit», «Allow») or the question widget itself. */
+  answerButtons: boolean;
 }
 
 // ---- module tables --------------------------------------------------------
@@ -384,6 +393,8 @@ function moduleCapability(spec: string): { kind: CapabilityKind; detail: string 
 // ---- the analysis -------------------------------------------------------------
 const FS_FUNCS = new Set(["readFile", "readFileSync", "writeFile", "writeFileSync", "appendFile", "appendFileSync", "createReadStream", "createWriteStream", "open", "openSync", "readdir", "readdirSync", "stat", "statSync", "lstat", "lstatSync", "access", "accessSync", "exists", "existsSync", "copyFile", "copyFileSync", "cp", "cpSync", "rename", "renameSync", "unlink", "unlinkSync", "rm", "rmSync", "mkdir", "mkdirSync", "symlink", "symlinkSync", "readlink", "realpath", "chmod", "chmodSync", "opendir", "watch", "truncate", "outputFile", "readJson", "writeJson"]);
 /** A literal that is an absolute or home path (not a URL, not a bare word). */
+/** A literal path into the person's own folders (home, Documents, Desktop, Downloads, another user's home). */
+const HOME_PATH = /^~(\/|$)|(^|[\\/])(Documents|Desktop|Downloads)([\\/]|$)|^[\\/](Users|home)[\\/]|^[A-Za-z]:[\\/]Users[\\/]/;
 const LITERAL_PATH = /^(~\/|\/(?!\/))[^\s]{2,}$/;
 const CHILD_FUNCS = new Set(["exec", "execSync", "spawn", "spawnSync", "execFile", "execFileSync", "fork"]);
 const PATH_FUNCS = new Set(["join", "resolve", "normalize", "relative"]);
@@ -424,7 +435,7 @@ export function sqlRules(value: string): string[] {
 export function analyze(rel: string, parsed: { ast: N; code: string }): FileFacts {
   const { ast, code } = parsed;
   const lines = code.split("\n");
-  const facts: FileFacts = { findings: [], sites: [], hosts: [], unresolvedHosts: [], programs: [], programsUnknown: false, credentials: [], secretPaths: [], rcPaths: [], fsPaths: [], network: false, childProcess: false, execSink: false, fsWrite: false, parsed: true, envCalls: [], relImports: new Map(), envReaders: new Map(), specs: [], pathStrings: [] };
+  const facts: FileFacts = { findings: [], sites: [], hosts: [], unresolvedHosts: [], programs: [], programsUnknown: false, credentials: [], secretPaths: [], rcPaths: [], fsPaths: [], network: false, childProcess: false, execSink: false, fsWrite: false, parsed: true, envCalls: [], relImports: new Map(), envReaders: new Map(), specs: [], pathStrings: [], domLookups: [], domPresses: [], answerButtons: false, homeRef: false };
   const consts = collectConsts(ast);
   const lineOf = (n: N): number => n.loc?.start.line ?? 0;
   const text = (line: number): string => excerptOf(lines[line - 1] ?? "");
@@ -537,6 +548,49 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
     if (spec === null) continue;
     if (d.id.type === "Identifier") moduleBindings.set(d.id.name, normalizeModule(spec));
     else if (d.id.type === "ObjectPattern") for (const p of d.id.properties) if (p.type === "Property" && p.value.type === "Identifier") moduleBindings.set(p.value.name, normalizeModule(spec));
+  }
+
+  // bb's own API: `const sdk = useSdk()`, `const { threads } = sdk`, `const t = bb.sdk.threads`, `const { spawn } = sdk.threads`.
+  const sdkAlias = new Map<string, string>();
+  const sdkChain = (n0: N): string | null => {
+    const n = unwrap(n0);
+    if (!n) return null;
+    if (n.type === "Identifier") return sdkAlias.get(n.name) ?? n.name;
+    if (n.type === "MemberExpression") {
+      const o = sdkChain(n.object);
+      const p = propName(n);
+      return o && p ? `${o}.${p}` : null;
+    }
+    if (n.type === "CallExpression") {
+      const c = unwrap(n.callee);
+      return (c.type === "Identifier" ? c.name : c.type === "MemberExpression" ? propName(c) : null) === "useSdk" ? "sdk" : null;
+    }
+    if (n.type === "AwaitExpression") return sdkChain(n.argument);
+    return null;
+  };
+  const sdkParts = (chain: string): string[] => chain.split(".");
+  const isSdkRooted = (chain: string): boolean => sdkParts(chain).includes("sdk");
+  const sdkRight = (chain: string): ReturnType<typeof classifySdkChain> => classifySdkChain(chain.replace(/\.(call|apply|bind)$/, ""), isSdkRooted(chain));
+  const sdkDeclSites: Array<{ chain: string; n: N }> = [];
+  for (let pass = 0; pass < 3; pass++) {
+    for (const d of decls) {
+      if (!d.init) continue;
+      const c = sdkChain(d.init);
+      if (c === null) continue;
+      if (d.id.type === "Identifier") {
+        if (c !== d.id.name) sdkAlias.set(d.id.name, c);
+      } else if (d.id.type === "ObjectPattern") {
+        for (const p of d.id.properties) {
+          if (p.type !== "Property" || p.computed) continue;
+          const key = p.key.type === "Identifier" ? p.key.name : String(p.key.value);
+          const local = p.value.type === "Identifier" ? p.value.name : p.value.type === "AssignmentPattern" && p.value.left.type === "Identifier" ? p.value.left.name : null;
+          if (local !== null) {
+            sdkAlias.set(local, `${c}.${key}`);
+            if (pass === 2) sdkDeclSites.push({ chain: `${c}.${key}`, n: p });
+          }
+        }
+      }
+    }
   }
 
   // env aliases: `const e = process.env`, `{...process.env}`, `Object.assign({}, e)`, `structuredClone(e)` …
@@ -659,6 +713,7 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
     for (const arg of call.arguments) {
       for (const { value, n } of stringsIn(arg)) {
         consumed.add(n);
+        if (HOME_PATH.test(value)) facts.homeRef = true;
         if (FS_FUNCS.has(simple) && LITERAL_PATH.test(value) && !SYSTEM_BIN.test(value) && facts.fsPaths.length < 20 && !facts.fsPaths.includes(value)) facts.fsPaths.push(value.slice(0, 120));
         for (const kind of pathMatches(value)) push(kind, n, value);
         if (child && PIPE_SHELL.test(value)) finding("download-exec", "block", n, excerptOf(value));
@@ -1002,9 +1057,32 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
     if (/\//.test(v) || /\.(m|c)?[jt]sx?$/i.test(v)) facts.pathStrings.push(v);
   };
 
+
+  /** A reference to something of bb's own API (`sdk.threads.spawn`): the right it gives. Only the outermost member of a chain is looked at. */
+  const sdkMember = (n: N, parent: N | undefined): void => {
+    if (parent?.type === "MemberExpression" && parent.object === n) return;
+    if (n.computed && propName(n) === null) {
+      const owner = sdkChain(n.object);
+      if (owner !== null && isThreadsArea(owner) && isSdkRooted(owner)) {
+        cap("sdk_agents", "threads[?]", n);
+        finding("dynamic-access", "review", n, `${text(lineOf(n))}  (computed call into the threads API)`);
+      }
+      return;
+    }
+    const chain = sdkChain(n);
+    if (chain === null) return;
+    noteSdk(sdkRight(chain), n);
+  };
+  const noteSdk = (right: ReturnType<typeof classifySdkChain>, n: N): void => {
+    if (right === null) return;
+    if ("unclassified" in right) finding("sdk-unclassified", "review", n, `${text(lineOf(n))}  (${right.detail}: a call into bb's API that the checks have no entry for)`);
+    else cap(right.kind, right.detail, n);
+  };
+
   const visitors: Record<string, (n: N, anc: N[]) => void> = {
     Literal(n) {
       if (typeof n.value === "string") {
+        if (!facts.answerButtons && looksLikeAnswerButton(n.value)) facts.answerButtons = true;
         notePathString(n.value);
         stringChecks(n.value, n);
         sqlChecks(n);
@@ -1131,6 +1209,7 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
       }
       if (name !== null && /^(experimental_)?(contentScripts?|composer)$/.test(name)) cap("ui", name, n);
       if (name === "sendBeacon") cap("network", "navigator.sendBeacon", n);
+      sdkMember(n, parent);
     },
     ObjectPattern(n) {
       for (const p of n.properties) {
@@ -1187,7 +1266,18 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
         // Reflect.get(globalThis, x) and friends reach the same things as globalThis[x]
         if (callee.object.type === "Identifier" && callee.object.name === "Reflect" && n.arguments[0] && isGlobalLike(n.arguments[0])) finding("dynamic-access", "review", n);
       }
+      if (callee.type === "MemberExpression" && simple !== null) {
+        if (DOM_LOOKUPS.has(simple)) facts.domLookups.push(lineOf(n));
+        const press = DOM_PRESSES[simple];
+        if (press && n.arguments.length >= press.minArgs && n.arguments.length <= press.maxArgs) facts.domPresses.push({ detail: press.detail, line: lineOf(n) });
+        // `bb.events.on("thread.idle", …)`: the handler is handed the conversation.
+        if (simple === "on" && /(^|\.)events$/.test(sdkChain(callee.object) ?? "")) {
+          const ev = n.arguments[0] ? fold(n.arguments[0], consts) : null;
+          if (ev === null || /thread|terminal/i.test(ev)) cap("sdk_read", "events.on", n);
+        }
+      }
       if (simple !== null && LOAD_EXTENSION_METHODS.has(simple)) finding("sqlite-extension", "block", n);
+      if (simple === "homedir") facts.homeRef = true;
       if (simple === "pragma" && n.arguments[0]) sqlChecks(n.arguments[0], "PRAGMA ");
       if (simple !== null && FS_WRITE.has(simple)) facts.fsWrite = true;
       if (callee.type === "Identifier" && /rpc/i.test(callee.name)) rpcCall(n);
@@ -1205,11 +1295,13 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
       else if (n.callee.type === "MemberExpression" && propName(n.callee) === "Script") markExec(n, "vm.Script");
       else if (name === "Script") markExec(n, "vm.Script");
       else if (name !== null && NETWORK_GLOBALS.has(name)) cap("network", name, n);
+      if (name !== null && SYNTHETIC_EVENTS.has(name)) facts.domPresses.push({ detail: `new ${name}()`, line: lineOf(n) });
       networkCall(n, unwrap(n.callee), n.arguments, true);
     },
   };
 
   walkAst(ast, (n, anc) => visitors[n.type]?.(n, anc));
+  for (const { chain, n } of sdkDeclSites) noteSdk(sdkRight(chain), n);
 
   // `{ pluginId: "connect" }` style references to built-in plugins
   for (const { n, value } of builtinCandidates) {

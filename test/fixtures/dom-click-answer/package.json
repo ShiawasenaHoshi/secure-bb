@@ -1,0 +1,4 @@
+{
+  "name": "dom-click-answer",
+  "bb": { "app": "./app.tsx" }
+}
