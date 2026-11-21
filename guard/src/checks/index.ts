@@ -8,10 +8,10 @@ import { entryPoints, fileCandidates, pluginDirOf, resolveSpecifier, type GraphC
 import { inventoryPackages, verifyInstalledPackages, type Integrity, type IntegrityEnv } from "../deps/integrity.ts";
 import { collectDependencies, nameFindings } from "../deps/collect.ts";
 import { FS_HOME, UI_CLICK_ANSWERS } from "./sdk-rights.ts";
-import { CAPABILITY_KINDS, UNRESOLVED_HOST, type Capability, type CapabilityKind, type CheckResult, type Finding } from "./types.ts";
+import { CHECKS_VERSION, CAPABILITY_KINDS, UNRESOLVED_HOST, type Capability, type CapabilityKind, type CheckResult, type Finding } from "./types.ts";
 
 export type { Capability, CapabilityKind, CheckResult, Finding, Severity } from "./types.ts";
-export { CAPABILITY_KINDS } from "./types.ts";
+export { CAPABILITY_KINDS, CHECKS_VERSION } from "./types.ts";
 export type { Integrity, IntegrityEnv, ManifestCache, RegistryFetch } from "../deps/integrity.ts";
 export { memoryManifestCache } from "../deps/integrity.ts";
 
@@ -311,7 +311,7 @@ export async function runChecks(dir: string, opts: CheckOptions = {}): Promise<C
   const sorted = [...uniq.values()].sort(
     (a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity] || (a.file < b.file ? -1 : a.file > b.file ? 1 : 0) || a.line - b.line || (a.rule < b.rule ? -1 : 1),
   );
-  return { findings: sorted, capabilities, stats: { files: tree.files, parsed, bytes: tree.bytes, ms: Date.now() - t0 }, dependencies, ...(caps.has("fs") && fsPaths.length > 0 ? { fsPaths } : {}), ...(caps.has("child_process") && (programs.length > 0 || programsUnknown) ? { programs, ...(programsUnknown ? { programsUnknown } : {}) } : {}), ...(credentials.length > 0 ? { credentials } : {}) };
+  return { v: CHECKS_VERSION, findings: sorted, capabilities, stats: { files: tree.files, parsed, bytes: tree.bytes, ms: Date.now() - t0 }, dependencies, ...(caps.has("fs") && fsPaths.length > 0 ? { fsPaths } : {}), ...(caps.has("child_process") && (programs.length > 0 || programsUnknown) ? { programs, ...(programsUnknown ? { programsUnknown } : {}) } : {}), ...(credentials.length > 0 ? { credentials } : {}) };
 }
 
 /**

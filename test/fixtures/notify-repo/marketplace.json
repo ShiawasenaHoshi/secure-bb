@@ -1,0 +1,1 @@
+{ "schemaVersion": 1, "name": "smsunarto", "plugins": [ { "id": "notify", "source": { "git": "https://github.com/smsunarto/bb-plugins.git", "path": "plugins/notify" } }, { "id": "agentation" }, { "id": "gh-stack" } ] }

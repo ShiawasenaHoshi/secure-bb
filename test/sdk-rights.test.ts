@@ -175,7 +175,7 @@ describe("names and states of threads are not the conversations", () => {
     expect(headline(r)).toEqual({ level: "caution", text: "Видит, какие вопросы агенты задают; знает названия и состояние ваших тредов (когда агенты начинают и заканчивают)" });
     expect(headline(r).text).not.toMatch(/переписк/);
   });
-  it("what carries text is a read: timeline, output, message.* and turn.* events, a computed event name", async () => {
+  it("what carries text is a read: timeline, output, message.* and turn.* events, a computed event name is only noted", async () => {
     for (const code of [
       "sdk.threads.timeline({})",
       "sdk.threads.output({})",
@@ -186,7 +186,10 @@ describe("names and states of threads are not the conversations", () => {
       expect(kinds(r)).toContain("sdk_read");
     }
     const dyn = await app("export default function A() { return null; }", "export default function (bb: any) { bb.events.on((globalThis as any).name, () => {}); }");
-    expect(kinds(dyn)).toContain("sdk_read");
+    // a name the code does not give is not a proof of reading text: the lesser right, and a review finding that says the name is computed
+    expect(kinds(dyn)).toContain("sdk_meta");
+    expect(kinds(dyn)).not.toContain("sdk_read");
+    expect(dyn.findings.some((f) => f.rule === "dynamic-access" && f.severity === "review")).toBe(true);
   });
   it("interactions.respond is still answering for the person; list only looks", async () => {
     expect(classifySdkChain("sdk.threads.interactions.list", true)).toEqual({ kind: "sdk_questions", detail: "threads.interactions.list" });

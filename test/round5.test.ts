@@ -3,7 +3,13 @@ import { chmodSync, cpSync, mkdtempSync, readdirSync, realpathSync, rmSync } fro
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { runChecks, type CheckResult } from "../src/checks/index.js";
+import Database from "better-sqlite3";
+import { runChecks, CHECKS_VERSION, type CheckResult } from "../src/checks/index.js";
+import { Gate, type HookCtx } from "../src/gate.js";
+import { buildOverview } from "../src/overview.js";
+import { MIGRATIONS, Store } from "../src/store.js";
+import { Watchdog } from "../src/watch/watchdog.js";
+import { FakeBb } from "./support/watch.js";
 import { createDrafts, DRAFT_TTL_MS } from "../src/drafts.js";
 import {
   checksSummary, countsLine, decisionOf, deferKey, DELETE_CONFIRM_BUTTONS, dropShadowedLocal, dropUnstamped, hasMark, hasNoGuardRecord, layoutItems, makeDeferStub, MIN_STUB_HEIGHT,
@@ -201,5 +207,94 @@ describe("the session is blocked only by a plugin that really runs", () => {
     expect(sessionBlockersFromGuard([run], null).map((b) => b.id)).toEqual(["bb-recap"]);
     for (const status of ["starting", "degraded"]) expect(isRunning({ status, statusDetail: null })).toBe(true);
     for (const status of ["disabled", "error", "missing", "incompatible", "needs-configuration"]) expect(isRunning({ status, statusDetail: null })).toBe(false);
+  });
+});
+
+// The card is built from what the gate stores for the version the core handed over: the whole repository, with the plugin's id.
+const T0 = 1_800_000_000_000;
+function cardSetup() {
+  const db = new Database(":memory:");
+  for (const stmt of MIGRATIONS) db.exec(stmt);
+  const store = new Store(db, () => T0);
+  const gate = new Gate({ store, now: () => T0, threads: { ancestors: async () => [], descendants: async () => [] }, thirdPartyRunning: async () => [], externalTotpFile: null, snapshotsRoot: join(scratch, "snapshots"), unsafeDirs: async () => [] });
+  const overview = () =>
+    buildOverview({
+      store,
+      gate,
+      now: () => T0,
+      hookRegistered: true,
+      listPlugins: async () => [],
+      probe: async () => ({ hookRegistered: true, env: {}, serverUid: 1, agentUid: 2, accountState: "unknown", builtins: {}, connectHold: { exists: false, serverCanDelete: null }, bind: { address: null, loopbackOnly: null }, apiAuth: "unknown", thirdParty: [], telemetryConfigured: null }),
+      descendants: async () => [],
+      watch: new Watchdog({ store, now: () => T0, source: new FakeBb(), actions: new FakeBb().actions, touch: () => undefined }),
+    });
+  return { store, gate, overview };
+}
+const repoCtx = (dir: string, pluginId: string, hash: string): HookCtx => ({ pluginId, version: "0.2.2", source: "git:https://github.com/smsunarto/bb-plugins.git", sourceKind: "git", gitCommit: "abc", npmIntegrity: null, rootDir: dir, contentHash: hash, trigger: "install" });
+function repoCopy(): string {
+  const dir = join(scratch, `repo${n++}`);
+  cpSync(join(FIXTURES, "notify-repo"), dir, { recursive: true });
+  chmodSync(dir, 0o755);
+  normalise(dir);
+  return dir;
+}
+
+describe("the card of a plugin from a repository of plugins (as the core hands it over)", () => {
+  it("notify: root with workspaces and no bb, marketplace.json, plugins/notify — the card has notify's rights, not the neighbours'", async () => {
+    const { gate, overview } = cardSetup();
+    await gate.decide(repoCtx(repoCopy(), "notify", "sha256:notify"));
+    await gate.checksIdle();
+    const ov = await overview();
+    const q = ov.queue.find((x) => x.pluginId === "notify")!;
+    const found = ov.queueChecks[q.id]!;
+    const kinds = found.capabilities.map((c) => c.kind);
+    expect(kinds).toEqual(["sdk_meta"]);
+    expect(kinds).not.toContain("sdk_send");
+    expect(kinds).not.toContain("sdk_read");
+    expect(kinds).not.toContain("ui_click");
+    expect(ov.checks["sha256:notify"]).toEqual(found);
+    const h = riskHeadline(capsWithPaths(found), found.findings.filter((f) => f.severity === "review").map((f) => f.rule));
+    expect(h.text).toBe("Знает названия и состояние ваших тредов (когда агенты начинают и заканчивают)");
+    expect(h.text).not.toMatch(/переписк|Нажимает|отвечает/);
+  });
+  it("the neighbours of the same repository get their own", async () => {
+    const { gate, overview } = cardSetup();
+    const dir = repoCopy();
+    await gate.decide(repoCtx(dir, "agentation", "sha256:agentation"));
+    await gate.decide(repoCtx(dir, "gh-stack", "sha256:gh-stack"));
+    await gate.checksIdle();
+    const ov = await overview();
+    const of = (id: string) => ov.queueChecks[ov.queue.find((x) => x.pluginId === id)!.id]!.capabilities.map((c) => c.kind);
+    expect(of("agentation")).toEqual(expect.arrayContaining(["sdk_send", "ui_click"]));
+    expect(of("agentation")).not.toContain("sdk_read");
+    expect(of("gh-stack")).toEqual(["ui", "sdk_read"]);
+  });
+  it("a result stored by the earlier analysis (the whole repository, no id) is made again, not shown", async () => {
+    const { gate, store, overview } = cardSetup();
+    const dir = repoCopy();
+    store.putCheck("sha256:notify", "notify", { findings: [], capabilities: [{ kind: "sdk_send", detail: ["threads.send"], sites: [] }, { kind: "sdk_read", detail: ["threads.timeline"], sites: [] }], stats: { files: 0, parsed: 0, bytes: 0, ms: 0 } });
+    await gate.decide(repoCtx(dir, "notify", "sha256:notify"));
+    await gate.checksIdle();
+    const stored = store.getCheck("sha256:notify")!;
+    expect(stored.result.v).toBe(CHECKS_VERSION);
+    expect(stored.result.capabilities.map((c) => c.kind)).toEqual(["sdk_meta"]);
+    const ov = await overview();
+    expect(ov.queueChecks[ov.queue.find((x) => x.pluginId === "notify")!.id]!.capabilities.map((c) => c.kind)).toEqual(["sdk_meta"]);
+  });
+});
+
+describe("schema keys named «output» and thread events are not «читает переписки»", () => {
+  it("chime-like: output: z.object(…), events in a loop, threads.get, interactions.list", async () => {
+    const r = await fixture("chime-schema");
+    const kinds = r.capabilities.map((c) => c.kind);
+    expect(kinds).toEqual(expect.arrayContaining(["sdk_meta", "sdk_questions"]));
+    expect(kinds).not.toContain("sdk_read");
+    expect(headline(r).text).not.toMatch(/переписк/);
+    expect(headline(r).level).toBe("caution");
+  });
+  it("only a call to timeline / output / search, or a message / turn event, is a read of conversations", async () => {
+    const { classifySdkChain } = await import("../src/checks/sdk-rights.js");
+    expect(classifySdkChain("sdk.threads.output", true)).toMatchObject({ kind: "sdk_read" });
+    expect(classifySdkChain("schemas.state.output", true)).toBeNull();
   });
 });

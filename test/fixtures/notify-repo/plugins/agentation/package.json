@@ -1,0 +1,1 @@
+{ "name": "@smsunarto/bb-plugin-agentation", "version": "1.0.0", "bb": { "app": "./app.tsx" } }

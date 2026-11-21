@@ -7,7 +7,7 @@ import { AfterFactScanner } from "../src/afterfact.js";
 import { Gate } from "../src/gate.js";
 import type { InstalledPluginLite } from "../src/probe.js";
 import { propose } from "../src/propose.js";
-import type { CheckResult } from "../src/checks/index.js";
+import { CHECKS_VERSION, type CheckResult } from "../src/checks/index.js";
 import { CLEAN, NETWORKED, withFindings } from "./support/checks.js";
 import { MIGRATIONS, Store } from "../src/store.js";
 import { base32Decode, hotp, stepAt } from "../src/totp.js";
@@ -108,11 +108,11 @@ describe("propose", () => {
     expect(res.exitCode).toBe(3);
     const q = e.store.listQueue()[0]!;
     expect(q.contentHash).toBeNull();
-    expect(e.gate.checkForQueue(q)).toEqual(NETWORKED);
+    expect(e.gate.checkForQueue(q)).toEqual({ ...NETWORKED, v: CHECKS_VERSION });
     // and once the core hashes it, the same result is linked to the core's hash
     const p = e.store.getProposal(q.proposalId!)!;
     await e.gate.decide({ pluginId: "demo", version: "1.0.0", source: `path:${p.snapshotDir}`, sourceKind: "path", gitCommit: null, npmIntegrity: null, rootDir: p.snapshotDir, contentHash: "sha256:core", trigger: "install" });
-    expect(e.store.getCheck("sha256:core")!.result).toEqual(NETWORKED);
+    expect(e.store.getCheck("sha256:core")!.result).toEqual({ ...NETWORKED, v: CHECKS_VERSION });
     expect(e.store.listLog().find((l) => l.kind === "check")!.detail).toMatchObject({ blocks: 0, reviews: 0, infos: 0 });
     expect(Object.keys(e.store.listLog().find((l) => l.kind === "check")!.detail as object)).not.toContain("review");
   });

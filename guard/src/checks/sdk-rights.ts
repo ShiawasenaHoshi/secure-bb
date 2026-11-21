@@ -127,9 +127,10 @@ export const UI_CLICK_ANSWERS = "agent-prompts";
 /** The detail of an `fs` right when the code reaches the person's own folders (home directory, Documents…). */
 export const FS_HOME = "home";
 
-/** A lifecycle event of bb (`bb.events.on(name)`): the right it gives; null for events that are not about threads. A name the code does not give is the wider right. */
+/** A lifecycle event of bb (`bb.events.on(name)`): the right it gives; null for events that are not about threads. */
 export function classifyEvent(name: string | null): { kind: "sdk_read" | "sdk_meta"; detail: string } | null {
-  if (name === null) return { kind: "sdk_read", detail: "events.on" };
+  // A name the code does not give (a loop over a list of events): the right is the lesser one, and the call is shown to a person as a review finding.
+  if (name === null) return { kind: "sdk_meta", detail: "events.on:?" };
   // Events that carry what is written (messages, turns, the thread's event stream).
   if (/^(experimental_)?(message|turn)\b|^experimental_thread\.events$/.test(name)) return { kind: "sdk_read", detail: `events.on:${name}` };
   if (/thread|terminal/i.test(name)) return { kind: "sdk_meta", detail: `events.on:${name}` };

@@ -1274,6 +1274,7 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
         if (simple === "on" && /(^|\.)events$/.test(sdkChain(callee.object) ?? "")) {
           const hit = classifyEvent(n.arguments[0] ? fold(n.arguments[0], consts) : null);
           if (hit) cap(hit.kind, hit.detail, n);
+          if (hit && hit.detail === "events.on:?") finding("dynamic-access", "review", n, `${text(lineOf(n))}  (the name of the event is computed)`);
         }
       }
       if (simple !== null && LOAD_EXTENSION_METHODS.has(simple)) finding("sqlite-extension", "block", n);
