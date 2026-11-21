@@ -290,6 +290,44 @@ describe("hold (a request of the plugin's hook: tightening only)", () => {
     expect(await g.send(decideReq({ contentHash: H1 }))).toMatchObject({ action: "proceed", via: "approval" });
   });
 
+  it("dismissing a stopped entry (no code) neither lifts the stop nor leaves the window open: decide stays `wait`, the window is closed, the journal says so", async () => {
+    g = await startGuard();
+    await g.send({ op: "open-window", pluginId: "demo", minutes: 10, code: g.code() });
+    await g.send(holdReq({ contentHash: H1, stop: true }));
+    expect((await g.send({ op: "dismiss", requestId: 1 })).ok).toBe(true); // no code
+    expect(await g.send(decideReq({ contentHash: H1 }))).toMatchObject({ action: "wait" });
+    const s = await g.send({ op: "state" });
+    expect(s.windows).toHaveLength(0);
+    expect(s.closedWindows[0]).toMatchObject({ pluginId: "demo", closedReason: "dismissed-stop" });
+    expect((s.journal.recent as any[]).some((j) => j.kind === "dismissed" && j.detail.stop === true)).toBe(true);
+    expect((s.journal.recent as any[]).some((j) => j.kind === "window.close" && j.detail.reason === "dismissed-stop")).toBe(true);
+    // a window opened again (with a code) still does not wave this version in; the entry decide makes keeps the stop
+    await g.send({ op: "open-window", pluginId: "demo", minutes: 10, code: g.nextCode() });
+    expect(await g.send(decideReq({ contentHash: H1 }))).toMatchObject({ action: "wait" });
+    expect(await g.send(decideReq({ contentHash: H1 }))).toMatchObject({ action: "wait" });
+    expect(await g.send(decideReq({ contentHash: H2 }))).toMatchObject({ action: "proceed", via: "window" }); // other versions: the window works
+    // and the way out is a code
+    const held = (await g.send({ op: "state" })).queue.find((q: any) => q.status === "held" && q.contentHash === H1);
+    expect((await g.send({ op: "approve", requestId: held.id, code: g.nextCode() })).ok).toBe(true);
+    expect(await g.send(decideReq({ contentHash: H1 }))).toMatchObject({ action: "proceed", via: "approval" });
+  });
+
+  it("the stop of a dismissed entry is not pruned by a flood of other entries; dismissing a plain entry leaves the window alone", async () => {
+    g = await startGuard();
+    await g.send({ op: "open-window", pluginId: "demo", minutes: 10, code: g.code() });
+    await g.send(holdReq({ contentHash: H1, stop: true }));
+    await g.send({ op: "dismiss", requestId: 1 });
+    for (let i = 0; i < 150; i++) g.guard.hold({ ...holdReq({ pluginId: "other", contentHash: `${String(i).padStart(8, "0")}${"e".repeat(32)}` }) });
+    for (const r of (await g.send({ op: "state" })).queue.filter((q: any) => q.status === "held")) await g.send({ op: "dismiss", requestId: r.id });
+    await g.send({ op: "open-window", pluginId: "demo", minutes: 10, code: g.nextCode() });
+    expect(await g.send(decideReq({ contentHash: H1 }))).toMatchObject({ action: "wait" });
+    // plain (stop=0) entry: dismissing it does not close the window
+    await g.send(holdReq({ contentHash: H2 }));
+    const h2 = (await g.send({ op: "state" })).queue.find((q: any) => q.status === "held" && q.contentHash === H2);
+    await g.send({ op: "dismiss", requestId: h2.id });
+    expect((await g.send({ op: "state" })).windows).toHaveLength(1);
+  });
+
   it("a plain hold is lifted by a window opened later, as a hold of decide is", async () => {
     g = await startGuard();
     await g.send(holdReq({ contentHash: H1 }));

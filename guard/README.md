@@ -43,7 +43,7 @@ sbb-guard import FILE    [--data DIR] [--yes] [--digest SHA256]
 | `decide {pluginId, version, contentHash, rootDir, source, sourceKind, trigger}` | хеш одобрен → `proceed`; открыто окно на `pluginId` → `proceed` + одобрение «окном» в журнале; иначе → `wait` и запись в очередь |
 | `state` | очередь, одобрения, окна, журнал (для страницы); секретов нет |
 | `annotate {requestId \| contentHash, findings}` | проверки плагина к записи очереди; **только для показа**, помечено «не проверено сторожем» |
-| `close-window {windowId \| pluginId}`, `revoke {approvalId \| pluginId}`, `dismiss {requestId}` | ужесточение, без кода и вне блокировки; `dismiss` — только для удержанных записей, в журнал пишется |
+| `close-window {windowId \| pluginId}`, `revoke {approvalId \| pluginId}`, `dismiss {requestId}` | ужесточение, без кода и вне блокировки; `dismiss` — только для удержанных записей, в журнал пишется; отклонение записи со `stop` не снимает стоп (окно эту версию не одобрит, только `approve` с кодом) и закрывает открытое окно этого плагина |
 | `ping`, `journal-verify` | жив ли; проверка цепочки |
 | `lookup {pluginId, contentHash}` | *(дополнение к документу)* только чтение: одобрено ли, открыто ли окно, чьё одобрение. Нужно хуку плагина |
 | `hold {…как decide…, stop}` | *(дополнение)* удержать версию для человека; с `stop` окно её не снимает. Ужесточение: хуку плагина нужно «стоп по новой возможности» в окне, а ядро после «держать» хука может сторожа не спрашивать |
