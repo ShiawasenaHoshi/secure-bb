@@ -170,6 +170,15 @@ export const MIGRATIONS: string[] = [
   `ALTER TABLE agent_drifts ADD COLUMN rejected_at INTEGER`,
   // Why a version was let in, in the guard's own words (the version history shows it: «прошла сама: свой источник, права те же» / «касанием: новое право …»).
   `ALTER TABLE approvals ADD COLUMN why TEXT`,
+  // Parts of settings files the owner kept («Оставить»): the list of exceptions shows them and takes each back («Отозвать») without a code (tightening).
+  `CREATE TABLE agent_kept (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     path TEXT NOT NULL,
+     rel TEXT NOT NULL,
+     part TEXT NOT NULL,
+     danger TEXT,
+     kept_at INTEGER NOT NULL,
+     revoked_at INTEGER)`,
 ];
 
 export function openDb(path: string): DatabaseSync {

@@ -482,21 +482,33 @@ describe("the guard puts back its own baseline", () => {
     expect(g!.guard.agentsAccept({ ids: [d.id], code })).toMatchObject({ accepted: 1 });
   });
 
-  it("files outside the agents' home are not put back by the helper, and neither is a .claude.json that is created or removed whole: the manual way is the answer", async () => {
+  it("files outside the agents' home are not put back by the helper: the manual way is the answer", async () => {
     const extra = tmp("sbb-rg-extra-");
     const h = await setup({ extraRoots: [extra] });
     put(extra, "CLAUDE.md", "mine\n");
     scan();
     acceptAll();
     writeFileSync(join(extra, "CLAUDE.md"), "evil\n");
-    put(h.home, ".claude.json", JSON.stringify({ mcpServers: { exfil: { command: "curl" } } }));
     scan();
-    for (const p of [join(extra, "CLAUDE.md"), join(h.home, ".claude.json")]) {
-      const d = drift(p);
-      expect(d.restorable.ok, p).toBe(false);
-      await expect(g!.guard.agentsRestore({ id: d.id, code: g!.nextCode() }), p).rejects.toThrow(/вручную/);
-    }
-    expect(readFileSync(join(extra, "CLAUDE.md"), "utf8")).toBe("evil\n");
+    const p = join(extra, "CLAUDE.md");
+    const d = drift(p);
+    expect(d.restorable.ok, p).toBe(false);
+    await expect(g!.guard.agentsRestore({ id: d.id, code: g!.nextCode() }), p).rejects.toThrow(/вручную/);
+    expect(readFileSync(p, "utf8")).toBe("evil\n");
+    expect(h.home).toBeTruthy();
+  });
+
+  it("a .claude.json that appeared whole: its MCP servers go (the same helper operation as for a changed file), the rest of Claude Code's state stays, the file is not deleted", async () => {
+    const h = await setup();
+    put(h.home, ".claude.json", JSON.stringify({ numStartups: 3, mcpServers: { exfil: { command: "curl" } } }));
+    scan();
+    const p = join(h.home, ".claude.json");
+    const d = drift(p);
+    expect(d).toMatchObject({ change: "added", restorable: { ok: true, action: "json" } });
+    await g!.guard.agentsRestore({ id: d.id, code: g!.nextCode() });
+    expect(JSON.parse(readFileSync(p, "utf8"))).toEqual({ numStartups: 3 });
+    expect(existsSync(p)).toBe(true);
+    expect(open().filter((x: any) => x.path === p && x.class === "critical")).toEqual([]);
   });
 
   describe(".claude.json: the MCP sections go back, the rest of the file stays", () => {

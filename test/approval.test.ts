@@ -31,6 +31,9 @@ const EXPECTED: Record<string, RpcGroup> = {
   "watch.window.close": "free",
   "skills.approve": "routine",
   "batch.approve": "routine",
+  "agents.keepPart": "routine", // «Оставить» a part of a settings file: a session for a part that is not dangerous; the guard checks the flag itself and refuses a session for a dangerous one
+  "agents.rollbackPart": "free", // «Вернуть» a part: tightening, no code
+  "agents.revokeKept": "free", // «Отозвать» a kept part: tightening, no code
   // dangerous (doc §1: политика, снять блок, выключить защиту/откат, доверенные репозитории/источники, провайдер/адрес, регистрация)
   "session.open": "dangerous",
   "queue.approveTrust": "dangerous",
@@ -324,8 +327,14 @@ describe("the approval session (§1)", () => {
       return proof;
     };
     try {
+      // Guard mode only: the proof (code, key or session) is checked AT THE GUARD, which also decides whether a session is enough (the part's danger flag is its own reading).
+      const AT_THE_GUARD = new Set(["agents.keepPart"]);
       for (const [name, group] of Object.entries(EXPECTED)) {
-        if (group === "routine") {
+        if (group === "routine" && AT_THE_GUARD.has(name)) {
+          seen.length = 0;
+          await expect(h.rpc(name, { id: 1, partId: "0".repeat(16), fileSha: "0".repeat(16), danger: false, session: token }), name).rejects.toThrow(/через сторожа/);
+          expect(seen, name).toEqual([]);
+        } else if (group === "routine") {
           seen.length = 0;
           await h.rpc(name, { ...(args[name] as object), session: token }).catch(() => undefined);
           expect(seen.map((s) => s.rpc), name).toEqual([name]);

@@ -149,7 +149,7 @@ describe("9. trust window for a plugin from a folder", () => {
   it("is unavailable, says why, and what to do instead (own source: nothing to do)", () => {
     const w = windowAvailability({ threadId: null, queueId: 4, sourceKind: "path", level: "own" });
     expect(w.available).toBe(false);
-    expect(w.note).toContain("из папки");
+    expect(w.note).toContain("взят из папки");
     expect(w.note).toContain("Ваш источник уже в доверенных: версии без новых прав проходят сами");
   });
   it("a folder that is not yet trusted points at «доверять источнику»", () => {

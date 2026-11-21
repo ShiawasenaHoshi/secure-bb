@@ -124,6 +124,29 @@ function allowCovers(wide: string, narrow: string): boolean {
 /** Reasons that only say something got narrower or went away: not a reason to ask for a code (but the card tells it, so the red text never contradicts the diff). */
 export const isTightening = (reason: string): boolean => /^permissions\.allow: (?:сужено|убрано)/.test(reason);
 
+/** Top-level settings keys that make the agent run a command, load plugins/marketplaces/MCP, change its login, or widen what it may do. */
+export const RISKY_KEYS: ReadonlyArray<readonly [string, string]> = [
+  ["statusLine", "команда, которую агент запускает для строки состояния"],
+  ["fileSuggestion", "команда, которую агент запускает для подсказок файлов"],
+  ["otelHeadersHelper", "команда, которую агент запускает для заголовков телеметрии"],
+  ["awsAuthRefresh", "команда входа в AWS, которую агент запускает сам"],
+  ["awsCredentialExport", "команда, выдающая ключи AWS"],
+  ["gcpAuthRefresh", "команда входа в Google Cloud, которую агент запускает сам"],
+  ["policyHelper", "программа, которая выдаёт агенту политику"],
+  ["processWrapper", "программа, через которую агент запускает процессы"],
+  ["sshHostCommands", "команды для SSH-хостов"],
+  ["enabledPlugins", "подключены плагины агента"],
+  ["extraKnownMarketplaces", "добавлен каталог плагинов агента"],
+  ["pluginConfigs", "настройки плагинов агента"],
+  ["allowedMcpServers", "разрешены MCP-серверы"],
+  ["enableAllProjectMcpServers", "все MCP-серверы проекта включаются без вопросов"],
+  ["enabledMcpjsonServers", "включены MCP-серверы проекта"],
+  ["forceLoginMethod", "изменён способ входа агента"],
+  ["forceLoginOrgUUID", "изменена организация, под которой входит агент"],
+  ["forceLoginGatewayUrl", "изменён шлюз входа агента"],
+  ["skipDangerousModePermissionPrompt", "агент не переспрашивает про опасный режим"],
+  ["modelOverrides", "подменены модели агента"],
+];
 const BAD_ENV = /(?:_BASE_URL|_PROXY)$|^NODE_OPTIONS$/i;
 
 /** Critical reasons of a JSON config that is new or changed, relative to the previous (accepted) one. */
@@ -156,6 +179,13 @@ export function jsonReasons(kind: FileKind, next: Record<string, Json>, prev: Re
   if (isObj(next.env)) {
     const oldEnv = isObj(old.env) ? old.env : {};
     for (const [k, v] of Object.entries(next.env)) if (BAD_ENV.test(k) && !same(oldEnv[k], v)) out.push(`env ${k}: ${oldEnv[k] === undefined ? "задан" : "изменён"}`);
+  }
+  // Keys through which the agent runs a command, loads somebody else's code or tools, changes who it signs in as, or gets more of the machine
+  // (Claude Code's settings reference: code.claude.com/docs/en/settings-reference, read up to its first 100 000 characters). Any change to one is critical.
+  for (const [k, what] of RISKY_KEYS) if (next[k] !== undefined && !same(next[k], old[k])) out.push(`${k}: ${what}`);
+  if (isObj(next.sandbox)) {
+    const oldSb = isObj(old.sandbox) ? old.sandbox : {};
+    for (const [k, v] of Object.entries(next.sandbox)) if (k !== "enabled" && !same(v, oldSb[k])) out.push(`sandbox.${k}: меняет границы песочницы`);
   }
   // other ways to run code or redirect the agent
   if (next.apiKeyHelper !== undefined && !same(next.apiKeyHelper, old.apiKeyHelper)) out.push("apiKeyHelper: команда выдаёт ключ API");

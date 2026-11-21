@@ -56,6 +56,8 @@ export interface PluginView {
   unreviewedBaseline: boolean;
   /** «Открыть окно» on this row: possible (a thread to bind it to is known), or why not. */
   windowOpen: { available: boolean; note: string | null };
+  /** The thread that proposed this plugin through `bb secure-bb propose` (the newest), when there was one. */
+  threadId: string | null;
 }
 export interface AiView {
   settings: AiSettings;
@@ -101,6 +103,8 @@ export interface Overview {
   sessionBlockers: SessionBlocker[];
   queue: QueueRow[];
   plugins: PluginView[];
+  /** bb's own plugins (not counted among `plugins`): shown as one line. */
+  builtinPlugins: number;
   windows: WindowView[];
   log: LogRow[];
   /** Stage 2.1 check results by content hash (held queue entries and approved versions). */
@@ -339,6 +343,7 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
       window: windows.find((w) => w.pluginId === p.id) ?? null,
       frozenPin: mine[0] !== undefined && mine[0].via !== "touch" && !windows.some((w) => w.pluginId === p.id),
       unreviewedBaseline: baseline.has(p.id) && mine.length === 0,
+      threadId: d.store.latestThreadProposal(p.id)?.threadId ?? null,
       windowOpen: pluginWindowAvail({
         guard: guarded?.state != null,
         threadId: d.store.latestThreadProposal(p.id)?.threadId ?? null,
@@ -405,6 +410,7 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
     queue,
     queueChecks,
     plugins: views,
+    builtinPlugins: plugins.filter((p) => p.provenance === "builtin").length,
     windows,
     log: d.store.listLog(40),
     checks,
