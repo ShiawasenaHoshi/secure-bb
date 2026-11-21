@@ -67,9 +67,56 @@ export interface CapLike {
   detail: string[];
   /** For `fs`: the literal paths the code hands to file calls, when it names any. */
   paths?: string[];
+  /** For `child_process`: the programs the code starts by name, and whether it also starts one it does not name. */
+  programs?: string[];
+  programsUnknown?: boolean;
 }
-/** The capabilities of a check result, with the file paths of the result put on the `fs` one (so that a card can name them). */
-export const capsWithPaths = (r: { capabilities: CapLike[]; fsPaths?: string[] } | undefined): CapLike[] => meaningfulCaps(r?.capabilities ?? []).map((c) => (c.kind === "fs" && r?.fsPaths && r.fsPaths.length > 0 ? { ...c, paths: r.fsPaths } : c));
+/** The detail of a network right whose address the code does not show (the guard's `UNRESOLVED_HOST`). */
+const UNRESOLVED_HOST = "unresolved-host";
+/**
+ * The capabilities of a check result, with the file paths of the result put on the `fs` one and the programs on the `child_process` one (so that a card can
+ * name them), and, when the code reaches other programs' credential files, a first right `credentials` naming whose.
+ */
+export const capsWithPaths = (r: { capabilities: CapLike[]; fsPaths?: string[]; programs?: string[]; programsUnknown?: boolean; credentials?: string[] } | undefined): CapLike[] => {
+  const caps = meaningfulCaps(r?.capabilities ?? []).map((c) =>
+    c.kind === "fs" && r?.fsPaths && r.fsPaths.length > 0 ? { ...c, paths: r.fsPaths } : c.kind === "child_process" && r ? { ...c, programs: r.programs ?? [], programsUnknown: r.programsUnknown ?? false } : c,
+  );
+  return r?.credentials && r.credentials.length > 0 ? [{ kind: "credentials", detail: r.credentials }, ...caps] : caps;
+};
+
+/** Known system programs in a person's words (by file name). `risky`: it is not just a helper: it drives other programs or the system. */
+const PROGRAM_NAMES: Record<string, { name: string; risky?: boolean }> = {
+  afplay: { name: "проигрыватель звука macOS" },
+  say: { name: "голос macOS (читает текст вслух)" },
+  osascript: { name: "скрипты macOS (может управлять другими программами)", risky: true },
+  open: { name: "открывалка macOS (открывает файлы, ссылки и программы)" },
+  "notify-send": { name: "уведомления Linux" },
+  "xdg-open": { name: "открывалка Linux (открывает файлы и ссылки)" },
+  git: { name: "git (работа с кодом)" },
+  npm: { name: "npm (установка пакетов и запуск скриптов)" },
+  npx: { name: "npx (запуск пакетов из интернета)", risky: true },
+  node: { name: "Node.js" },
+  pbcopy: { name: "буфер обмена macOS" },
+  pbpaste: { name: "буфер обмена macOS" },
+  security: { name: "связка ключей macOS (пароли)", risky: true },
+  curl: { name: "curl (загрузка из интернета)" },
+  wget: { name: "wget (загрузка из интернета)" },
+  sh: { name: "командная оболочка (выполняет любые команды)", risky: true },
+  bash: { name: "командная оболочка (выполняет любые команды)", risky: true },
+  zsh: { name: "командная оболочка (выполняет любые команды)", risky: true },
+  powershell: { name: "PowerShell (выполняет любые команды)", risky: true },
+  cmd: { name: "командная строка Windows (выполняет любые команды)", risky: true },
+  sudo: { name: "sudo (команды с правами администратора)", risky: true },
+};
+export const programName = (p: string): string => PROGRAM_NAMES[p.toLowerCase()]?.name ?? p;
+const riskyProgram = (p: string): boolean => PROGRAM_NAMES[p.toLowerCase()]?.risky === true;
+/** «запускает программу …», by the names the code gives; the rest of the programs, when the code names none, are «какие — из кода не видно». */
+function programsText(c: CapLike): string {
+  const list = c.programs ?? [];
+  if (list.length === 0) return "запускать программы на компьютере (какие именно, из кода не видно)";
+  const names = [...new Set(list.map(programName))];
+  return `${names.length === 1 ? "запускает программу" : "запускает программы"}: ${names.slice(0, 3).join(", ")}${names.length > 3 ? ", …" : ""}${c.programsUnknown ? "; и другие, которые не видны в коде" : ""}`;
+}
 
 /**
  * What of a plugin's rights is worth a person's attention. «dynamic_code» is raised by many harmless things (bundles, `Function("return this")`, property
@@ -125,8 +172,10 @@ function envSegments(detail: string[]): Segment[] {
 /** The network right, concretely: the hosts named in the code are named; with none named it says it can go anywhere. */
 function networkText(detail: string[]): string {
   const hosts = detail.filter((d) => d.startsWith("host:")).map((d) => d.slice(5));
-  if (hosts.length === 0) return "выходить в интернет на любые адреса (какие именно, из кода не видно)";
-  return `обращаться по сети только к ${hosts.slice(0, 3).join(", ")}${hosts.length > 3 ? ", …" : ""} (других адресов в коде не найдено)`;
+  const hidden = detail.includes(UNRESOLVED_HOST);
+  if (hosts.length === 0) return "обращаться по сети к адресам, которые не видны в коде";
+  const list = `${hosts.slice(0, 3).join(", ")}${hosts.length > 3 ? ", …" : ""}`;
+  return hidden ? `обращаться по сети к ${list} и к другим адресам, которые не видны в коде` : `обращаться по сети только к ${list} (других адресов в коде не найдено)`;
 }
 /** What a right means for a person, in pieces (so that «все» can be red). */
 export function capabilitySegments(c: CapLike): Segment[] {
@@ -147,7 +196,9 @@ export function capabilityPhrase(c: CapLike): string {
     case "env":
       return envSegments(c.detail).map((x) => x.text).join("");
     case "child_process":
-      return "запускать программы на компьютере";
+      return programsText(c);
+    case "credentials":
+      return `читать ваши учётные данные других программ: ${c.detail.join(", ")}`;
     case "fs":
       return c.paths && c.paths.length > 0
         ? `читать и писать файлы (в коде названы: ${c.paths.slice(0, 3).join(", ")}${c.paths.length > 3 ? ", …" : ""}; остальное из кода не видно)`
@@ -184,7 +235,7 @@ function tokensText(tokens: string[]): string {
   }
   const out: string[] = [];
   for (const [kind, detail] of kinds) {
-    if (kind === "network") out.push(detail.length > 0 ? `сеть ${detail.join(", ")}` : "выход в сеть");
+    if (kind === "network") out.push(detail.length > 0 ? `сеть ${detail.map((d) => (d === UNRESOLVED_HOST ? "адреса, не видные в коде" : d)).join(", ")}` : "выход в сеть");
     else if (kind === "env") out.push(detail.length > 0 ? `переменные окружения ${detail.join(", ")}` : "переменные окружения");
     else out.push(capabilityPhrase({ kind, detail }));
   }
@@ -1167,6 +1218,9 @@ const SAFE_KINDS = new Set(["ui", "database"]);
  */
 export function riskHeadline(caps: CapLike[], reviewRules: string[] = []): Risk {
   const has = (k: string): CapLike | undefined => caps.find((c) => c.kind === k);
+  // Other programs' logins come first and are said outright: that is more than any variable of the environment. Red when the plugin can also send it out.
+  const creds = has("credentials");
+  if (creds) return { level: has("network") ? "danger" : "caution", text: `Читает ваши учётные данные других программ: ${creds.detail.slice(0, 3).join(", ")}${creds.detail.length > 3 ? ", …" : ""}` };
   const env = has("env");
   if (env) {
     const names = [...new Set(env.detail.map((d) => d.replace(/^env:/, "")))].filter((n) => n !== "");
@@ -1176,12 +1230,17 @@ export function riskHeadline(caps: CapLike[], reviewRules: string[] = []): Risk 
   if (fs && !(fs.paths && fs.paths.length > 0)) return { level: "danger", text: "Может читать и менять ваши документы" };
   if (has("server_access") || has("builtin_rpc")) return { level: "danger", text: "Может управлять самим bb: аккаунтом, подключениями, инструкциями" };
   if (fs) return { level: "caution", text: `Может читать и менять файлы: ${fs.paths!.slice(0, 2).join(", ")}${fs.paths!.length > 2 ? ", …" : ""}` };
-  if (has("child_process")) return { level: "caution", text: "Может запускать программы на вашем компьютере" };
+  const child = has("child_process");
+  if (child) {
+    const names = [...new Set((child.programs ?? []).map(programName))];
+    const text = names.length === 0 ? "Может запускать программы на вашем компьютере" : `${names.length === 1 ? "Запускает программу" : "Запускает программы"}: ${names.slice(0, 2).join(", ")}${names.length > 2 ? ", …" : ""}${child.programsUnknown ? " (и другие, не видные в коде)" : ""}`;
+    return { level: child.programsUnknown || (child.programs ?? []).some(riskyProgram) ? "danger" : "caution", text };
+  }
   if (has("contribute_env") || has("host_artifact")) return { level: "caution", text: "Может менять окружение запускаемых программ и класть свои файлы на компьютер" };
   const net = has("network");
   if (net) {
     const hosts = hostsOf(caps);
-    return { level: "caution", text: hosts.length === 0 ? "Может выходить в интернет на любые адреса" : `Может обращаться по сети к ${hosts.slice(0, 2).join(", ")}${hosts.length > 2 ? ", …" : ""}` };
+    return { level: "caution", text: hosts.length === 0 ? "Может обращаться по сети к адресам, которые не видны в коде" : `Может обращаться по сети к ${hosts.slice(0, 2).join(", ")}${hosts.length > 2 ? ", …" : ""}${net.detail.includes(UNRESOLVED_HOST) ? " и к другим адресам, не видным в коде" : ""}` };
   }
   if (has("http_routes")) return { level: "caution", text: "Может открывать свои адреса на сервере bb" };
   if (env) return { level: "caution", text: "Может узнавать некоторые сведения о вашем компьютере (имя пользователя, язык)" };

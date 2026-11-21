@@ -34,7 +34,7 @@ describe("2. rights are concrete", () => {
     const any = capabilityPhrase({ kind: "network", detail: ["module:node:https"] });
     expect(one).toContain("telemetry.example");
     expect(one).not.toContain("любые");
-    expect(any).toContain("любые адреса");
+    expect(any).toContain("адресам, которые не видны в коде");
     expect(one).not.toBe(any);
   });
   it("an ordinary plugin and the thief no longer read the same", () => {

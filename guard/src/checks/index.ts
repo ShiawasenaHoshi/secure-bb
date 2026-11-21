@@ -7,7 +7,7 @@ import { excerptOf, isCodeFile, isUrlSpec, packageDirOf, scanTree, type SourceFi
 import { entryPoints, fileCandidates, resolveSpecifier, type GraphContext } from "./reach.ts";
 import { inventoryPackages, verifyInstalledPackages, type Integrity, type IntegrityEnv } from "../deps/integrity.ts";
 import { collectDependencies, nameFindings } from "../deps/collect.ts";
-import { CAPABILITY_KINDS, type Capability, type CapabilityKind, type CheckResult, type Finding } from "./types.ts";
+import { CAPABILITY_KINDS, UNRESOLVED_HOST, type Capability, type CapabilityKind, type CheckResult, type Finding } from "./types.ts";
 
 export type { Capability, CapabilityKind, CheckResult, Finding, Severity } from "./types.ts";
 export { CAPABILITY_KINDS } from "./types.ts";
@@ -189,7 +189,11 @@ export async function runChecks(dir: string, opts: CheckOptions = {}): Promise<C
   for (const { rel, facts } of perFile) {
     if (!anyNetwork) break;
     for (const h of facts.hosts) addCap(caps, "network", `host:${h.host}`, rel, h.line);
+    for (const line of facts.unresolvedHosts) addCap(caps, "network", UNRESOLVED_HOST, rel, line);
   }
+  const programs = [...new Set(perFile.flatMap(({ facts }) => facts.programs))].slice(0, 10);
+  const programsUnknown = perFile.some(({ facts }) => facts.programsUnknown);
+  const credentials = [...new Set(perFile.flatMap(({ facts }) => facts.credentials.map((c) => c.label)))];
 
   const fsPaths = [...new Set(perFile.flatMap(({ facts }) => facts.fsPaths))].slice(0, 5);
 
@@ -281,7 +285,7 @@ export async function runChecks(dir: string, opts: CheckOptions = {}): Promise<C
   const sorted = [...uniq.values()].sort(
     (a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity] || (a.file < b.file ? -1 : a.file > b.file ? 1 : 0) || a.line - b.line || (a.rule < b.rule ? -1 : 1),
   );
-  return { findings: sorted, capabilities, stats: { files: tree.files, parsed, bytes: tree.bytes, ms: Date.now() - t0 }, dependencies, ...(caps.has("fs") && fsPaths.length > 0 ? { fsPaths } : {}) };
+  return { findings: sorted, capabilities, stats: { files: tree.files, parsed, bytes: tree.bytes, ms: Date.now() - t0 }, dependencies, ...(caps.has("fs") && fsPaths.length > 0 ? { fsPaths } : {}), ...(caps.has("child_process") && (programs.length > 0 || programsUnknown) ? { programs, ...(programsUnknown ? { programsUnknown } : {}) } : {}), ...(credentials.length > 0 ? { credentials } : {}) };
 }
 
 /**
