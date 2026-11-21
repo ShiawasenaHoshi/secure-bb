@@ -58,8 +58,10 @@ import {
   type TrustMode,
 } from "./trust.ts";
 import { scan as scanAgents, type FileKind, type Limits, type ScanResult } from "./agents-scan.ts";
+import { watchedRel } from "./restore.ts";
+import { helperUp, sendRestore } from "./restore-client.ts";
 
-export type GuardErrorCode = "invalid" | "not_found" | "conflict" | "not_registered" | "invalid_code" | "invalid_passkey" | "expired" | "blocked" | "unknown_op";
+export type GuardErrorCode = "invalid" | "not_found" | "conflict" | "not_registered" | "invalid_code" | "invalid_passkey" | "expired" | "blocked" | "unknown_op" | "no_restore" | "unavailable" | "restore_failed";
 
 export class GuardError extends Error {
   readonly code: GuardErrorCode;
@@ -315,6 +317,8 @@ export interface AgentsConfig {
   deny?: string[];
   /** Tests: a function called between looking at a file and opening it. */
   hooks?: { beforeOpen?: (path: string) => void };
+  /** The restore helper's socket (restore.ts, a service of the agents' user). Absent: nothing can be put back by the guard, the page shows the manual way. */
+  restore?: { socket: string; timeoutMs?: number };
 }
 
 /** What a touch is made of: a TOTP code, or (instead of it) a passkey assertion. */
@@ -1625,8 +1629,11 @@ export class Guard {
         return { op: "sources-add", entries: this.entriesOf(a.entries) };
       case "agents-accept":
         return { op: "agents-accept", ids: this.agentIds(a.ids) };
+      // Only the id: what is written comes from the guard's own baseline, never from the action.
+      case "agents-restore":
+        return { op: "agents-restore", id: intOf(a.id, "id", 1, Number.MAX_SAFE_INTEGER) };
       default:
-        throw new GuardError("invalid", "an action is approve, approve-trust, session-open, batch-approve, open-window, policy, touch, trust-mode, sources-add or agents-accept");
+        throw new GuardError("invalid", "an action is approve, approve-trust, session-open, batch-approve, open-window, policy, touch, trust-mode, sources-add, agents-accept or agents-restore");
     }
   }
 
@@ -1674,6 +1681,13 @@ export class Guard {
         const first = rows.filter((r) => Number(r.initial) === 1).length;
         const list = rows.slice(0, 5).map((r) => `${String(r.path)} (${String(r.change)}, ${String(r.class)})`).join("; ");
         return `${first === rows.length ? "Первый эталон: принять всё как есть — " : ""}Принять в эталон наблюдателя за конфигурациями и памятью агентов ${rows.length} расхождений (критичных ${by("critical")}, инструкций ${by("instructions")}, прочих ${by("other")}): ${list}${rows.length > 5 ? ` и ещё ${rows.length - 5}` : ""}`;
+      }
+      case "agents-restore": {
+        if (this.agents === null) throw new GuardError("invalid", "the agent watch is not configured at this guard");
+        const [r] = this.openDrifts([Number(a.id)]);
+        const plan = this.restorePlan(r!);
+        if (!plan.ok) throw new GuardError("no_restore", plan.reason);
+        return `Вернуть настройки агента как было: ${String(r!.path)} — ${plan.action === "delete" ? "файл будет удалён (в одобренных настройках его нет)" : `файл будет записан ровно в том виде, в каком вы его одобряли (хеш ${plan.sha.slice(0, 16)}…)`}. Содержимое берёт сам сторож из своих одобренных настроек; сразу после отката он просмотрит файл заново`;
       }
       case "touch":
         if (a.purpose === SETUP_CHECK_PURPOSE) return "Проверка касания при настройке: ничего не одобряется и не меняется, в журнал сторожа ляжет запись «касание сработало»";
@@ -1943,6 +1957,8 @@ export class Guard {
       resolvedAt: r.resolved_at === null ? null : Number(r.resolved_at),
       rejected: r.rejected_at !== null && r.rejected_at !== undefined,
       rejectedAt: r.rejected_at === null || r.rejected_at === undefined ? null : Number(r.rejected_at),
+      // What «Вернуть как было» would do, or why it cannot be done (the page shows the manual way then).
+      ...(String(r.status) === "open" ? { restorable: ((p) => (p.ok ? { ok: true, action: p.action } : { ok: false, reason: p.reason }))(this.restorePlan(r)) } : {}),
     });
     const rank = `CASE class WHEN 'critical' THEN 0 WHEN 'instructions' THEN 1 ELSE 2 END`;
     const open = (this.db.prepare(`SELECT * FROM agent_drifts WHERE status = 'open' ORDER BY ${rank}, id DESC LIMIT 500`).all() as Raw[]).map(view);
@@ -1953,6 +1969,7 @@ export class Guard {
       enabled: true,
       home: this.agents.home,
       extraRoots: this.agents.extraRoots,
+      restoreConfigured: this.agents.restore !== undefined,
       lastScanAt: (last?.at as number | undefined) ?? null,
       scannedFiles: (last?.files as number | undefined) ?? 0,
       roots: (last?.roots as number | undefined) ?? 0,
@@ -1967,10 +1984,65 @@ export class Guard {
     };
   }
 
+  // ---- putting a file back (design: secure-bb-agent-rollback-design.md) ----------------------------------------------------------
+  // The guard only reads the agents' files. Writing is the job of the restore helper (restore.ts), a service of the agents' user whose socket only
+  // the guard's user reaches. What the helper is told to write is the guard's OWN baseline, chosen by the id of a difference — never anything the
+  // caller sends. A touch is needed (a code or a passkey, a session does not cover it): a harmful process of the bb user must not be able to
+  // roll the owner's lawful changes back again and again.
+
+  /** What putting this difference back means, from the baseline; or why it cannot be done. */
+  private restorePlan(d: Raw): { ok: true; action: "write" | "delete"; content: string | null; sha: string } | { ok: false; reason: string } {
+    if (this.agents === null || this.agents.restore === undefined) return { ok: false, reason: "помощник отката не настроен у сторожа: вернуть файл можно только вручную" };
+    const home = this.agents.home.replace(/(.)\/+$/, "$1");
+    const path = String(d.path);
+    if (!path.startsWith(home + sep)) return { ok: false, reason: "файл лежит вне домашнего каталога агентов: помощник сюда не пишет, вернуть можно только вручную" };
+    if (!watchedRel(path.slice(home.length + 1).split(sep).join("/"))) return { ok: false, reason: "этот файл помощник не возвращает (это не отдельный файл настроек: например, общий файл состояния агента): вернуть можно только вручную" };
+    if (String(d.change) === "added") return { ok: true, action: "delete", content: null, sha: String(d.new_sha ?? "0".repeat(64)) };
+    const b = this.db.prepare(`SELECT * FROM agent_baseline WHERE path = ?`).get(path) as Raw | undefined;
+    if (!b) return { ok: false, reason: "в одобренных настройках нет эталона этого файла: возвращать нечего" };
+    const content = (b.content as string | null) ?? null;
+    if (content === null) return { ok: false, reason: "эталонного содержимого нет: файл больше лимита хранения (256 КБ), сторож помнит только его хеш. Вернуть можно только вручную" };
+    if (sha256hex(content) !== String(b.sha256)) return { ok: false, reason: "эталон хранит не файл целиком, а его вид или ссылку: точно воспроизвести его нельзя, вернуть можно только вручную" };
+    return { ok: true, action: "write", content, sha: String(b.sha256) };
+  }
+
+  /**
+   * «Вернуть как было»: a fresh touch, then the helper puts the baseline's file back (or removes a file the baseline does not have), then the file
+   * is looked at again at once, so that the alarm goes by itself. Everything is in the journal: what was, what became, who touched.
+   */
+  async agentsRestore(raw: Record<string, unknown>): Promise<{ restored: true; action: "write" | "delete"; result: string; resolved: boolean; path: string; rel: string }> {
+    if (this.agents === null) throw new GuardError("invalid", "the agent watch is not configured at this guard");
+    const socket = this.agents.restore?.socket;
+    const id = intOf(raw.id, "id", 1, Number.MAX_SAFE_INTEGER);
+    // Everything that can be checked without a code is checked first, so that a spent code is not wasted on a refusal.
+    const [before] = this.openDrifts([id]);
+    const plan0 = this.restorePlan(before!);
+    if (!plan0.ok) throw new GuardError("no_restore", plan0.reason);
+    if (!(await helperUp(socket!, this.agents.restore?.timeoutMs))) throw new GuardError("unavailable", "помощник отката не отвечает (служба sbb-restore не запущена или сокет недоступен): ничего не записано, код не потрачен");
+    const factor = this.verifyFactor("agents.restore", this.normalizeAction({ op: "agents-restore", id }), raw);
+    // The difference may have moved on while we waited for the helper: what is done is what the baseline says NOW, for a difference that is still open.
+    const [d] = this.openDrifts([id]);
+    const plan = this.restorePlan(d!);
+    if (!plan.ok) throw new GuardError("no_restore", plan.reason);
+    const path = String(d!.path);
+    const ans = await sendRestore(socket!, plan.action === "delete" ? { path, sha256: plan.sha, delete: true } : { path, sha256: plan.sha, content: plan.content! }, this.agents.restore?.timeoutMs);
+    const detail = { drift: id, path, rel: String(d!.rel), kind: String(d!.kind), change: String(d!.change), class: String(d!.class), action: plan.action, was: d!.new_sha === null || d!.new_sha === undefined ? null : String(d!.new_sha).slice(0, 16), becomes: plan.action === "delete" ? null : plan.sha.slice(0, 16) };
+    if (!ans.ok) {
+      this.tx(() => this.log("agents.restore.fail", null, null, { ...detail, error: ans.code, message: ans.message.slice(0, 200), ...factorDetail(factor) }));
+      throw new GuardError(ans.code === "unavailable" ? "unavailable" : "restore_failed", ans.code === "unavailable" ? "помощник отката не ответил: файл не изменён" : `помощник отказал: ${ans.message}`);
+    }
+    // Looked at again at once (not at the pace of the timer).
+    this.agentsScan({ force: true });
+    const now = this.db.prepare(`SELECT status FROM agent_drifts WHERE id = ?`).get(id) as { status: string } | undefined;
+    const resolved = now !== undefined && now.status !== "open";
+    this.tx(() => this.log("agents.restore", null, null, { ...detail, result: ans.result, resolved, ...factorDetail(factor) }));
+    return { restored: true, action: plan.action, result: ans.result, resolved, path, rel: String(d!.rel) };
+  }
+
   /**
    * «Это не я — отклонить»: marks open differences as rejected. Tightening, so no code: nothing goes into the baseline, the difference stays open
-   * (the alarm, the polluted thread and the closed windows stay until the file itself is fixed), and the journal gets a record. The guard cannot
-   * roll a file back (it only reads the agents' files), so the person fixes it by hand; accepting is still possible later, with a touch.
+   * (the alarm, the polluted thread and the closed windows stay until the file itself is fixed), and the journal gets a record. The guard itself only reads the agents' files; putting one back is
+   * «Вернуть как было» (`agentsRestore`, a touch), accepting is also possible later, with a touch.
    */
   agentsReject(raw: Record<string, unknown>): { rejected: number } {
     if (this.agents === null) throw new GuardError("invalid", "the agent watch is not configured at this guard");

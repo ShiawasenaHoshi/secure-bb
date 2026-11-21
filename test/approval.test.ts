@@ -63,6 +63,8 @@ const EXPECTED: Record<string, RpcGroup> = {
   "skills.remove": "free",
   "skills.removed": "free",
   "agents.scan": "free",
+  "agents.stop": "free", // tightening: stops the running threads, holds new turns; no code
+  "agents.restore": "dangerous", // writes the agent's file back: a fresh touch for this one difference
   "agents.reject": "free", // tightening: «Это не я — отклонить» marks a difference, takes nothing into the baseline
   "trust.remove": "free", // tightening
   "ai.scan": "free",

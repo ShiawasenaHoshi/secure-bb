@@ -94,6 +94,9 @@ export function dispatch(guard: Guard, req: unknown, version: string): Record<st
     }
     case "agents-accept":
       return guard.agentsAccept(r);
+    // «Вернуть как было»: a touch; the content is the guard's own baseline, the id is all the request carries.
+    case "agents-restore":
+      return guard.agentsRestore(r);
     // «Это не я — отклонить»: tightening, no code.
     case "agents-reject":
       return guard.agentsReject(r);

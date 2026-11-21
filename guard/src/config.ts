@@ -19,6 +19,8 @@ export interface GuardPaths {
   /** Agent watch: the agents' home, and the extra roots the console names (absolute paths; extending the list is a console matter only). */
   agentsHome: string;
   agentsRoots: string[];
+  /** The restore helper's socket (sbb-restore, a service of the agents' user; only the guard's user can reach it). */
+  restoreSocket: string;
   /** Directories where the core keeps the plugins it installed from git: a version of such a source is read (and may pass by itself) only from under one of them. Empty: none passes by itself. */
   pluginsRoots: string[];
   /** Sources the owner names as the official catalog (`github:owner/name`, `github:owner/*`): the level "known". Empty: no source is known. */
@@ -32,8 +34,10 @@ export const DEFAULT_DATA_DIR = "/var/sbb-guard";
 export const DEFAULT_AGENTS_HOME = "/var/bbagent";
 /** Outside the data directory: that one is 0700, and the bb user must reach the socket through a directory of its own (0750, owner the guard, group the bb user's). */
 export const DEFAULT_SOCKET = "/var/run/sbb-guard/guard.sock";
+/** The restore helper's socket: its directory is 0750 (owner the agents' user, group the guard's alone), the socket 0660. */
+export const DEFAULT_RESTORE_SOCKET = "/var/sbb-restore-run/restore.sock";
 
-export function resolvePaths(opts: { data?: string; socket?: string; socketGid?: string; rpId?: string; origin?: string; agentsHome?: string; agentsRoots?: string; pluginsRoots?: string; knownSources?: string; offline?: boolean }, env: Record<string, string | undefined> = process.env): GuardPaths {
+export function resolvePaths(opts: { data?: string; socket?: string; socketGid?: string; rpId?: string; origin?: string; agentsHome?: string; agentsRoots?: string; restoreSocket?: string; pluginsRoots?: string; knownSources?: string; offline?: boolean }, env: Record<string, string | undefined> = process.env): GuardPaths {
   const dataDir = opts.data ?? env.SBB_GUARD_DATA ?? DEFAULT_DATA_DIR;
   const stateDir = join(dataDir, "state");
   const gidText = opts.socketGid ?? env.SBB_GUARD_SOCKET_GID;
@@ -55,6 +59,7 @@ export function resolvePaths(opts: { data?: string; socket?: string; socketGid?:
       .map((x) => x.trim())
       .filter((x) => x !== "")
       .map((x) => absolute(x, "--agents-root")),
+    restoreSocket: absolute(opts.restoreSocket ?? env.SBB_GUARD_RESTORE_SOCKET ?? DEFAULT_RESTORE_SOCKET, "--restore-socket"),
     pluginsRoots: list(opts.pluginsRoots ?? env.SBB_GUARD_PLUGINS_ROOTS).map((x) => absolute(x, "--plugins-root")),
     knownSources: list(opts.knownSources ?? env.SBB_GUARD_KNOWN_SOURCES),
     offline: opts.offline === true || /^(1|true|yes|on)$/i.test(env.SBB_GUARD_OFFLINE ?? ""),

@@ -99,7 +99,8 @@ export type GuardAction =
   | { op: "touch"; purpose: string }
   | { op: "trust-mode"; mode: TrustMode }
   | { op: "sources-add"; entries: string[] }
-  | { op: "agents-accept"; ids: number[] };
+  | { op: "agents-accept"; ids: number[] }
+  | { op: "agents-restore"; id: number };
 export interface GuardChallenge {
   challenge: string;
   allowCredentials: Array<{ type: "public-key"; id: string }>;
@@ -138,11 +139,25 @@ export interface AgentDrift {
   /** «Это не я»: the person rejected it. It stays open (alarm and pollution stay) until the file is fixed. */
   rejected?: boolean;
   rejectedAt?: number | null;
+  /** What «Вернуть как было» would do for an open difference, or why it cannot (the guard decides; the page shows the manual way then). */
+  restorable?: { ok: true; action: "write" | "delete" } | { ok: false; reason: string };
+}
+/** The guard's answer to `agents-restore`. */
+export interface AgentsRestoreResult {
+  restored: true;
+  action: "write" | "delete";
+  result: string;
+  /** The file was looked at again at once and the difference is closed: the alarm is gone. */
+  resolved: boolean;
+  path: string;
+  rel: string;
 }
 export interface AgentsState {
   enabled: boolean;
   home?: string;
   extraRoots?: string[];
+  /** The guard knows a restore helper (it may still be down: the answer to a restore says so). */
+  restoreConfigured?: boolean;
   lastScanAt?: number | null;
   scannedFiles?: number;
   roots?: number;
@@ -272,6 +287,8 @@ export interface GuardPort {
   agentsAccept(ids: number[], proof: GuardProof): Promise<{ accepted: number }>;
   /** «Это не я — отклонить»: no touch (tightening). */
   agentsReject(ids: number[]): Promise<{ rejected: number }>;
+  /** «Вернуть как было»: a touch for this difference; the guard puts back its own baseline through the restore helper. */
+  agentsRestore(id: number, proof: GuardProof): Promise<AgentsRestoreResult>;
 }
 
 const TIMEOUT_MS = 5000;
@@ -407,6 +424,10 @@ export class GuardLink implements GuardPort {
   }
   async agentsAccept(ids: number[], proof: GuardProof): Promise<{ accepted: number }> {
     return { accepted: Number((await this.call({ op: "agents-accept", ids, ...proofFields(proof) })).accepted) };
+  }
+  async agentsRestore(id: number, proof: GuardProof): Promise<AgentsRestoreResult> {
+    const { ok: _ok, id: _id, ...rest } = await this.call({ op: "agents-restore", id, ...proofFields(proof) });
+    return rest as unknown as AgentsRestoreResult;
   }
   async verifyJournal(): Promise<GuardJournalReport> {
     return (await this.call({ op: "journal-verify" })) as unknown as GuardJournalReport;

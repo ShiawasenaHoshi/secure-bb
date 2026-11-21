@@ -1855,6 +1855,22 @@ function CriticalAccept({ d, ov, rpc, refetch, canCode, pk }: { d: AgentDrift; o
   const [touching, setTouching] = useState<string | null>(null);
   const act = useCodeAction(refetch);
   const title = criticalAcceptTitle(d.reasons);
+  const restorable = d.restorable?.ok === true ? d.restorable : null;
+  // «Вернуть как было»: the guard writes its own approved copy back through its helper; the touch is for exactly this difference.
+  const restore = (by: "passkey" | "code") =>
+    void act.run(async () => {
+      setTouching(null);
+      if (by === "passkey") {
+        const t = await touchFor(rpc, { kind: "agents.restore", ids: [d.id] }, setTouching);
+        if (!t) throw new Error("касание не требуется");
+        const r = await rpc.call("agents.restore", { id: d.id, passkey: t.passkey });
+        setTouching(null);
+        return r;
+      }
+      const r = await rpc.call("agents.restore", { id: d.id, code });
+      setCode("");
+      return r;
+    }, "Готово: настройки агента возвращены, тревога снята");
   const accept = (by: "passkey" | "code") =>
     void act.run(async () => {
       setTouching(null);
@@ -1890,28 +1906,67 @@ function CriticalAccept({ d, ov, rpc, refetch, canCode, pk }: { d: AgentDrift; o
       <p className={`mt-1 text-xs ${muted}`}>Нужен свежий {pk.has ? "код или касание" : "код"} именно на это изменение: сессия и «выбрать все» его не принимают.</p>
     </>
   );
+  const stop = ov.agents?.stop;
   return (
     <div className="mt-2 rounded-md border border-red-400 p-2 dark:border-red-700" data-agent-critical-accept={d.id}>
       <p className="font-semibold text-red-800 dark:text-red-300"><Rich text={title} /></p>
-      {d.rejected ? (
-        <div className="mt-2 rounded-md border border-yellow-500/70 p-2" data-agent-rejected={d.id}>
-          <p className="font-semibold">Вы отклонили это изменение{d.rejectedAt ? ` (${clockText(d.rejectedAt, Date.now())}, кнопкой «Это не я»)` : ""}: в одобренные настройки оно не попало. Но в самом файле оно всё ещё есть, поэтому тревога и пометка «под подозрением» остаются. Пока файл не исправлен, агент работает с ним как есть.</p>
-          <p className="mt-1">{manualRollback(d.path, d.reasons)}</p>
-          <Fold id={`drift-${d.id}-late-accept`} className="mt-2" summaryClassName={`cursor-pointer ${muted}`} summary="Передумали и это всё-таки вы? Принять изменение">
-            {acceptControls}
-          </Fold>
+      {d.rejected ? <p className="mt-1 text-xs">Вы отклонили это изменение{d.rejectedAt ? ` (${clockText(d.rejectedAt, Date.now())}, кнопкой «Это не я»)` : ""}: в одобренные настройки оно не попало. Но в самом файле оно всё ещё есть, поэтому тревога и пометка «под подозрением» остаются.</p> : null}
+      {restorable ? (
+        <div className="mt-2" data-agent-restore={d.id}>
+          <p>Агент работает с этим изменением прямо сейчас. {restorable.action === "delete" ? "Этого файла в одобренных настройках не было — он будет удалён." : "Файл будет записан в том виде, в каком вы его одобряли."} После этого защита сама перечитает файл и снимет тревогу.</p>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            {pk.has ? <button className={btnPrimary} disabled={act.busy || pk.problem !== null} onClick={() => restore("passkey")}>Вернуть как было — касанием</button> : null}
+            {canCode ? (
+              <>
+                {pk.has ? <span className={muted}>запасной путь — код:</span> : null}
+                <CodeField value={code} onChange={setCode} />
+                <button className={pk.has ? btn : btnPrimary} disabled={act.busy || code.length !== 6} onClick={() => restore("code")}>Вернуть как было{pk.has ? " кодом" : ""}</button>
+              </>
+            ) : null}
+            <CodeHint ov={ov} />
+          </div>
         </div>
       ) : (
-        <>
+        <p className="mt-2 text-xs" data-agent-no-restore={d.id}>Автоматически вернуть этот файл нельзя{d.restorable && !d.restorable.ok ? `: ${d.restorable.reason}` : ""}</p>
+      )}
+      <StopAgents rpc={rpc} refetch={refetch} stop={stop} />
+      <Fold id={`drift-${d.id}-more`} className="mt-2" summaryClassName={`cursor-pointer text-xs ${muted}`} summary="Подробнее">
+        <p className="mt-1 text-xs">Вручную: {manualRollback(d.path, d.reasons)}</p>
+        {d.rejected ? null : (
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <button className={btn} disabled={act.busy} onClick={reject} title="Ничего не принимается и не удаляется: изменение помечается как чужое, тревога остаётся, пока файл не исправят. Код не нужен.">Это не я — отклонить</button>
-            <span className={`text-xs ${muted}`}>Отклонить — без кода: оно не станет «нормой», тревога останется. Принять — ниже, с кодом.</span>
+            <span className={`text-xs ${muted}`}>Отклонить — без кода: оно не станет «нормой», тревога останется, файл не изменится.</span>
           </div>
+        )}
+        <Fold id={`drift-${d.id}-late-accept`} className="mt-2" summaryClassName={`cursor-pointer text-xs ${muted}`} summary="Это всё-таки вы? Принять изменение как есть">
           {acceptControls}
-        </>
-      )}
+        </Fold>
+      </Fold>
       <TouchNote text={touching} />
       <Msg error={act.error} ok={act.ok} reserve />
+    </div>
+  );
+}
+
+/** «Остановить агентов»: no code (a tightening). Says what was done, and honestly what cannot be held. */
+function StopAgents({ rpc, refetch, stop }: { rpc: Rpc; refetch: () => void; stop: NonNullable<Overview["agents"]>["stop"] }) {
+  const act = useCodeAction(refetch);
+  const stopped = stop?.stoppedAt != null;
+  return (
+    <div className="mt-2" data-agents-stop>
+      <div className="flex flex-wrap items-center gap-2">
+        <button className={btnDanger} disabled={act.busy} onClick={() => void act.run(async () => rpc.call("agents.stop", null))} title="Останавливает все работающие чаты. Код не нужен.">Остановить агентов</button>
+        <span className={`text-xs ${muted}`}>сразу, без кода</span>
+      </div>
+      {stopped ? (
+        <p className="mt-1 text-xs font-semibold">
+          Агенты остановлены{stop?.stoppedAt ? ` (${clockText(stop.stoppedAt, Date.now())})` : ""}. Пока настройки не исправлены, лучше не запускать их снова.
+          {stop?.holdAvailable ? " Новые сообщения агентам держатся, пока тревога не снята." : " Но удержать новые сообщения этот bb не позволяет: агенты могут быть запущены снова."}
+        </p>
+      ) : stop && !stop.holdAvailable ? (
+        <p className={`mt-1 text-xs ${muted}`}>Этот bb не умеет удерживать новые сообщения: после остановки агентов их можно запустить снова.</p>
+      ) : null}
+      <Msg error={act.error} ok={act.ok} />
     </div>
   );
 }
@@ -1984,7 +2039,7 @@ function AgentsSection({ ov, rpc, refetch, showDone }: { ov: Overview; rpc: Rpc;
         </p>
         <Fold id="agents-more" summaryClassName={`cursor-pointer text-xs ${muted}`} summary="Подробнее">
           <p className={`mt-1 text-xs ${muted}`}>
-            Одобренных файлов: {st.baselineFiles ?? 0}; каталогов-корней: {st.roots ?? 0}. Рабочие каталоги чатов защита находит сама; каталоги проектов в домашней папке в v1 не просматриваются. Это сигнал, а не запрет: остановить запуск агента нельзя — критичное изменение закрывает временное доверие и помечает чат «под подозрением».
+            Одобренных файлов: {st.baselineFiles ?? 0}; каталогов-корней: {st.roots ?? 0}. Рабочие каталоги чатов защита находит сама; каталоги проектов в домашней папке в v1 не просматриваются. Критичное изменение закрывает временное доверие и помечает чат «под подозрением»; в его карточке есть кнопки «Вернуть как было» и «Остановить агентов».
           </p>
         </Fold>
         <div className="flex flex-wrap items-center gap-2">
