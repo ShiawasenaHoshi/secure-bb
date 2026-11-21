@@ -21,8 +21,15 @@ export interface Site {
 export interface FileFacts {
   findings: Finding[];
   sites: Site[];
-  /** Literal hosts seen in this file (url strings). */
+  /** Hosts of real network calls (`fetch`, `http.request`, `new WebSocket`, `axios.get`…) whose address the code gives or computes. A URL that is only a string (`$schema`, a link in a message) is not here. */
   hosts: Array<{ host: string; line: number }>;
+  /** Lines of network calls whose address cannot be worked out from the code. */
+  unresolvedHosts: number[];
+  /** Programs this file starts (`spawn("/usr/bin/afplay")` → `afplay`), and whether a started program is not known. */
+  programs: string[];
+  programsUnknown: boolean;
+  /** Other programs' credential files this file's file/process calls reach (`~/.gemini/google_accounts.json` → «Google (Gemini)»). */
+  credentials: Array<{ label: string; line: number }>;
   /** Secret / rc / agent-config paths that reach a file-system, path or process call. */
   secretPaths: Array<{ line: number; text: string }>;
   rcPaths: Array<{ line: number; text: string }>;
@@ -69,10 +76,27 @@ const ENV_SERIALIZERS = new Set(["JSON.stringify", "Object.entries", "Object.key
 const DECODE_FUNCS = new Set(["atob", "unescape", "gunzipSync", "inflateSync", "inflateRawSync", "unzipSync", "brotliDecompressSync", "createDecipheriv", "createDecipher"]);
 
 const BAD_ENV = /^(NODE_OPTIONS|PATH|DYLD_.*|LD_.*|GIT_.*|.*_PROXY)$/i;
-const SECRET_PATH = /(^|[\\/~])\.(ssh|aws|npmrc|env|netrc|gnupg|kube|docker)(?![\w-])|\bid_(rsa|ed25519|ecdsa)\b|\.git-credentials/;
+const SECRET_PATH = /(^|[\\/~])\.(ssh|aws|npmrc|env|netrc|gnupg|kube|docker|gemini)(?![\w-])|\bid_(rsa|ed25519|ecdsa)\b|\.git-credentials|\.credentials\.json|[\\/]gh[\\/]hosts\.yml|\.keychain|[\\/]Keychains\b/;
 const RC_PATH = /(^|[\\/~])\.(bashrc|bash_profile|bash_login|zshrc|zprofile|zshenv|zlogin|profile)(?![\w-])|(^|[\\/])\.(claude|cursor|windsurf)([\\/]|$)|CLAUDE\.md|AGENTS\.md|\.mcp\.json|\.cursorrules|LaunchAgents/;
+/** Files where other programs keep their logins. A path (or its pieces, joined) that matches names whose credentials the code reaches. */
+const CREDENTIAL_FILES: Array<[RegExp, string]> = [
+  [/(^|[\\/~])\.gemini(?![\w-])/, "Google (Gemini)"],
+  [/(^|[\\/~])\.aws(?![\w-])/, "Amazon AWS"],
+  [/(^|[\\/~])\.ssh(?![\w-])|\bid_(rsa|ed25519|ecdsa)\b/, "SSH-ключи"],
+  [/[\\/]gh[\\/]hosts\.yml|(^|[\\/])\.config[\\/]gh(?![\w-])/, "GitHub (gh)"],
+  [/(^|[\\/~])\.npmrc(?![\w-])/, "npm"],
+  [/(^|[\\/~])\.netrc(?![\w-])/, "пароли из .netrc"],
+  [/(^|[\\/~])\.docker[\\/]config\.json/, "Docker"],
+  [/\.git-credentials/, "Git"],
+  [/(^|[\\/~])\.claude[\\/]\.credentials\.json|(^|[\\/])\.credentials\.json/, "Claude"],
+  [/(^|[\\/~])\.kube[\\/]config/, "Kubernetes"],
+  [/(^|[\\/~])\.gnupg(?![\w-])/, "GPG-ключи"],
+  [/\.keychain|[\\/]Keychains\b/, "связка ключей macOS"],
+];
+export const credentialLabels = (value: string): string[] => CREDENTIAL_FILES.filter(([re]) => re.test(value)).map(([, label]) => label);
+/** Folders of system programs: a path there names a program, not a document. */
+const SYSTEM_BIN = /^(\/usr\/(local\/)?s?bin|\/s?bin|\/opt\/homebrew\/s?bin|\/System\/Library\/[^\s]*\/bin)\//;
 const PIPE_SHELL = /\b(curl|wget)\b[^|\n]*\|\s*(sudo\s+)?(ba|z|da)?sh\b/;
-const URL_RE = /\b(?:https?|wss?|ftp):\/\/[^\s'"`<>)\]}\\]+/gi;
 
 // ---- parsing ----------------------------------------------------------------
 const TS_EXT = /\.(m|c)?tsx?$/i;
@@ -400,7 +424,7 @@ export function sqlRules(value: string): string[] {
 export function analyze(rel: string, parsed: { ast: N; code: string }): FileFacts {
   const { ast, code } = parsed;
   const lines = code.split("\n");
-  const facts: FileFacts = { findings: [], sites: [], hosts: [], secretPaths: [], rcPaths: [], fsPaths: [], network: false, childProcess: false, execSink: false, fsWrite: false, parsed: true, envCalls: [], relImports: new Map(), envReaders: new Map(), specs: [], pathStrings: [] };
+  const facts: FileFacts = { findings: [], sites: [], hosts: [], unresolvedHosts: [], programs: [], programsUnknown: false, credentials: [], secretPaths: [], rcPaths: [], fsPaths: [], network: false, childProcess: false, execSink: false, fsWrite: false, parsed: true, envCalls: [], relImports: new Map(), envReaders: new Map(), specs: [], pathStrings: [] };
   const consts = collectConsts(ast);
   const lineOf = (n: N): number => n.loc?.start.line ?? 0;
   const text = (line: number): string => excerptOf(lines[line - 1] ?? "");
@@ -592,8 +616,10 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
     return out;
   };
   const varPaths = new Map<string, Array<{ kind: "secret" | "rc"; value: string }>>();
+  const varCreds = new Map<string, string[]>();
   for (const d of decls) {
     if (d.id.type !== "Identifier" || !d.init) continue;
+    for (const { value } of stringsIn(d.init)) for (const label of credentialLabels(value)) varCreds.set(d.id.name, [...(varCreds.get(d.id.name) ?? []), label]);
     for (const { value } of stringsIn(d.init)) for (const kind of pathMatches(value)) varPaths.set(d.id.name, [...(varPaths.get(d.id.name) ?? []), { kind, value }]);
   }
 
@@ -627,18 +653,152 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
       else if (writes) facts.rcPaths.push({ line: lineOf(n), text: excerptOf(value, 100) });
       else finding("config-path", "info", n, excerptOf(value));
     };
+    // Other programs' logins: a piece of the path, or the pieces of the whole call put together (`join(home, ".gemini", "google_accounts.json")`).
+    const pieces = call.arguments.flatMap((a: N) => stringsIn(a).map((x) => x.value));
+    for (const label of new Set([...pieces.flatMap(credentialLabels), ...credentialLabels(pieces.join("/"))])) facts.credentials.push({ label, line: lineOf(call) });
     for (const arg of call.arguments) {
       for (const { value, n } of stringsIn(arg)) {
         consumed.add(n);
-        if (FS_FUNCS.has(simple) && LITERAL_PATH.test(value) && facts.fsPaths.length < 20 && !facts.fsPaths.includes(value)) facts.fsPaths.push(value.slice(0, 120));
+        if (FS_FUNCS.has(simple) && LITERAL_PATH.test(value) && !SYSTEM_BIN.test(value) && facts.fsPaths.length < 20 && !facts.fsPaths.includes(value)) facts.fsPaths.push(value.slice(0, 120));
         for (const kind of pathMatches(value)) push(kind, n, value);
         if (child && PIPE_SHELL.test(value)) finding("download-exec", "block", n, excerptOf(value));
       }
       anyNode(arg, (x) => {
+        if (x.type === "Identifier" && varCreds.has(x.name)) for (const label of varCreds.get(x.name)!) facts.credentials.push({ label, line: lineOf(call) });
         if (x.type === "Identifier" && varPaths.has(x.name)) for (const m of varPaths.get(x.name)!) push(m.kind, x, m.value);
         return false;
       });
     }
+  };
+
+  // ---- real network calls and started programs ------------------------------------------------------------------------
+  /** The text an expression starts with, and whether that is all of it: `https://api.x.com/${id}` is `https://api.x.com/` (not complete). */
+  const foldPrefix = (n0: N): { text: string; complete: boolean } => {
+    const n = unwrap(n0);
+    const whole = n ? fold(n, consts) : null;
+    if (whole !== null) return { text: whole, complete: true };
+    if (!n) return { text: "", complete: false };
+    if (n.type === "TemplateLiteral") {
+      let text = "";
+      for (let i = 0; i < n.quasis.length; i++) {
+        text += n.quasis[i].value.cooked ?? "";
+        if (i < n.expressions.length) {
+          const f = fold(n.expressions[i], consts);
+          if (f === null) return { text, complete: false };
+          text += f;
+        }
+      }
+      return { text, complete: true };
+    }
+    if (n.type === "BinaryExpression" && n.operator === "+") {
+      const l = foldPrefix(n.left);
+      if (!l.complete) return l;
+      const r = foldPrefix(n.right);
+      return { text: l.text + r.text, complete: r.complete };
+    }
+    if (n.type === "NewExpression" && resolveName(n.callee) === "URL" && n.arguments[0]) {
+      const u = foldPrefix(n.arguments[0]);
+      return /^[a-z][a-z0-9+.-]*:/i.test(u.text) || !n.arguments[1] ? u : foldPrefix(n.arguments[1]);
+    }
+    return { text: "", complete: false };
+  };
+  const hostOfUrlText = (t: { text: string; complete: boolean }): string | null => {
+    const m = /^(?:https?|wss?|ftp):\/\/(?:[^/?#@\s]*@)?([^/?#\s]+)([/?#]|$)/i.exec(t.text);
+    if (!m || (m[2] === "" && !t.complete)) return null;
+    return m[1]!.toLowerCase();
+  };
+  /** The host an address argument names: a URL, a `new URL(…)`, or an options object (`{ hostname }`, `{ host }`, `{ url }`); null when the code does not say. */
+  const hostOfAddress = (arg0: N | undefined): string | null => {
+    const arg = arg0 ? unwrap(arg0) : null;
+    if (!arg) return null;
+    if (arg.type === "ObjectExpression") {
+      for (const p of arg.properties) {
+        if (p.type !== "Property" || p.computed) continue;
+        const k = p.key.type === "Identifier" ? p.key.name : String(p.key.value);
+        if (k === "hostname" || k === "host") {
+          const f = fold(p.value, consts);
+          if (f !== null && f !== "") return f.toLowerCase();
+        }
+        if (k === "href" || k === "url") {
+          const h = hostOfUrlText(foldPrefix(p.value));
+          if (h) return h;
+        }
+      }
+      return null;
+    }
+    return hostOfUrlText(foldPrefix(arg));
+  };
+  const rootName = (n0: N): string | null => {
+    let n = unwrap(n0);
+    while (n && n.type === "MemberExpression") n = unwrap(n.object);
+    return n && n.type === "Identifier" ? n.name : null;
+  };
+  /** The module a callee belongs to (`axios.get` → axios, a destructured `spawn` → child_process), when it is one of kind `kind`. */
+  const moduleOfKind = (callee: N, kind: CapabilityKind): string | null => {
+    const root = rootName(callee);
+    const mod = root === null ? undefined : moduleBindings.get(root);
+    return mod !== undefined && moduleCapability(mod)?.kind === kind ? mod : null;
+  };
+  const NET_METHODS = new Set(["request", "get", "post", "put", "patch", "delete", "head", "options", "connect", "createConnection", "fetch", "open", "lookup", "resolve", "send", "stream"]);
+  /** A call or `new` that really reaches the network: its address is read from the code or counted as not visible. */
+  const networkCall = (n: N, callee: N, args: N[], isNew: boolean): void => {
+    const name = resolveName(callee);
+    const simple = calleeSimpleName(callee);
+    const mod = moduleOfKind(callee, "network");
+    let addr: N | undefined = args[0];
+    let known = false;
+    if (name === "fetch" || (simple === "fetch" && callee.type === "MemberExpression") || simple === "sendBeacon") known = true;
+    else if (isNew && name !== null && (name === "WebSocket" || name === "EventSource")) known = true;
+    else if (mod !== null) {
+      const direct = callee.type === "Identifier" && moduleBindings.get(callee.name) === mod && !isNew; // `axios(url)`, `got(url)`
+      const method = callee.type === "MemberExpression" && simple !== null && NET_METHODS.has(simple);
+      const ctor = isNew && callee.type === "Identifier" && !/Server/.test(callee.name);
+      if (direct || method || ctor) {
+        known = true;
+        if (mod === "net" || mod === "tls" || mod === "dgram") {
+          // `connect(port, host)`: the host is the string among the arguments; a bare port is this computer
+          const named = args.map((a) => hostOfAddress(a) ?? (fold(a, consts) !== null && !/^\d+$/.test(fold(a, consts)!) ? fold(a, consts) : null)).find((h) => h !== null);
+          if (named) {
+            facts.hosts.push({ host: named!.toLowerCase(), line: lineOf(n) });
+            return;
+          }
+          if (args[0] && /^\d+$/.test(fold(args[0], consts) ?? "")) {
+            facts.hosts.push({ host: "localhost", line: lineOf(n) });
+            return;
+          }
+        }
+        if (mod === "dns" || mod === "dns/promises") {
+          const f = args[0] ? fold(args[0], consts) : null;
+          if (f !== null && f !== "") {
+            facts.hosts.push({ host: f.toLowerCase(), line: lineOf(n) });
+            return;
+          }
+        }
+      }
+    }
+    if (!known) return;
+    const host = hostOfAddress(addr);
+    if (host) facts.hosts.push({ host, line: lineOf(n) });
+    else facts.unresolvedHosts.push(lineOf(n));
+  };
+  /** A started program: the file of `spawn`/`execFile`, the first word of an `exec` line. */
+  const programCall = (n: N, callee: N, simple: string | null): void => {
+    const mod = moduleOfKind(callee, "child_process");
+    if (mod === null || simple === null) return;
+    const direct = callee.type === "Identifier" && moduleBindings.get(callee.name) === mod && !CHILD_FUNCS.has(callee.name); // `execa("x")`
+    if (!CHILD_FUNCS.has(simple) && !direct) return;
+    if (simple === "fork") return void addProgram("node");
+    const t = n.arguments[0] ? foldPrefix(n.arguments[0]) : { text: "", complete: false };
+    const shellLine = simple === "exec" || simple === "execSync";
+    const word = shellLine ? /^\s*(?:(?:\w+=\S*)\s+)*("[^"]+"|'[^']+'|[^\s;&|]+)(\s|$)/.exec(t.text) : null;
+    const text = shellLine ? (word && (word[2] !== "" || t.complete) ? word[1]!.replace(/^["']|["']$/g, "") : "") : t.complete ? t.text : "";
+    if (text === "") return void (facts.programsUnknown = true);
+    addProgram(text.split(/[\\/]/).pop()!.replace(/\.exe$/i, ""));
+  };
+  const addProgram = (prog: string): void => {
+    if (prog === "") return void (facts.programsUnknown = true);
+    if (!facts.programs.includes(prog) && facts.programs.length < 20) facts.programs.push(prog);
+    if (prog === "security") facts.credentials.push({ label: "связка ключей macOS", line: 0 });
   };
 
   /**
@@ -802,13 +962,6 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
   const stringChecks = (value: string, n: N): void => {
     const line = lineOf(n);
     if (value.length < 3) return;
-    for (const m of value.matchAll(URL_RE)) {
-      try {
-        facts.hosts.push({ host: new URL(m[0]).host, line });
-      } catch {
-        /* not a URL */
-      }
-    }
     if (!consumed.has(n) && bareReported < 3) {
       const kinds = pathMatches(value);
       if (kinds.length > 0) {
@@ -1039,6 +1192,8 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
       if (simple !== null && FS_WRITE.has(simple)) facts.fsWrite = true;
       if (callee.type === "Identifier" && /rpc/i.test(callee.name)) rpcCall(n);
       if (simple !== null && SINK_NAMES.has(simple)) scanSink(n, simple);
+      networkCall(n, callee, n.arguments, false);
+      programCall(n, callee, simple);
     },
     NewExpression(n) {
       const name = resolveName(n.callee);
@@ -1050,6 +1205,7 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
       else if (n.callee.type === "MemberExpression" && propName(n.callee) === "Script") markExec(n, "vm.Script");
       else if (name === "Script") markExec(n, "vm.Script");
       else if (name !== null && NETWORK_GLOBALS.has(name)) cap("network", name, n);
+      networkCall(n, unwrap(n.callee), n.arguments, true);
     },
   };
 

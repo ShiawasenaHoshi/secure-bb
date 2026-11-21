@@ -98,4 +98,11 @@ export interface CheckResult {
   dependencyStats?: DependencyStats;
   /** Literal paths the plugin hands to file-system calls (a few). Only for the person to read; no decision uses them. */
   fsPaths?: string[];
+  /** Programs the plugin starts by name (`afplay`, `osascript`), and whether it also starts one the code does not name. For the person to read; no decision uses them. */
+  programs?: string[];
+  programsUnknown?: boolean;
+  /** Whose credential files the plugin's file or process calls reach («Google (Gemini)», «SSH-ключи»). For the person to read; no decision uses them. */
+  credentials?: string[];
 }
+/** The detail of a `network` capability: a network call whose address the code does not show. */
+export const UNRESOLVED_HOST = "unresolved-host";

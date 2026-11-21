@@ -57,7 +57,7 @@ describe("6, 7. the first line says the essence of the risk", () => {
   it("programs, network with and without hosts", () => {
     expect(riskHeadline([cap("child_process", "node:child_process")]).text).toBe("Может запускать программы на вашем компьютере");
     expect(riskHeadline([cap("network", "host:json-schema.org")]).text).toBe("Может обращаться по сети к json-schema.org");
-    expect(riskHeadline([cap("network", "fetch")]).text).toBe("Может выходить в интернет на любые адреса");
+    expect(riskHeadline([cap("network", "fetch")]).text).toBe("Может обращаться по сети к адресам, которые не видны в коде");
   });
   it("the worst right leads: passwords before network", () => {
     expect(riskHeadline([cap("network", "host:x.io"), cap("env", "*"), cap("ui", "x")]).level).toBe("danger");
