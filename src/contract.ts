@@ -1,12 +1,15 @@
 // RPC contract shared by server.ts and app.tsx (the app imports only its type).
 import { defineRpcContract } from "@get-bb/plugin-sdk";
 import type { BatchPrepared, BatchResult } from "./batch.js";
+import type { GuardJournalReport } from "./guardlink.js";
 import type { JournalReport } from "./journal.js";
 import type { Overview } from "./overview.js";
 import * as s from "./schema.js";
 
 const code = s.string({ min: 1, max: 16 });
 const id = s.integer({ min: 1 });
+/** A queue id: negative = a proposal the core has not asked the guard about yet (guard mode). */
+const queueId = s.integer({ min: -1_000_000_000 });
 /** Routine RPCs take a fresh code or the token of an open approval session (src/approval.ts says which RPC is routine). */
 const proof = { code: s.optional(code), session: s.optional(s.string({ min: 1, max: 128 })) };
 const batchKind = s.oneOf(["queue", "skill", "drift"] as const);
@@ -14,6 +17,8 @@ const batchKind = s.oneOf(["queue", "skill", "drift"] as const);
 export const rpcContract = defineRpcContract({
   overview: { input: s.nullValue(), output: s.json<Overview>() },
   "journal.verify": { input: s.nullValue(), output: s.json<JournalReport>() },
+  "guard.verify": { input: s.nullValue(), output: s.json<GuardJournalReport | { error: string }>() },
+  "approvals.export": { input: s.object({ code }), output: s.json<{ path: string; digest: string; count: number }>() },
   "trusted.set": { input: s.object({ add: s.optional(s.string({ min: 1, max: 140 })), remove: s.optional(s.string({ min: 1, max: 140 })), code }), output: s.json<{ ok: true; repos: string[] }>() },
   "session.open": { input: s.object({ code }), output: s.json<{ token: string; idleMs: number; capMs: number }>() },
   "session.close": { input: s.nullValue(), output: s.json<{ ok: true }>() },
@@ -25,8 +30,8 @@ export const rpcContract = defineRpcContract({
     output: s.json<{ secret: string; uri: string; matrix: boolean[][] }>(),
   },
   "totp.confirm": { input: s.object({ code }), output: s.json<{ ok: true }>() },
-  "queue.approve": { input: s.object({ id, ...proof, acknowledgeBlock: s.optional(s.boolean()) }), output: s.json<{ ok: true; note: string }>() },
-  "queue.dismiss": { input: s.object({ id, ...proof }), output: s.json<{ ok: true }>() },
+  "queue.approve": { input: s.object({ id: queueId, ...proof, acknowledgeBlock: s.optional(s.boolean()) }), output: s.json<{ ok: true; note: string }>() },
+  "queue.dismiss": { input: s.object({ id: queueId, ...proof }), output: s.json<{ ok: true }>() },
   "window.open": {
     input: s.object({ queueId: id, ...proof, scope: s.optional(s.oneOf(["tree", "thread"] as const)) }),
     output: s.json<{ ok: true }>(),

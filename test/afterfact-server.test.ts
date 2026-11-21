@@ -54,12 +54,18 @@ async function boot(initial: Installed[], hook: "missing-throws" | "silent" | "w
   return { bb, harness, disabled, add: (p: Installed) => (plugins = [...plugins, p]), onCalls: () => onCalls, ask: (ctx: unknown) => handler!(ctx) };
 }
 
+// Fake time with real I/O between the steps is slow on a loaded machine: the default 5 s was the flake.
+vi.setConfig({ testTimeout: 60_000 });
 afterEach(() => vi.useRealTimers());
 /** Fake time advances in small steps with real I/O in between (the scan reads files, which fake timers do not wait for). */
 async function settle(ms: number): Promise<void> {
   for (let t = 0; t < ms; t += 500) {
     await vi.advanceTimersByTimeAsync(500);
-    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    // Real I/O needs real time, and under a loaded machine a fixed number of event-loop turns is not enough:
+    // yield until a slice of REAL time has passed (performance.now is not faked).
+    const until = performance.now() + 10;
+    do await new Promise((r) => setImmediate(r));
+    while (performance.now() < until);
   }
 }
 

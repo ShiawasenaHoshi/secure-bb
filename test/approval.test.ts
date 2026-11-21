@@ -41,9 +41,11 @@ const EXPECTED: Record<string, RpcGroup> = {
   "ai.settings": "dangerous",
   "publish.settings": "dangerous",
   "sentinel.settings": "dangerous",
+  "approvals.export": "dangerous",
   // free
   overview: "free",
   "journal.verify": "free",
+  "guard.verify": "free",
   "page.ping": "free",
   "totp.begin": "free",
   "session.close": "free",

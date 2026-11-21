@@ -229,6 +229,8 @@ export const MIGRATIONS: string[] = [
      created_at INTEGER NOT NULL,
      expires_at INTEGER NOT NULL,
      used_at INTEGER)`,
+  // Guard mode: a window of the guard (sbb-guard) has a shadow row here that holds what the guard does not know: the thread, its scope and the capabilities at opening.
+  `ALTER TABLE windows ADD COLUMN guard_window_id INTEGER`,
 ];
 
 export interface SessionRow {
@@ -336,6 +338,8 @@ export interface WindowRow {
   closedReason: string | null;
   /** Capability tokens present when the window was opened (plus those a human accepted since). */
   caps: string[];
+  /** Guard mode: the id of the guard's own window this row describes (the guard decides; the row only says which thread it was opened from). */
+  guardWindowId: number | null;
 }
 export interface ProposalRow {
   id: number;
@@ -429,6 +433,7 @@ const windowRow = (r: Raw): WindowRow => ({
   closedAt: (r.closed_at as number | null) ?? null,
   closedReason: (r.closed_reason as string | null) ?? null,
   caps: r.caps ? (JSON.parse(r.caps as string) as string[]) : [],
+  guardWindowId: (r.guard_window_id as number | null) ?? null,
 });
 const proposalRow = (r: Raw): ProposalRow => ({
   id: r.id as number,
@@ -784,14 +789,19 @@ export class Store implements RegistryCache {
   }
 
   // ---- windows ----------------------------------------------------------
-  insertWindow(w: Omit<WindowRow, "id" | "closedAt" | "closedReason">): WindowRow {
+  insertWindow(w: Omit<WindowRow, "id" | "closedAt" | "closedReason" | "guardWindowId"> & { guardWindowId?: number | null }): WindowRow {
     const info = this.db
       .prepare(
-        `INSERT INTO windows (plugin_id, thread_id, scope, mode, size_sec, cap_sec, opened_at, expires_at, hard_expires_at, caps)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO windows (plugin_id, thread_id, scope, mode, size_sec, cap_sec, opened_at, expires_at, hard_expires_at, caps, guard_window_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(w.pluginId, w.threadId, w.scope, w.mode, w.sizeSec, w.capSec, w.openedAt, w.expiresAt, w.hardExpiresAt, JSON.stringify(w.caps));
+      .run(w.pluginId, w.threadId, w.scope, w.mode, w.sizeSec, w.capSec, w.openedAt, w.expiresAt, w.hardExpiresAt, JSON.stringify(w.caps), w.guardWindowId ?? null);
     return this.getWindow(Number(info.lastInsertRowid))!;
+  }
+  /** Guard mode: the shadow row of one of the guard's windows. */
+  windowByGuardId(guardWindowId: number): WindowRow | null {
+    const r = this.db.prepare(`SELECT * FROM windows WHERE guard_window_id = ? ORDER BY id DESC LIMIT 1`).get(guardWindowId) as Raw | undefined;
+    return r ? windowRow(r) : null;
   }
   getWindow(id: number): WindowRow | null {
     const r = this.db.prepare(`SELECT * FROM windows WHERE id = ?`).get(id) as Raw | undefined;

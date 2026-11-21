@@ -3,6 +3,8 @@ import type { Alive, AliveView } from "./alive.js";
 import type { CheckResult } from "./checks/types.js";
 import { assess, type Assessment, type Probe } from "./detect.js";
 import type { Gate, TotpState } from "./gate.js";
+import type { GuardApproval, GuardJournalReport, GuardPort, GuardState } from "./guardlink.js";
+import { realpath } from "node:fs/promises";
 import type { JournalReport } from "./journal.js";
 import type { InstalledPluginLite } from "./probe.js";
 import { isThirdParty, runningThirdParty } from "./probe.js";
@@ -61,7 +63,19 @@ export interface PublishView {
   /** Latest attempts, newest first (the page picks the plugin's own by id and version). */
   recent: PublishRow[];
 }
+/** Guard mode (`BB_SECURE_BB_GUARD_SOCKET`): what the page shows about the guard itself. Approvals, windows and the queue are in the usual fields, taken from the guard. */
+export interface GuardView {
+  connected: boolean;
+  /** Why the guard cannot be reached (the page says that the core holds everything unbuilt-in meanwhile). */
+  error: string | null;
+  /** The guard's own journal: verified by the guard, checked again at most every 30 s. */
+  journal: { valid: boolean; entries: number; head: string | null; problems: Array<{ kind: string; id: number | null; detail: string }> } | null;
+  recent: GuardState["journal"]["recent"];
+  revoked: GuardApproval[];
+}
 export interface Overview {
+  /** Present in guard mode only. */
+  guard?: GuardView;
   now: number;
   assessment: Assessment;
   totp: { state: TotpState; blockedUntil: number; pendingUnattended: boolean };
@@ -127,6 +141,8 @@ export interface OverviewDeps {
   journal?: () => JournalReport;
   /** Absent in tests that do not touch the mark of life. */
   alive?: Alive;
+  /** Guard mode: the link to the guard (the gate must have been built with the same one). */
+  guard?: GuardPort;
   taintedThreads?: () => Array<{ threadId: string; kinds: string[]; first: number; last: number }>;
 }
 
@@ -166,11 +182,111 @@ function journalView(d: OverviewDeps): JournalView {
   };
 }
 
+const GUARD_VERIFY_EVERY_MS = 30_000;
+const verified = new WeakMap<GuardPort, { at: number; report: GuardJournalReport }>();
+
+/** Approvals, queue and windows of the guard, in the shapes the page already knows (ids are the guard's). */
+async function guardOverlay(d: OverviewDeps, port: GuardPort): Promise<{ view: GuardView; state: GuardState | null }> {
+  let state: GuardState;
+  try {
+    state = await port.state();
+  } catch (err) {
+    return { view: { connected: false, error: err instanceof Error ? err.message : String(err), journal: null, recent: [], revoked: [] }, state: null };
+  }
+  d.gate.noteGuardState(state.totp.registered);
+  d.gate.syncGuardWindows(state);
+  let cached = verified.get(port);
+  if (!cached || d.now() - cached.at > GUARD_VERIFY_EVERY_MS) {
+    try {
+      cached = { at: d.now(), report: await port.verifyJournal() };
+      verified.set(port, cached);
+    } catch {
+      cached = undefined;
+    }
+  }
+  const r = cached?.report;
+  return {
+    view: {
+      connected: true,
+      error: null,
+      journal: r ? { valid: r.valid, entries: r.entries, head: r.head ? r.head.hash.slice(0, 16) : null, problems: r.problems.slice(0, 20) } : null,
+      recent: state.journal.recent,
+      revoked: state.revoked,
+    },
+    state,
+  };
+}
+
+async function proposalOf(d: OverviewDeps, rootDir: string, pluginId: string) {
+  for (const dir of [rootDir, await realpath(rootDir).catch(() => null)]) {
+    if (!dir) continue;
+    const p = d.store.proposalByDir(dir);
+    if (p && p.pluginId === pluginId) return p;
+  }
+  return null;
+}
+
 export async function buildOverview(d: OverviewDeps): Promise<Overview> {
-  d.gate.sweep();
+  const guarded = d.guard ? await guardOverlay(d, d.guard) : null;
+  if (!guarded?.state) d.gate.sweep(); // with a guard that answers, its windows are synced instead (the guard's clock is the truth)
   const [plugins, probe] = await Promise.all([d.listPlugins().catch(() => [] as InstalledPluginLite[]), d.probe()]);
-  const windows = await Promise.all(d.gate.openWindows().map((w) => windowView(d, w)));
-  const approvals = d.store.listApprovals(500).filter((a) => a.revokedAt === null);
+  let windows: WindowView[];
+  let approvals: ApprovalRow[];
+  let queue: QueueRow[];
+  if (guarded?.state) {
+    const gs = guarded.state;
+    windows = await Promise.all(
+      gs.windows.map(async (g) => {
+        const shadow = d.store.windowByGuardId(g.id);
+        const base = shadow ?? { id: 0, pluginId: g.pluginId, threadId: "неизвестен", scope: "thread" as const, mode: g.mode, sizeSec: g.sizeSec, capSec: g.capSec, openedAt: g.openedAt, expiresAt: g.expiresAt, hardExpiresAt: g.hardExpiresAt, closedAt: null, closedReason: null, caps: [], guardWindowId: g.id };
+        // The guard's clock is the truth; the id is the guard's too (the page closes windows by it).
+        return windowView(d, { ...base, id: g.id, expiresAt: g.expiresAt, hardExpiresAt: g.hardExpiresAt, mode: g.mode });
+      }),
+    );
+    approvals = gs.approvals.map((a) => ({ id: a.id, contentHash: a.contentHash, pluginId: a.pluginId, version: a.version, source: a.source, sourceKind: a.sourceKind, gitCommit: null, npmIntegrity: null, via: a.via as ApprovalRow["via"], windowId: a.windowId, threadId: null, approvedAt: a.approvedAt, revokedAt: a.revokedAt, lastSeen: null, localHash: null }));
+    queue = [];
+    // The guard's queue is the list; what this plugin knows (checks, thread) explains its entries.
+    // Proposals the core has not asked the guard about yet are listed after them, with negative ids (approving one installs it first).
+    const known = new Set<string>();
+    for (const g of gs.queue) known.add(await realpath(g.rootDir).catch(() => g.rootDir));
+    for (const g of gs.queue) {
+      const proposal = await proposalOf(d, g.rootDir, g.pluginId);
+      const note = g.annotation?.findings as { reason?: unknown } | null | undefined;
+      queue.push({
+        id: g.id,
+        kind: "hook",
+        contentHash: g.contentHash,
+        pluginId: g.pluginId,
+        version: g.version,
+        source: g.source,
+        sourceKind: g.sourceKind,
+        rootDir: g.rootDir,
+        gitCommit: null,
+        npmIntegrity: null,
+        trigger: g.trigger,
+        threadId: proposal?.threadId ?? null,
+        proposalId: proposal?.id ?? null,
+        status: g.status,
+        reason: typeof note?.reason === "string" ? note.reason : null,
+        firstSeen: g.firstSeen,
+        lastSeen: g.lastSeen,
+      });
+    }
+    for (const lq of d.store.listQueue(50)) {
+      if (lq.kind !== "proposal" || lq.status !== "held" || lq.contentHash !== null || lq.proposalId === null) continue;
+      const p = d.store.getProposal(lq.proposalId);
+      if (!p || known.has(await realpath(p.snapshotDir).catch(() => p.snapshotDir))) continue;
+      queue.push({ ...lq, id: -lq.id, reason: lq.reason ? `ещё не установлен (ядро не спрашивало сторожа): ${lq.reason}` : "ещё не установлен (ядро не спрашивало сторожа)" });
+    }
+  } else if (guarded) {
+    windows = [];
+    approvals = [];
+    queue = [];
+  } else {
+    windows = await Promise.all(d.gate.openWindows().map((w) => windowView(d, w)));
+    approvals = d.store.listApprovals(500).filter((a) => a.revokedAt === null);
+    queue = d.store.listQueue(50);
+  }
   const baseline = new Map(d.store.listBaseline().map((b) => [b.pluginId, b.localHash]));
 
   const views: PluginView[] = plugins.filter(isThirdParty).map((p) => {
@@ -190,14 +306,13 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
   });
 
   const checks: Record<string, CheckResult> = {};
-  const hashes = [...d.store.listQueue(50).map((q) => q.contentHash), ...approvals.slice(0, 200).map((a) => a.contentHash)];
+  const hashes = [...queue.map((q) => q.contentHash), ...approvals.slice(0, 200).map((a) => a.contentHash)];
   for (const h of hashes) {
     if (!h || checks[h]) continue;
     const c = d.store.getCheck(h);
     if (c) checks[h] = c.result;
   }
 
-  const queue = d.store.listQueue(50);
   const queueChecks: Record<number, CheckResult> = {};
   for (const q of queue) {
     const c = d.gate.checkForQueue(q);
@@ -229,9 +344,13 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
   return {
     now: d.now(),
     assessment: assess(probe),
-    totp: { state: d.gate.totpState(), blockedUntil: d.gate.blockedUntil(), pendingUnattended: d.gate.pendingUnattended() },
+    ...(guarded ? { guard: guarded.view } : {}),
+    totp: guarded?.state
+      ? { state: guarded.state.totp.registered ? ("external" as const) : ("none" as const), blockedUntil: guarded.state.totp.blockedUntil, pendingUnattended: false }
+      : { state: d.gate.totpState(), blockedUntil: d.gate.blockedUntil(), pendingUnattended: d.gate.pendingUnattended() },
     hookRegistered: d.hookRegistered,
-    policy: d.store.policy(),
+    // Guard mode: window size, ceiling and mode are the guard's; "safe class passes" does not exist there.
+    policy: guarded?.state ? { ...d.store.policy(), ...guarded.state.policy, autoSafe: false } : d.store.policy(),
     thirdPartyRunning: runningThirdParty(plugins),
     queue,
     queueChecks,
