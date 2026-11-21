@@ -69,7 +69,7 @@ describe("the parts of a settings difference", () => {
     expect(danger({ env: { FOO: "1" } })[0]).toMatch(/нет в списке безопасных/);
     expect(danger({ theme: "dark" })).toEqual([null]);
     // taking a ban away is dangerous too
-    expect(danger({ permissions: { deny: [] } }, { permissions: { deny: ["Bash(rm:*)"] } })[0]).toMatch(/ограничение/);
+    expect(danger({ permissions: { deny: [] } }, { permissions: { deny: ["Bash(rm:*)"] } })[0]).toMatch(/удерживало/);
   });
   it("a secret is hidden on the screen but kept for the guard", async () => {
     const { viewPart } = await import("../../guard/src/json-parts.ts");
@@ -170,6 +170,27 @@ describe("what makes the agent more dangerous: by default, not by a black list",
     const d = (obj: unknown, base: unknown = {}) => splitSettings(JSON.stringify(base), JSON.stringify(obj))!.map(partDanger);
     for (const safe of [{ model: "opus" }, { theme: "dark" }, { outputStyle: "x" }, { cleanupPeriodDays: 7 }, { includeCoAuthoredBy: false }, { spinnerTipsEnabled: false }, { permissions: { deny: ["Bash(rm:*)"] } }, { permissions: { ask: ["Bash(git push:*)"] } }, { permissions: { disableBypassPermissionsMode: "disable" } }, { sandbox: { enabled: true } }]) expect(d(safe), JSON.stringify(safe)).toEqual([null]);
     for (const risky of [{ autoUpdatesChannel: "x" }, { someNewKeyOfTomorrow: 1 }, { env: { FOO: "1" } }, { permissions: { allow: ["Read"] } }, { statusLine: { type: "command", command: "x" } }, { enabledPlugins: { a: true } }]) expect(d(risky)[0], JSON.stringify(risky)).toEqual(expect.any(String));
+  });
+  it("a removal is harmless only when what is removed expanded the agent; any other removal is dangerous by default", () => {
+    const rm = (base: unknown, now: unknown = {}): string | null => partDanger(splitSettings(JSON.stringify(base), JSON.stringify(now))![0]!);
+    // loosens: hooks come back to life, a stricter mode goes, sandbox settings go, a ban goes, an unknown key goes
+    expect(rm({ disableAllHooks: true })).toEqual(expect.any(String));
+    expect(rm({ allowManagedHooksOnly: true })).toEqual(expect.any(String));
+    expect(rm({ permissions: { defaultMode: "plan" } })).toEqual(expect.any(String));
+    expect(rm({ sandbox: { network: { allowedDomains: ["a.example"] } } })).toEqual(expect.any(String));
+    expect(rm({ permissions: { deny: ["Bash(rm:*)"] } })).toMatch(/permissions\.deny/);
+    expect(rm({ someNewKeyOfTomorrow: 1 })).toEqual(expect.any(String));
+    // narrows: a right, a directory, a hook, an env variable, an MCP server, a critical key, a mode that skipped questions, a safe key
+    expect(rm({ permissions: { allow: ["Bash(*)"] } }, { permissions: { allow: ["Read"] } })).toBeNull();
+    expect(rm({ permissions: { additionalDirectories: ["/etc"] } })).toBeNull();
+    expect(rm({ hooks: { Stop: [{ hooks: [{ type: "command", command: "x" }] }] } })).toBeNull();
+    expect(rm({ env: { FOO: "1" } })).toBeNull();
+    expect(rm({ mcpServers: { helper: { command: "x" } } })).toBeNull();
+    expect(rm({ statusLine: { type: "command", command: "x" } })).toBeNull();
+    expect(rm({ enabledPlugins: { a: true } })).toBeNull();
+    expect(rm({ apiKeyHelper: "/tmp/k.sh" })).toBeNull();
+    expect(rm({ permissions: { defaultMode: "bypassPermissions" } })).toBeNull();
+    expect(rm({ theme: "dark" })).toBeNull();
   });
   it("the danger of putting back is the danger of the result: a removed rule coming back, a ban going", () => {
     const one = (base: unknown, now: unknown): JsonPart => splitSettings(JSON.stringify(base), JSON.stringify(now))![0]!;
@@ -396,5 +417,24 @@ describe("the guard: «Оставить» mine, «Вернуть» theirs", () =
     const s = g!.guard.sessionOpen({ code: g!.nextCode() });
     expect(() => g!.guard.agentsKeepPart({ id: d.id, partId: sl.id, fileSha: d.newSha, danger: true, session: s.token })).toThrow(/fresh touch|session/);
     expect(part(d, "theme").danger).toBeNull();
+  });
+
+  it("kept without a code is refused for a removal that may loosen the agent, and passes for one that narrows it", async () => {
+    const base = `${JSON.stringify({ disableAllHooks: true, permissions: { defaultMode: "plan", allow: ["Bash(*)", "Read"] } }, null, 2)}\n`;
+    const { settings } = await setup({ baseline: base, file: `${JSON.stringify({ permissions: { allow: ["Read"] } }, null, 2)}\n` });
+    const d = drift(settings);
+    const hooks = part(d, "disableAllHooks");
+    const mode = part(d, "permissions.defaultMode");
+    const allow = d.parts.find((p: any) => p.kind === "elem-removed");
+    expect(hooks.danger).toEqual(expect.any(String));
+    expect(mode.danger).toEqual(expect.any(String));
+    expect(allow.danger).toBeNull();
+    const s = g!.guard.sessionOpen({ code: g!.nextCode() });
+    for (const x of [hooks, mode]) {
+      expect(() => g!.guard.agentsKeepPart({ id: d.id, partId: x.id, fileSha: d.newSha, danger: true, session: s.token })).toThrow(/fresh touch|session/);
+      expect(() => g!.guard.agentsKeepPart({ id: d.id, partId: x.id, fileSha: d.newSha, danger: false, code: g!.nextCode() })).toThrow(/not what the page showed/);
+    }
+    // removing a right narrows: a session is enough
+    expect(g!.guard.agentsKeepPart({ id: d.id, partId: allow.id, fileSha: d.newSha, danger: false, session: s.token })).toMatchObject({ kept: true });
   });
 });

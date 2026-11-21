@@ -4,7 +4,7 @@
 // Pure functions, no I/O: the guard works the parts out from its own baseline and the file it read, never from what a page sends; the page only names
 // a part by its id (a hash of what the part is), so a part that is not in the current difference is simply not found.
 import { createHash } from "node:crypto";
-import { analyze, isTightening, maskSecrets } from "./agents-rules.ts";
+import { RISKY_KEYS, analyze, isTightening, maskSecrets } from "./agents-rules.ts";
 import { applyPathChange, settingsPathAllowed, type PathAction } from "./restore.ts";
 
 export type PartKind = "key-added" | "key-changed" | "key-removed" | "elem-added" | "elem-removed";
@@ -129,14 +129,24 @@ function harmless(path: readonly string[], kind: PartKind, after: unknown): bool
   if (at === "sandbox.enabled" && after === true) return true;
   return false;
 }
-/** Taking away what held the agent back: a ban, a question, the bypass lock, the sandbox. */
-function removesRestraint(path: readonly string[]): boolean {
-  const at = path.join(".");
-  return /^permissions\.(?:deny|ask)$/.test(at) || at === "permissions.disableBypassPermissionsMode" || at === "sandbox.enabled";
+/** Keys whose presence EXPANDS what the agent can do (they are on the critical list, or are the lists of rights themselves): taking one away only narrows it. */
+const EXPANDING_TOP = new Set<string>([...RISKY_KEYS.map(([k]) => k), "env", "apiKeyHelper", "hooks", "mcpServers", "mcp", "mcp_servers", "dangerouslyDisableSandbox"]);
+const EXPANDING_MODES = new Set(["bypassPermissions", "acceptEdits", "auto"]);
+/**
+ * A removal is harmless only when what is removed EXPANDED the agent: a right (`permissions.allow`), an extra directory, a hook, an env variable, an MCP server, a key of the critical
+ * list, a mode that skips questions — or a key from the safe list. Every other removal (a ban, `disableAllHooks`, a stricter mode, a sandbox setting, an unknown key) may loosen the agent: dangerous by default.
+ */
+function removalHarmless(p: Pick<JsonPart, "path" | "kind" | "before">): boolean {
+  const at = p.path.join(".");
+  if (SAFE_TOP.has(p.path[0]!) && p.path.length === 1) return true;
+  if (p.kind === "elem-removed" && (at === "permissions.allow" || at === "permissions.additionalDirectories")) return true;
+  if (p.path[0] === "permissions") return at === "permissions.defaultMode" && typeof p.before === "string" && EXPANDING_MODES.has(p.before);
+  return EXPANDING_TOP.has(p.path[0]!);
 }
+
 /** Why the part makes the agent more dangerous as the file would say it after the part is KEPT (the file as it is now), or null. Removals count only when they take a restraint away. */
 export function partDanger(p: JsonPart): string | null {
-  if (p.kind === "key-removed" || p.kind === "elem-removed") return removesRestraint(p.path) ? `убирает ограничение (${p.path.join(".")})` : null;
+  if (p.kind === "key-removed" || p.kind === "elem-removed") return removalHarmless(p) ? null : `убирает то, что удерживало агента, или то, чего нет в списке безопасных (${p.path.join(".")}): агент может стать менее ограниченным`;
   const value = p.kind === "elem-added" ? [p.elem] : p.after;
   const doc: Record<string, unknown> = {};
   let cur = doc;
