@@ -27,6 +27,10 @@ export interface GuardApproval {
   windowId: number | null;
   approvedAt: number;
   revokedAt: number | null;
+  /** What the guard itself read in this version (capability tokens): the page decides what the approval says about it. Absent in an older guard. */
+  rights?: { tokens: string[]; review: string[] } | null;
+  /** Why it was let in (the guard's own words). Absent in an older guard or an older approval. */
+  why?: string | null;
 }
 /** Trust by source and rights (the guard's own): the mode, "my sources", the sources the owner named as the official catalog. */
 export type TrustMode = "simple" | "detailed" | "strict";
@@ -131,6 +135,9 @@ export interface AgentDrift {
   firstSeen: number;
   lastSeen: number;
   resolvedAt: number | null;
+  /** «Это не я»: the person rejected it. It stays open (alarm and pollution stay) until the file is fixed. */
+  rejected?: boolean;
+  rejectedAt?: number | null;
 }
 export interface AgentsState {
   enabled: boolean;
@@ -177,6 +184,8 @@ export interface GuardLookup {
   requestId: number | null;
   /** Troubleshooting mode is on until this time (0: off). */
   troubleshootUntil: number;
+  /** The person rejected this version and has not brought it back («Вернуть» in Quarantine). */
+  rejected: boolean;
 }
 /** One item of a list the guard fixes for one touch. */
 export interface GuardBatchItem {
@@ -226,7 +235,7 @@ export interface GuardPort {
    * Asks what the core asks (the same op): the guard reads the version's directory itself and lets a version of an own source in when its
    * rights did not grow. The hook asks first because the core runs hooks BEFORE it asks the guard, and a hook that holds would keep that version out.
    */
-  decide(ctx: GuardHoldRequest): Promise<{ action: "proceed" | "wait" }>;
+  decide(ctx: GuardHoldRequest): Promise<{ action: "proceed" | "wait" | "reject" }>;
   /** Asks the guard to keep a version for a human; `stop`: even if a window is open (a window does not lift it). Tightening: no code. */
   hold(ctx: GuardHoldRequest, stop: boolean): Promise<void>;
   annotate(target: { requestId?: number; contentHash?: string }, findings: unknown): Promise<void>;
@@ -261,6 +270,8 @@ export interface GuardPort {
   agentsScan(): Promise<AgentsState>;
   /** A touch for exactly these differences. */
   agentsAccept(ids: number[], proof: GuardProof): Promise<{ accepted: number }>;
+  /** «Это не я — отклонить»: no touch (tightening). */
+  agentsReject(ids: number[]): Promise<{ rejected: number }>;
 }
 
 const TIMEOUT_MS = 5000;
@@ -314,11 +325,11 @@ export class GuardLink implements GuardPort {
   }
   async lookup(pluginId: string, contentHash: string): Promise<GuardLookup> {
     const r = await this.call({ op: "lookup", pluginId, contentHash });
-    return { approved: r.approved === true, approval: r.approval ?? null, window: r.window ?? null, requestId: r.requestId ?? null, troubleshootUntil: typeof r.troubleshootUntil === "number" ? r.troubleshootUntil : 0 };
+    return { approved: r.approved === true, approval: r.approval ?? null, window: r.window ?? null, requestId: r.requestId ?? null, troubleshootUntil: typeof r.troubleshootUntil === "number" ? r.troubleshootUntil : 0, rejected: r.rejected === true };
   }
-  async decide(ctx: GuardHoldRequest): Promise<{ action: "proceed" | "wait" }> {
+  async decide(ctx: GuardHoldRequest): Promise<{ action: "proceed" | "wait" | "reject" }> {
     const r = await this.call({ op: "decide", ...ctx });
-    return { action: r.action === "proceed" ? "proceed" : "wait" };
+    return { action: r.action === "proceed" ? "proceed" : r.action === "reject" ? "reject" : "wait" };
   }
   async hold(ctx: GuardHoldRequest, stop: boolean): Promise<void> {
     await this.call({ op: "hold", ...ctx, stop });
@@ -390,6 +401,9 @@ export class GuardLink implements GuardPort {
   async agentsScan(): Promise<AgentsState> {
     const { ok: _ok, id: _id, ...rest } = await this.call({ op: "agents-scan" });
     return rest as unknown as AgentsState;
+  }
+  async agentsReject(ids: number[]): Promise<{ rejected: number }> {
+    return { rejected: Number((await this.call({ op: "agents-reject", ids })).rejected) };
   }
   async agentsAccept(ids: number[], proof: GuardProof): Promise<{ accepted: number }> {
     return { accepted: Number((await this.call({ op: "agents-accept", ids, ...proofFields(proof) })).accepted) };

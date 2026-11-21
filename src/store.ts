@@ -296,6 +296,8 @@ export interface ApprovalRow {
   lastSeen: number | null;
   /** Secure-bb's own hash of the reviewed source (snapshots only). */
   localHash: string | null;
+  /** Why it was let in, in the guard's words (guard mode); null: unknown. */
+  why?: string | null;
 }
 export interface QueueRow {
   id: number;
@@ -834,6 +836,11 @@ export class Store implements RegistryCache {
   }
   getProposal(id: number): ProposalRow | null {
     const r = this.db.prepare(`SELECT * FROM proposals WHERE id = ?`).get(id) as Raw | undefined;
+    return r ? proposalRow(r) : null;
+  }
+  /** The newest proposal of this plugin that came from a thread (a trust window is bound to a thread). */
+  latestThreadProposal(pluginId: string): ProposalRow | null {
+    const r = this.db.prepare(`SELECT * FROM proposals WHERE plugin_id = ? AND thread_id IS NOT NULL ORDER BY id DESC LIMIT 1`).get(pluginId) as Raw | undefined;
     return r ? proposalRow(r) : null;
   }
   /** The newest proposal whose snapshot lives exactly at `dir`. */

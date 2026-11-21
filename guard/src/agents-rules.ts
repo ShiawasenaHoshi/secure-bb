@@ -89,6 +89,41 @@ function mcpEntries(obj: Record<string, Json>): Map<string, Json> {
   return out;
 }
 
+// ---- the concrete content of a change (what the red text says: the command, not "commands") ----------------------------------------------
+const clip = (t: string, n = 120): string => (t.length > n ? `${t.slice(0, n)}…` : t);
+/** Hook commands (and urls/prompts of the other hook kinds) with their event: `Event: command`. Secrets in them are masked like in a diff. */
+export function hookCommands(hooks: Json): string[] {
+  const out: string[] = [];
+  const walk = (v: Json, event: string): void => {
+    if (Array.isArray(v)) return void v.forEach((x) => walk(x, event));
+    if (!isObj(v)) return;
+    for (const k of ["command", "url", "prompt"] as const) if (typeof v[k] === "string") out.push(`${event}: ${clip(maskSecrets(v[k] as string))}`);
+    for (const [k, x] of Object.entries(v)) if (k !== "command" && k !== "url" && k !== "prompt") walk(x, event);
+  };
+  if (isObj(hooks)) for (const [event, v] of Object.entries(hooks)) walk(v, event);
+  else walk(hooks, "hooks");
+  return [...new Set(out)];
+}
+/** How an MCP server starts: the command with its arguments, or its address. */
+function mcpLaunch(cfg: Json): string {
+  if (!isObj(cfg)) return "не разобрано";
+  const parts = typeof cfg.command === "string" ? [cfg.command, ...strArray(cfg.args)] : Array.isArray(cfg.command) ? strArray(cfg.command) : [];
+  if (parts.length > 0) return clip(maskSecrets(parts.join(" ")));
+  if (typeof cfg.url === "string") return clip(maskSecrets(cfg.url));
+  return "не указано";
+}
+/** Does an `allow` entry that was already there cover this (narrower) one? `Bash` / `Bash(*)` covers every `Bash(...)`; a tool without arguments covers all of its. */
+function allowCovers(wide: string, narrow: string): boolean {
+  const w = wide.trim();
+  const n = narrow.trim();
+  if (w === n) return true;
+  const tool = /^(\w+)/.exec(n)?.[1];
+  if (!tool) return false;
+  return w === tool || new RegExp(`^${tool}\\(\\s*(?:\\*|:\\*|\\*:\\*)?\\s*\\)$`).test(w);
+}
+/** Reasons that only say something got narrower or went away: not a reason to ask for a code (but the card tells it, so the red text never contradicts the diff). */
+export const isTightening = (reason: string): boolean => /^permissions\.allow: (?:сужено|убрано)/.test(reason);
+
 const BAD_ENV = /(?:_BASE_URL|_PROXY)$|^NODE_OPTIONS$/i;
 
 /** Critical reasons of a JSON config that is new or changed, relative to the previous (accepted) one. */
@@ -97,11 +132,26 @@ export function jsonReasons(kind: FileKind, next: Record<string, Json>, prev: Re
   const old = prev ?? {};
 
   // hooks
-  if (next.hooks !== undefined && !same(next.hooks, old.hooks) && !(isObj(next.hooks) && Object.keys(next.hooks).length === 0)) out.push("hooks: новые или изменённые (команды, которые агент запускает сам)");
+  if (next.hooks !== undefined && !same(next.hooks, old.hooks) && !(isObj(next.hooks) && Object.keys(next.hooks).length === 0)) {
+    const had = new Set(hookCommands(old.hooks));
+    const fresh = hookCommands(next.hooks).filter((c) => !had.has(c));
+    out.push(fresh.length > 0 ? `hooks: новые или изменённые — ${fresh.join(" ¦ ")}` : "hooks: новые или изменённые (команды, которые агент запускает сам)");
+  }
   // MCP servers
   const mcpNew = mcpEntries(next);
   const mcpOld = mcpEntries(old);
-  for (const [name, cfg] of mcpNew) if (!mcpOld.has(name) || !same(mcpOld.get(name), cfg)) out.push(`MCP-сервер ${name.replace(/^(?:mcpServers|mcp|mcp_servers)\./, "")}: ${mcpOld.has(name) ? "изменён" : "новый"}`);
+  const shortName = (n: string): string => n.replace(/^(?:mcpServers|mcp|mcp_servers)\./, "");
+  const gone = [...mcpOld.keys()].filter((n) => !mcpNew.has(n));
+  const added = [...mcpNew.keys()].filter((n) => !mcpOld.has(n));
+  for (const [name, cfg] of mcpNew) {
+    if (mcpOld.has(name) && same(mcpOld.get(name), cfg)) continue;
+    if (mcpOld.has(name)) out.push(`MCP-сервер ${shortName(name)}: изменён — было: ${mcpLaunch(mcpOld.get(name))} ¦ стало: ${mcpLaunch(cfg)}`);
+    else {
+      // One server out and one in at once: say it is a replacement, with what the old one ran (the person may not remember accepting it).
+      const repl = gone.length === 1 && added.length === 1 ? ` ¦ вместо «${shortName(gone[0]!)}»: ${mcpLaunch(mcpOld.get(gone[0]!))}` : "";
+      out.push(`MCP-сервер ${shortName(name)}: новый — запуск: ${mcpLaunch(cfg)}${repl}`);
+    }
+  }
   // env
   if (isObj(next.env)) {
     const oldEnv = isObj(old.env) ? old.env : {};
@@ -132,12 +182,21 @@ export function jsonReasons(kind: FileKind, next: Record<string, Json>, prev: Re
     const oldP = isObj(old.permissions) ? old.permissions : {};
     const mode = next.permissions.defaultMode;
     if ((mode === "bypassPermissions" || mode === "acceptEdits") && mode !== oldP.defaultMode) out.push(`permissions.defaultMode: ${mode}`);
-    const had = new Set(strArray(oldP.allow));
-    for (const a of strArray(next.permissions.allow)) {
-      if (had.has(a)) continue;
+    const oldAllow = strArray(oldP.allow);
+    const had = new Set(oldAllow);
+    const nextAllow = strArray(next.permissions.allow);
+    const removed = oldAllow.filter((a) => !nextAllow.includes(a));
+    const q = (a: string): string => `«${clip(a, 80)}»`;
+    const added = nextAllow.filter((a) => !had.has(a));
+    // What an added entry brings that nothing before it covered; what is covered by what was there (and by what was removed) is a narrowing, not a new right.
+    const brandNew = added.filter((a) => !oldAllow.some((o) => allowCovers(o, a)));
+    for (const a of brandNew) {
       const why = dangerousAllow(a);
-      if (why) out.push(`permissions.allow «${a.length > 80 ? `${a.slice(0, 80)}…` : a}»: ${why}`);
+      if (why) out.push(`permissions.allow «${clip(a, 80)}»: ${why}`);
     }
+    const narrowed = added.filter((a) => !brandNew.includes(a));
+    if (narrowed.length > 0 && removed.length > 0) out.push(`permissions.allow: сужено — было ${removed.map(q).join(", ")}, стало ${narrowed.map(q).join(", ")}`);
+    else if (removed.length > 0 && added.length === 0) out.push(`permissions.allow: убрано ${removed.map(q).join(", ")}`);
     const hadDirs = new Set(strArray(oldP.additionalDirectories));
     for (const d of strArray(next.permissions.additionalDirectories)) if (!hadDirs.has(d)) out.push(`permissions.additionalDirectories: ${d} (путь вне рабочего каталога)`);
   }
@@ -187,7 +246,7 @@ export function analyze(i: AnalyzeInput): Analysis {
       if (!isObj(obj)) return { cls: "critical", reasons: ["файл не разобран как JSON: проверить вручную (агент может понимать его иначе)"], findings: [] };
       const prevObj = i.prev === null ? null : parseJsonLoose(i.prev);
       const reasons = jsonReasons(i.kind, obj, isObj(prevObj) ? prevObj : null);
-      return { cls: reasons.length > 0 ? "critical" : "other", reasons, findings: [] };
+      return { cls: reasons.some((r) => !isTightening(r)) ? "critical" : "other", reasons, findings: [] };
     }
     case "toml-config": {
       const reasons = tomlReasons(next, i.prev);

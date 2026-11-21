@@ -166,6 +166,10 @@ export const MIGRATIONS: string[] = [
      created_at INTEGER NOT NULL,
      expires_at INTEGER NOT NULL,
      used_at INTEGER)`,
+  // Pilot round 2: «Это не я — отклонить». A rejected difference stays open (the alarm and the pollution stay until the file is fixed) and never goes into the baseline.
+  `ALTER TABLE agent_drifts ADD COLUMN rejected_at INTEGER`,
+  // Why a version was let in, in the guard's own words (the version history shows it: «прошла сама: свой источник, права те же» / «касанием: новое право …»).
+  `ALTER TABLE approvals ADD COLUMN why TEXT`,
 ];
 
 export function openDb(path: string): DatabaseSync {

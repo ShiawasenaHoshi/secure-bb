@@ -29,7 +29,7 @@ export function dispatch(guard: Guard, req: unknown, version: string): Record<st
       return { protocol: PROTOCOL, version, ts: Date.now() };
     // The only op that takes time: the guard reads the version's directory itself before it answers.
     case "decide":
-      return guard.decideChecked(r).then((d) => (d.action === "proceed" ? { action: "proceed", via: d.via } : { action: "wait", reason: d.reason, requestId: d.requestId }));
+      return guard.decideChecked(r).then((d) => (d.action === "proceed" ? { action: "proceed", via: d.via } : d.action === "reject" ? { action: "reject", message: d.message } : { action: "wait", reason: d.reason, requestId: d.requestId }));
     case "trust":
       return guard.trustState();
     case "trust-mode":
@@ -94,6 +94,9 @@ export function dispatch(guard: Guard, req: unknown, version: string): Record<st
     }
     case "agents-accept":
       return guard.agentsAccept(r);
+    // «Это не я — отклонить»: tightening, no code.
+    case "agents-reject":
+      return guard.agentsReject(r);
     case "journal-verify": {
       const v = guard.verifyJournal();
       return { valid: v.ok, entries: v.entries, head: v.head, problems: v.problems };

@@ -55,6 +55,7 @@ export const rpcContract = defineRpcContract({
       entries: s.optional(s.array(s.string({ min: 1, max: 1024 }), { max: 100 })),
       ids: s.optional(s.array(id, { max: 2000 })),
       queueId: s.optional(queueId),
+      pluginId: s.optional(s.string({ min: 1, max: 128 })),
       scope: s.optional(s.oneOf(["tree", "thread"] as const)),
       purpose: s.optional(s.string({ min: 1, max: 80 })),
       acknowledgeBlock: s.optional(s.boolean()),
@@ -77,13 +78,15 @@ export const rpcContract = defineRpcContract({
   "queue.approveTrust": { input: s.object({ id, ...factor }), output: s.json<{ ok: true; note: string; entry: string }>() },
   "queue.dismiss": { input: s.object({ id: queueId }), output: s.json<{ ok: true }>() },
   "window.open": {
-    input: s.object({ queueId: id, ...proof, scope: s.optional(s.oneOf(["tree", "thread"] as const)) }),
+    // A window is opened from a waiting version (`queueId`) or from the plugin's own row (`pluginId`, guard mode): exactly one of the two.
+    input: s.object({ queueId: s.optional(id), pluginId: s.optional(s.string({ min: 1, max: 128 })), ...proof, scope: s.optional(s.oneOf(["tree", "thread"] as const)) }),
     output: s.json<{ ok: true }>(),
   },
   "window.close": { input: s.object({ windowId: id }), output: s.json<{ ok: true }>() },
   "approval.revoke": { input: s.object({ approvalId: id }), output: s.json<{ ok: true }>() },
   // Agent watch (guard mode): a scan on request (the guard serves one at most every 10 s), and accepting differences into the baseline: a touch for exactly these ids.
   "agents.scan": { input: s.nullValue(), output: s.json<AgentsView>() },
+  "agents.reject": { input: s.object({ ids: s.array(id, { max: 2000 }) }), output: s.json<{ ok: true; rejected: number; note: string }>() },
   "agents.accept": { input: s.object({ ids: s.array(id, { max: 2000 }), ...factor }), output: s.json<{ ok: true; accepted: number; note: string }>() },
   "watch.scan": { input: s.nullValue(), output: s.json<{ ok: true }>() },
   "watch.acceptAll": { input: s.object({ ...proof }), output: s.json<{ ok: true; items: number }>() },

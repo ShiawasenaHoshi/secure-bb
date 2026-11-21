@@ -70,9 +70,11 @@ export interface CapLike {
 export interface Segment {
   text: string;
   red?: boolean;
+  /** A plain explanation of a term in `text` (shown as a hint under the word). */
+  hint?: string;
 }
 const ENV_PLAIN: Record<string, string> = {
-  HOME: "узнать путь к вашей домашней папке",
+  HOME: "узнать путь к вашей домашней папке (только где она лежит, не её содержимое)",
   USER: "узнать имя вашего пользователя",
   LOGNAME: "узнать имя вашего пользователя",
   PATH: "узнать, в каких папках компьютер ищет программы",
@@ -145,6 +147,35 @@ export function capabilityPhrase(c: CapLike): string {
     default:
       return "использовать возможность «" + c.kind + "»";
   }
+}
+/** Tokens of the guard's rights (`network:stats.example`, `env:HOME`, `fs`) in the words of a person; hosts and names stay as they are. */
+function tokensText(tokens: string[]): string {
+  const kinds = new Map<string, string[]>();
+  for (const t of tokens) {
+    const i = t.indexOf(":");
+    const kind = i < 0 ? t : t.slice(0, i);
+    const list = kinds.get(kind) ?? [];
+    if (i >= 0) list.push(t.slice(i + 1));
+    kinds.set(kind, list);
+  }
+  const out: string[] = [];
+  for (const [kind, detail] of kinds) {
+    if (kind === "network") out.push(detail.length > 0 ? `сеть ${detail.join(", ")}` : "выход в сеть");
+    else if (kind === "env") out.push(detail.length > 0 ? `переменные окружения ${detail.join(", ")}` : "переменные окружения");
+    else out.push(capabilityPhrase({ kind, detail }));
+  }
+  return out.join("; ");
+}
+/**
+ * Why a version was let in, for the version history: the guard's note in plain words. «прошла сама: свой источник, права те же» stays as it is;
+ * «касанием: новое право: network, network:stats.example» becomes «касанием: новое право — сеть stats.example».
+ */
+export function approvalWhy(a: { via: string; why?: string | null }): string {
+  if (!a.why) {
+    const by: Record<string, string> = { window: "в открытом окне доверия", pin: "закреплена при заморозке окна", auto: "безопасный класс", source: "прошла сама: источник и права те же", touch: "касанием" };
+    return by[a.via] ?? a.via;
+  }
+  return a.why.replace(/новое право: ([^;]+?)(?= и ещё \d+|$)/, (_m, list: string) => `новое право — ${tokensText(list.split(", ").map((t) => t.trim()).filter(Boolean))}`);
 }
 export const capabilityPhrases = (caps: CapLike[]): string[] => caps.map(capabilityPhrase);
 
@@ -316,6 +347,26 @@ export function pageStatus(i: StatusInput): Status {
 /** The text under the status when the guard is down (the page must say what actually happens: everything unbuilt-in is held). */
 export const GUARD_DOWN_TEXT = "Защита не работает: сторож не отвечает. Новые плагины не загрузятся, а одобрить сейчас ничего нельзя. Что делать: на этой машине выполните «sbb-guard status».";
 
+/** Why a running plugin keeps the approval session closed (its code could take the session's token). */
+export interface SessionBlocker {
+  id: string;
+  /** Its source is not one of «мои источники»: code that is not yours. */
+  foreign: boolean;
+  /** It has an interface (an app part): its code runs in this very page. */
+  ui: boolean;
+}
+/** The calm sentence for the page: who keeps the session closed and why, and what to do instead. */
+export function sessionBlockText(blockers: SessionBlocker[]): string {
+  const names = (list: SessionBlocker[]): string => list.map((b) => b.id).join(", ");
+  const foreign = blockers.filter((b) => b.foreign);
+  const uiOnly = blockers.filter((b) => !b.foreign);
+  const parts: string[] = [];
+  if (foreign.length > 0) parts.push(`Сессия недоступна, пока ${foreign.length > 1 ? "работают плагины" : "работает плагин"} ${names(foreign)} не из ваших источников: ${foreign.length > 1 ? "их код мог бы её перехватить" : "его код мог бы её перехватить"}.`);
+  if (uiOnly.length > 0) parts.push(`${foreign.length > 0 ? "Ещё" : "Сессия недоступна, пока"} ${uiOnly.length > 1 ? "работают плагины" : "работает плагин"} ${names(uiOnly)} с интерфейсом: ${uiOnly.length > 1 ? "их интерфейс открыт" : "его интерфейс открыт"} на этой же странице и мог бы её перехватить.`);
+  parts.push("Подтверждайте каждое действие касанием.");
+  return parts.join(" ");
+}
+
 // ---- while you were away ----------------------------------------------------------------------------------------------------
 export interface AwayEvent {
   ts: number;
@@ -462,6 +513,30 @@ export function groupAway(events: AwayEvent[], since: number, guardMode: boolean
     .map((g) => ({ ...g, text: awayText(g) }))
     .filter((g) => g.text !== "")
     .sort((a, b) => weight(b) - weight(a) || b.last - a.last);
+}
+
+/**
+ * The summary's information lines: the alarms are not among them. An alarm is told from what is wrong NOW (see `awayAlarms`), so that
+ * «Всё в порядке» (which only hides the information lines) cannot close one: it goes when it is dealt with where it is.
+ */
+export const awayInfoEvents = (events: AwayEvent[], guardMode: boolean): AwayEvent[] => events.filter((e) => classifyAway(e, guardMode) !== "alarm");
+export interface AwayAlarms {
+  /** «3 тревоги системы»: the count, with the decoding below. */
+  title: string;
+  items: ProblemRef[];
+}
+/** The alarms of the summary: each current alarm by name, with the place to deal with it. Null when none. */
+export function awayAlarms(alarms: ProblemRef[]): AwayAlarms | null {
+  if (alarms.length === 0) return null;
+  return { title: `${alarms.length} ${plural(alarms.length, "тревога", "тревоги", "тревог")} системы`, items: alarms };
+}
+
+/** One line for the skills that wait: «Скиллы: 38 ждут проверки, из них 12 с жёсткими признаками». Null: nothing waits. */
+export function skillsSummary(open: Array<{ decision?: string }>): { text: string; hard: number; total: number } | null {
+  if (open.length === 0) return null;
+  const hard = open.filter((q) => q.decision === "block").length;
+  const waits = `${open.length} ${plural(open.length, "ждёт проверки", "ждут проверки", "ждут проверки")}`;
+  return { total: open.length, hard, text: `Скиллы: ${waits}${hard > 0 ? `, из них ${hard} с жёсткими признаками` : ""}` };
 }
 
 /** The number on the «Карантин» tab: what its two lists show. */
@@ -628,6 +703,18 @@ export function planCards<E extends HeldLike>(held: E[], d: Decisions): CardPlan
 /** «ещё 1 версия ждёт» / «ещё 2 версии ждут» / «ещё 5 версий ждут». */
 export const moreVersionsText = (n: number): string => `ещё ${n} ${plural(n, "версия ждёт", "версии ждут", "версий ждут")}`;
 
+/**
+ * What a card IS, for React and for its folds: the plugin, the version and the code (the hash), not the number of the queue entry. The same version held again
+ * gets a new entry number (after a rejection, a restart, a second ask of the core); a key made of the number would build the card anew at every such change and
+ * lose what the person had just opened. A version of another content is another card.
+ */
+export const cardKey = (q: { pluginId: string; version: string; contentHash: string | null; id: number }): string => `${q.pluginId}@${q.version}#${q.contentHash ?? `n${q.id}`}`;
+/** The id of a fold on a card: the same for the same version, whatever the entry's number. */
+export const cardFoldId = (q: { pluginId: string; version: string; contentHash: string | null; id: number }, part: string): string => `card:${cardKey(q)}:${part}`;
+
+/** «Готово: удалён плагин X 1.0.0»: what the page says for a few seconds where the card was. */
+export const doneMessage = (what: string): string => `Готово: ${what.replace(/[.\s]+$/, "")}`;
+
 /** The action on a card names the version it is about. */
 export const actionLabel = (verb: string, pluginId: string, version: string): string => `${verb} ${pluginId} ${version}`;
 export const deleteConfirmText = (pluginId: string, version: string): string => `Удалить плагин ${pluginId} ${version}? Чтобы вернуть, установите плагин снова`;
@@ -657,6 +744,16 @@ export function windowAvailability(i: WindowAvailInput): WindowAvail {
     };
   }
   return { available: false, note: "Окно доверия недоступно: плагин пришёл не из треда. Одобряйте версию или доверьте источник." };
+}
+/**
+ * «Открыть окно на N мин» on a plugin's own row. A window is bound to the thread an agent put the plugin in from, so it is possible only for a plugin with such a
+ * thread (and only with a guard); otherwise the row says why not and what to use instead — never a bare «окно закрыто».
+ */
+export function pluginWindowAvail(i: { guard: boolean; threadId: string | null; level: Level }): WindowAvail {
+  if (!i.guard) return { available: false, note: "Окно открывается с карточки версии, которая ждёт решения; кнопка на строке плагина есть в режиме сторожа." };
+  if (i.threadId) return { available: true, note: null };
+  const instead = i.level === "own" ? "Версии из ваших источников и без окна проходят сами, пока не просят новых прав." : "Версию можно одобрить касанием или доверить её источник.";
+  return { available: false, note: `Окно здесь невозможно: оно привязано к треду, из которого агент поставил плагин (через bb secure-bb propose), а у этого плагина такого треда нет. ${instead}` };
 }
 export interface TrustButtonInput {
   entry: string | null;
@@ -726,16 +823,50 @@ export function agentAcceptProblem(ids: number[], drifts: Array<Pick<DriftLike, 
   if (ids.length > 1 && ids.some((id) => drifts.find((d) => d.id === id)?.class === "critical")) return "критичное изменение принимается отдельно, не вместе с другими: у каждого своё касание";
   return null;
 }
+/** When a hook of this event runs, in plain words. */
+const HOOK_WHEN: Record<string, string> = {
+  PreToolUse: "перед каждым действием агент будет запускать",
+  PostToolUse: "после каждого действия агент будет запускать",
+  UserPromptSubmit: "при каждом вашем сообщении агент будет запускать",
+  SessionStart: "при начале сессии агент будет запускать",
+  SessionEnd: "в конце сессии агент будет запускать",
+  Stop: "по окончании каждого ответа агент будет запускать",
+  SubagentStop: "по окончании работы помощника агент будет запускать",
+  Notification: "при каждом уведомлении агент будет запускать",
+  PreCompact: "перед сжатием контекста агент будет запускать",
+};
+/** «перед каждым действием агент будет запускать: `curl x.example`» — the command itself, from the guard's reason (`hooks: … — Event: command ¦ Event: command`). */
+function hookMeaning(reason: string): string {
+  const tail = reason.split(" — ")[1];
+  if (!tail) return "агент будет сам запускать команды при своих действиях (хуки)";
+  return tail
+    .split(" ¦ ")
+    .map((part) => {
+      const i = part.indexOf(": ");
+      const ev = i > 0 ? part.slice(0, i) : "";
+      const cmd = i > 0 ? part.slice(i + 2) : part;
+      return `${HOOK_WHEN[ev] ?? `при событии «${ev || "hooks"}» агент будет запускать`}: \`${cmd}\``;
+    })
+    .join("; ");
+}
 const MEANINGS: Array<[RegExp, (m: RegExpExecArray) => string]> = [
   [/permissions\.defaultMode: bypassPermissions/, () => "агент будет делать всё без вопросов к вам (режим bypassPermissions)"],
   [/permissions\.defaultMode: acceptEdits/, () => "агент будет сам менять файлы, не спрашивая вас"],
+  [/^permissions\.allow: сужено — (.*)$/, (m) => `права сужены: ${m[1]} (агент получает меньше свободы, не больше)`],
+  [/^permissions\.allow: убрано (.*)$/, (m) => `права убраны: ${m[1]} (агент получает меньше свободы)`],
   [/permissions\.allow «Bash(?:\(\s*(?:\*|:\*|\*:\*)?\s*\))?»/, () => "агент сможет выполнять любые команды без спроса"],
-  [/permissions\.allow «[^»]*»: сеть/, () => "агент сможет ходить в сеть без спроса"],
-  [/permissions\.allow «[^»]*»: путь вне/, () => "агент сможет читать и менять файлы вне рабочей папки без спроса"],
+  [/permissions\.allow «([^»]*)»: сеть/, (m) => `агент сможет без спроса выполнять «${m[1]}» (команды с выходом в сеть)`],
+  [/permissions\.allow «([^»]*)»: путь вне/, (m) => `агент сможет без спроса работать с «${m[1]}» (файлы вне рабочей папки)`],
+  [/permissions\.allow «([^»]*)»/, (m) => `агент сможет без спроса: «${m[1]}»`],
   [/permissions\.allow/, () => "агент сможет выполнять часть действий без спроса"],
   [/permissions\.additionalDirectories/, () => "агент получит доступ к папке вне рабочей"],
-  [/^hooks/, () => "агент будет сам запускать команды при своих действиях (хуки)"],
+  [/^hooks/, (m) => hookMeaning(m.input)],
+  [/^MCP-сервер ([^:]+): новый — запуск: (.*)$/, (m) => {
+    const [launch, ...rest] = m[2]!.split(" ¦ ");
+    return `агент получит новый внешний инструмент «${m[1]}» (MCP-сервер); он запускается командой \`${launch}\`${rest.length > 0 ? ` (${rest.join("; ")})` : ""}`;
+  }],
   [/^MCP-сервер ([^:]+): новый/, (m) => `агент получит новый внешний инструмент «${m[1]}» (MCP-сервер): он сможет выполнять действия, о которых bb не знает`],
+  [/^MCP-сервер ([^:]+): изменён — (.*)$/, (m) => `у внешнего инструмента «${m[1]}» (MCP-сервер) изменили запуск: ${m[2]!.replace(" ¦ ", " → ")}`],
   [/^MCP-сервер ([^:]+): изменён/, (m) => `у внешнего инструмента «${m[1]}» (MCP-сервер) изменили запуск или адрес`],
   [/^env [A-Z0-9_]*_BASE_URL/i, () => "запросы агента к модели пойдут на другой адрес: всё, что он отправляет, увидит владелец адреса"],
   [/^env [A-Z0-9_]*_PROXY/i, () => "сеть агента пойдёт через прокси: всё, что он отправляет, увидит владелец прокси"],
@@ -774,6 +905,29 @@ export const criticalAcceptTitle = (reasons: string[]): string => {
   return m.length === 0 ? "Принимая это, вы разрешаете агенту работать с новой настройкой" : `Принимая это, вы разрешаете: ${m.join("; ")}`;
 };
 
+/**
+ * How to roll back a critical change BY HAND (the guard only reads the agents' files, it cannot write them): which file, and what exactly to remove.
+ * Built from the guard's reasons, so it names the same command, server or entry the red text names.
+ */
+export function manualRollback(path: string, reasons: string[]): string {
+  const steps: string[] = [];
+  for (const r of reasons) {
+    let m: RegExpExecArray | null;
+    if ((m = /^hooks: новые или изменённые — (.*)$/.exec(r))) steps.push(`в разделе hooks уберите: ${m[1]!.split(" ¦ ").map((c) => `\`${c}\``).join(", ")}`);
+    else if (/^hooks/.test(r)) steps.push("уберите раздел hooks");
+    else if ((m = /^MCP-сервер ([^:]+): новый/.exec(r))) steps.push(`в mcpServers уберите сервер «${m[1]}»`);
+    else if ((m = /^MCP-сервер ([^:]+): изменён — было: (.*) ¦ стало: .*$/.exec(r))) steps.push(`у сервера «${m[1]}» верните запуск: \`${m[2]}\``);
+    else if ((m = /^permissions\.allow «([^»]*)»/.exec(r))) steps.push(`в permissions.allow уберите «${m[1]}»`);
+    else if ((m = /^permissions\.defaultMode: (\S+)/.exec(r))) steps.push(`верните permissions.defaultMode (сейчас «${m[1]}»)`);
+    else if ((m = /^permissions\.additionalDirectories: (.*?) \(/.exec(r))) steps.push(`в permissions.additionalDirectories уберите ${m[1]}`);
+    else if ((m = /^env ([A-Z0-9_]+)/i.exec(r))) steps.push(`в env уберите или верните ${m[1]}`);
+    else if (/^permissions\.allow: (сужено|убрано)/.test(r)) continue;
+    else steps.push(r);
+  }
+  const what = steps.length > 0 ? [...new Set(steps)].join("; ") : "верните файл к прежнему виду (см. diff)";
+  return `Откройте файл ${path} и: ${what}. Через минуту сторож перечитает файл; когда всё как в эталоне, тревога уйдёт сама.`;
+}
+
 /** Where the card of the agents' differences is shown: on the «Статус» tab while something critical or an alarm waits there, else in «Подробно». */
 export function agentsSectionTab(i: { critical: number; alarms: number }): TabId {
   return i.critical > 0 || i.alarms > 0 ? "status" : "more";
@@ -800,6 +954,46 @@ export function sameData(a: unknown, b: unknown): boolean {
     return JSON.stringify(x);
   };
   return strip(a) === strip(b);
+}
+
+/**
+ * Terms that a person who is not a programmer meets in the main text, with a plain explanation (a hint on the word; the technical part stays in «Подробнее»).
+ * The order matters: the first term that matches wins at a place.
+ */
+export const GLOSSARY: Array<{ re: RegExp; hint: string }> = [
+  { re: /MCP-сервер\w*/i, hint: "MCP-сервер — внешний инструмент, который агент может вызывать: отдельная программа или сервис. Агент передаёт ему данные, и что он с ними делает, bb не видит." },
+  { re: /хуки|хуков|hooks/i, hint: "Хуки — команды, которые агент сам запускает в определённые моменты (например, перед каждым своим действием)." },
+  { re: /окн(?:о|а|ом|е|у) доверия/i, hint: "Окно доверия — короткое время, пока новые версии плагина проходят без вопросов. Закрывается само по истечении времени." },
+  { re: /\bdiff\b/i, hint: "diff — построчное сравнение: что было в файле и что в нём стало." },
+  { re: /\bexfil\b/i, hint: "«exfil» — просто имя, которое дали серверу (от exfiltration, «вынос данных»). Имя ничего не доказывает: смотрите, какой командой сервер запускается." },
+  { re: /путь к вашей домашней папке/i, hint: "Путь — это только адрес папки на компьютере (где она лежит). Содержимое папки, документы и файлы он при этом не читает." },
+  { re: /конфигураци(?:я|и|й|ях|ями) агентов/i, hint: "Файлы с настройками ваших ИИ-агентов: что им разрешено делать без вопросов, какие инструменты и команды у них подключены." },
+];
+/** Splits segments at the glossary's terms, so that each term carries its explanation. */
+export function glossSegments(segments: Segment[]): Segment[] {
+  const out: Segment[] = [];
+  for (const seg of segments) {
+    if (seg.red || seg.hint) {
+      out.push(seg);
+      continue;
+    }
+    let rest = seg.text;
+    while (rest !== "") {
+      let best: { index: number; len: number; hint: string } | null = null;
+      for (const g of GLOSSARY) {
+        const m = g.re.exec(rest);
+        if (m && (best === null || m.index < best.index)) best = { index: m.index, len: m[0].length, hint: g.hint };
+      }
+      if (best === null) {
+        out.push({ text: rest });
+        break;
+      }
+      if (best.index > 0) out.push({ text: rest.slice(0, best.index) });
+      out.push({ text: rest.slice(best.index, best.index + best.len), hint: best.hint });
+      rest = rest.slice(best.index + best.len);
+    }
+  }
+  return out;
 }
 
 /** A card's line, in pieces: the word «все» of «прочитать все переменные окружения» is red wherever the line says it. */

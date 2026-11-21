@@ -180,7 +180,11 @@ describe("guard mode: rejecting needs no code", () => {
     expect((await g.send({ op: "state" })).approvals).toHaveLength(0);
     expect((await g.send({ op: "state" })).queue.filter((q: any) => q.status === "held")).toHaveLength(0);
     expect(((await g.send({ op: "state" })).journal.recent as any[]).some((j) => j.kind === "dismissed")).toBe(true);
-    expect(await core(g, h, ctx)).toBe("held"); // still not approved
+    expect(await core(g, h, ctx)).toBe("rejected"); // still not approved: and told "no", not asked about again
+    // asked again and again: still no new entry at the guard (the core asks at every start)
+    for (let i = 0; i < 4; i++) expect(await core(g, h, ctx)).toBe("rejected");
+    expect((await g.send({ op: "state" })).queue).toHaveLength(1);
+    expect(((await g.send({ op: "state" })).journal.recent as any[]).filter((j) => j.kind === "reject.repeat")).toHaveLength(1);
   });
 
   it("a local proposal (negative id) is only marked dismissed, without a code and without touching the guard", { timeout: 30_000 }, async () => {

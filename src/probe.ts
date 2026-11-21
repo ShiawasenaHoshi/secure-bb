@@ -2,9 +2,10 @@
 // independent: a failure becomes "unknown", never an exception, and nothing
 // is assumed about this machine (no hardcoded users, paths or ports).
 import { execFile } from "node:child_process";
-import { accessSync, constants, existsSync } from "node:fs";
+import { accessSync, constants, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { identityOf, levelOf } from "../guard/src/trust.ts";
 import type { Probe } from "./detect.js";
 
 const run = promisify(execFile);
@@ -41,6 +42,57 @@ const HELD_DETAIL = /waiting for activation guard|held by secure-bb|удержа
 export const isRunning = (p: Pick<InstalledPluginLite, "status" | "statusDetail">): boolean => RUNNING.has(p.status) && !HELD_DETAIL.test(p.statusDetail ?? "");
 export const runningThirdParty = (plugins: InstalledPluginLite[]): string[] => plugins.filter((p) => isThirdParty(p) && isRunning(p)).map((p) => p.id);
 
+export type { SessionBlocker } from "./ux.js";
+import type { SessionBlocker } from "./ux.js";
+export interface SessionBlockerInput {
+  /** The sources the person named as their own (the guard's list); empty without a guard. */
+  mySources: readonly string[];
+  /** Does the plugin have an app part? From what the guard read in its code; unknown means yes (the safe side). */
+  hasUi: (p: InstalledPluginLite) => boolean;
+}
+/**
+ * The plugins that block the session: running third-party plugins that are NOT from «мои источники» (their code is somebody else's) and/or have
+ * an interface (an app part in the page's own origin: it could read the token). A server-only plugin from my own sources does not block it.
+ */
+export function sessionBlockers(plugins: InstalledPluginLite[], o: SessionBlockerInput): SessionBlocker[] {
+  const out: SessionBlocker[] = [];
+  for (const p of plugins) {
+    if (!isThirdParty(p) || !isRunning(p)) continue;
+    const kind = p.source.startsWith("path:") ? "path" : p.source.startsWith("git:") ? "git" : "";
+    const foreign = levelOf(identityOf(kind, p.source), o.mySources, []).level !== "own";
+    const ui = o.hasUi(p);
+    if (foreign || ui) out.push({ id: p.id, foreign, ui });
+  }
+  return out;
+}
+/**
+ * `sessionBlockers` with what the guard knows: «мои источники» and the rights it read in the approved versions (a `ui` token: an app part).
+ * Without the guard's reading, the plugin's own manifest is looked at; a manifest that cannot be read counts as «has an interface» (the safe side).
+ */
+export function sessionBlockersFromGuard(
+  plugins: InstalledPluginLite[],
+  guard: { trust?: { mySources: string[] } | undefined; approvals?: Array<{ pluginId: string; version: string; rights?: { tokens: string[] } | null }> } | null,
+): SessionBlocker[] {
+  const approvals = guard?.approvals ?? [];
+  return sessionBlockers(plugins, {
+    mySources: guard?.trust?.mySources ?? [],
+    hasUi: (p) => {
+      const read = approvals.filter((a) => a.pluginId === p.id && a.version === p.version && a.rights);
+      if (read.length > 0) return read.some((a) => a.rights!.tokens.some((t) => t === "ui" || t.startsWith("ui:")));
+      return manifestHasUi(p.rootDir);
+    },
+  });
+}
+/** The manifest says the plugin has an app part (`bb.app`, content scripts, a composer). Unreadable: true. */
+export function manifestHasUi(rootDir: string): boolean {
+  try {
+    const pkg = JSON.parse(readFileSync(join(rootDir, "package.json"), "utf8")) as { bb?: Record<string, unknown> };
+    const bb = pkg.bb ?? {};
+    return typeof bb.app === "string" || Object.keys(bb).some((k) => /contentScripts?|composer/i.test(k));
+  } catch {
+    return true;
+  }
+}
 async function safe<T>(fn: () => Promise<T>, fallback: T): Promise<T> {
   try {
     return await fn();

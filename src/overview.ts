@@ -8,7 +8,7 @@ import type { GuardApproval, GuardJournalReport, GuardPort, GuardState, GuardTru
 import { realpath } from "node:fs/promises";
 import type { JournalReport } from "./journal.js";
 import type { InstalledPluginLite } from "./probe.js";
-import { isThirdParty, runningThirdParty } from "./probe.js";
+import { isThirdParty, runningThirdParty, sessionBlockersFromGuard, type SessionBlocker } from "./probe.js";
 import type { Availability, Scanner } from "./scan/scanner.js";
 import { scanView, type ScanView } from "./scan/view.js";
 import type { AiSettings } from "./scan/types.js";
@@ -20,8 +20,8 @@ import type { PublishRow, PublishSettings, PublishState } from "./publish/types.
 import type { SkillGuard, SkillsView } from "./skills/guard.js";
 import type { Watchdog, WatchView } from "./watch/watchdog.js";
 import type { ApprovalRow, LogRow, Policy, QueueRow, Store, WindowRow } from "./store.js";
-import { identityOf } from "../guard/src/trust.ts";
-import { suggestSources } from "./ux.js";
+import { identityOf, levelOf } from "../guard/src/trust.ts";
+import { pluginWindowAvail, suggestSources } from "./ux.js";
 import { queueUx, type QueueUx, type QueueUxDeps } from "./uxview.js";
 
 export interface WindowView {
@@ -53,6 +53,8 @@ export interface PluginView {
   frozenPin: boolean;
   /** Installed before secure-bb and never reviewed. */
   unreviewedBaseline: boolean;
+  /** «Открыть окно» on this row: possible (a thread to bind it to is known), or why not. */
+  windowOpen: { available: boolean; note: string | null };
 }
 export interface AiView {
   settings: AiSettings;
@@ -94,6 +96,8 @@ export interface Overview {
   hookRegistered: boolean;
   policy: Policy;
   thirdPartyRunning: string[];
+  /** Who keeps the approval session closed: running plugins not from «мои источники» and/or with an interface (plugins from my sources without an app part do not). */
+  sessionBlockers: SessionBlocker[];
   queue: QueueRow[];
   plugins: PluginView[];
   windows: WindowView[];
@@ -270,7 +274,7 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
         return windowView(d, { ...base, id: g.id, expiresAt: g.expiresAt, hardExpiresAt: g.hardExpiresAt, mode: g.mode });
       }),
     );
-    approvals = gs.approvals.map((a) => ({ id: a.id, contentHash: a.contentHash, pluginId: a.pluginId, version: a.version, source: a.source, sourceKind: a.sourceKind, gitCommit: null, npmIntegrity: null, via: a.via as ApprovalRow["via"], windowId: a.windowId, threadId: null, approvedAt: a.approvedAt, revokedAt: a.revokedAt, lastSeen: null, localHash: null }));
+    approvals = gs.approvals.map((a) => ({ id: a.id, contentHash: a.contentHash, pluginId: a.pluginId, version: a.version, source: a.source, sourceKind: a.sourceKind, gitCommit: null, npmIntegrity: null, via: a.via as ApprovalRow["via"], windowId: a.windowId, threadId: null, approvedAt: a.approvedAt, revokedAt: a.revokedAt, lastSeen: null, localHash: null, why: a.why ?? null }));
     queue = [];
     // The guard's queue is the list; what this plugin knows (checks, thread) explains its entries.
     // Proposals the core has not asked the guard about yet are listed after them, with negative ids (approving one installs it first).
@@ -332,6 +336,11 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
       window: windows.find((w) => w.pluginId === p.id) ?? null,
       frozenPin: mine[0] !== undefined && mine[0].via !== "touch" && !windows.some((w) => w.pluginId === p.id),
       unreviewedBaseline: baseline.has(p.id) && mine.length === 0,
+      windowOpen: pluginWindowAvail({
+        guard: guarded?.state != null,
+        threadId: d.store.latestThreadProposal(p.id)?.threadId ?? null,
+        level: levelOf(identityOf(p.source.startsWith("path:") ? "path" : p.source.startsWith("git:") ? "git" : "", p.source), guarded?.state?.trust?.mySources ?? [], guarded?.state?.trust?.known ?? []).level,
+      }),
     };
   });
 
@@ -389,6 +398,7 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
     // Guard mode: window size, ceiling and mode are the guard's; "safe class passes" does not exist there.
     policy: guarded?.state ? { ...d.store.policy(), ...guarded.state.policy, autoSafe: false } : d.store.policy(),
     thirdPartyRunning: runningThirdParty(plugins),
+    sessionBlockers: sessionBlockersFromGuard(plugins, guarded?.state ?? null),
     queue,
     queueChecks,
     plugins: views,

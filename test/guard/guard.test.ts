@@ -36,6 +36,44 @@ describe("decide", () => {
     expect(s.queue.find((q: any) => q.id === 1).seenCount).toBe(2);
   });
 
+  it("a version the person rejected is rejected again without a new queue entry, journaled once an hour; «Вернуть» (a touch) undoes it", async () => {
+    g = await startGuard();
+    await g.send(decideReq({ contentHash: H1 }));
+    expect((await g.send({ op: "dismiss", requestId: 1 })).ok).toBe(true);
+    // The core asks again at every start: five times, and still one entry and one journal line.
+    for (let i = 0; i < 5; i++) {
+      expect(await g.send(decideReq({ contentHash: H1 }))).toMatchObject({ ok: true, action: "reject" });
+      expect(await g.send({ op: "hold", pluginId: "demo", version: "1.0.0", contentHash: H1, rootDir: "/tmp/demo", source: "path:/tmp/demo", sourceKind: "path", trigger: "install" })).toMatchObject({ ok: true, requestId: null });
+    }
+    const s = await g.send({ op: "state" });
+    expect(s.queue).toHaveLength(1);
+    expect(s.queue.filter((q: any) => q.status === "held")).toHaveLength(0);
+    const countRepeats = async () => ((await g.send({ op: "state" })).journal.recent as any[]).filter((l: any) => l.kind === "reject.repeat").length;
+    expect(await countRepeats()).toBe(1);
+    expect((await g.send({ op: "lookup", pluginId: "demo", contentHash: H1 })).rejected).toBe(true);
+    // An hour later: one more line, not one per ask.
+    g.clock.advance(61 * 60_000);
+    await g.send(decideReq({ contentHash: H1 }));
+    await g.send(decideReq({ contentHash: H1 }));
+    expect(await countRepeats()).toBe(2);
+    // Another version of the plugin is a new question.
+    expect(await g.send(decideReq({ contentHash: H2 }))).toMatchObject({ action: "wait" });
+    // A wrong code does not bring it back; a right touch does, and the version then loads.
+    expect((await g.send({ op: "approve", requestId: 1, code: "000000" })).ok).toBe(false);
+    expect((await g.send({ op: "approve", requestId: 1, code: g.code() })).ok).toBe(true);
+    expect(await g.send(decideReq({ contentHash: H1 }))).toMatchObject({ action: "proceed", via: "approval" });
+    expect((await g.send({ op: "lookup", pluginId: "demo", contentHash: H1 })).rejected).toBe(false);
+  });
+
+  it("an approval records why the version passed (the history shows it): by touch with the guard's note, by source with the guard's words", async () => {
+    g = await startGuard();
+    await g.send(decideReq({ contentHash: H1 }));
+    expect((await g.send({ op: "approve", requestId: 1, code: g.code() })).ok).toBe(true);
+    const a = (await g.send({ op: "state" })).approvals[0];
+    expect(a.via).toBe("touch");
+    expect(a.why).toMatch(/^касанием: /);
+  });
+
   it("proceeds on an approved hash, and only for that plugin id", async () => {
     g = await startGuard();
     await g.send(decideReq({ contentHash: H1 }));
@@ -219,7 +257,7 @@ describe("dismiss: tightening, no code", () => {
     expect(s.approvals).toHaveLength(0);
     expect((s.journal.recent as any[]).some((j) => j.kind === "dismissed" && j.contentHash === H1)).toBe(true);
     expect((await g.send({ op: "dismiss", requestId: 2, code: "123456" })).ok).toBe(true); // a code, if sent, is not needed and not checked
-    expect(await g.send(decideReq({ contentHash: H1 }))).toMatchObject({ action: "wait" }); // proposed again: held again
+    expect(await g.send(decideReq({ contentHash: H1 }))).toMatchObject({ action: "reject" }); // proposed again: rejected again, no new entry
   });
 
   it("only held entries: approved, dismissed or unknown entries are refused", async () => {
@@ -295,7 +333,7 @@ describe("hold (a request of the plugin's hook: tightening only)", () => {
     await g.send({ op: "open-window", pluginId: "demo", minutes: 10, code: g.code() });
     await g.send(holdReq({ contentHash: H1, stop: true }));
     expect((await g.send({ op: "dismiss", requestId: 1 })).ok).toBe(true); // no code
-    expect(await g.send(decideReq({ contentHash: H1 }))).toMatchObject({ action: "wait" });
+    expect(await g.send(decideReq({ contentHash: H1 }))).toMatchObject({ action: "reject" });
     const s = await g.send({ op: "state" });
     expect(s.windows).toHaveLength(0);
     expect(s.closedWindows[0]).toMatchObject({ pluginId: "demo", closedReason: "dismissed-stop" });
@@ -303,12 +341,11 @@ describe("hold (a request of the plugin's hook: tightening only)", () => {
     expect((s.journal.recent as any[]).some((j) => j.kind === "window.close" && j.detail.reason === "dismissed-stop")).toBe(true);
     // a window opened again (with a code) still does not wave this version in; the entry decide makes keeps the stop
     await g.send({ op: "open-window", pluginId: "demo", minutes: 10, code: g.nextCode() });
-    expect(await g.send(decideReq({ contentHash: H1 }))).toMatchObject({ action: "wait" });
-    expect(await g.send(decideReq({ contentHash: H1 }))).toMatchObject({ action: "wait" });
+    expect(await g.send(decideReq({ contentHash: H1 }))).toMatchObject({ action: "reject" });
+    expect(await g.send(decideReq({ contentHash: H1 }))).toMatchObject({ action: "reject" });
     expect(await g.send(decideReq({ contentHash: H2 }))).toMatchObject({ action: "proceed", via: "window" }); // other versions: the window works
-    // and the way out is a code
-    const held = (await g.send({ op: "state" })).queue.find((q: any) => q.status === "held" && q.contentHash === H1);
-    expect((await g.send({ op: "approve", requestId: held.id, code: g.nextCode() })).ok).toBe(true);
+    // and the way out is a code («Вернуть» on the rejected entry)
+    expect((await g.send({ op: "approve", requestId: 1, code: g.nextCode() })).ok).toBe(true);
     expect(await g.send(decideReq({ contentHash: H1 }))).toMatchObject({ action: "proceed", via: "approval" });
   });
 
@@ -320,7 +357,7 @@ describe("hold (a request of the plugin's hook: tightening only)", () => {
     for (let i = 0; i < 150; i++) g.guard.hold({ ...holdReq({ pluginId: "other", contentHash: `${String(i).padStart(8, "0")}${"e".repeat(32)}` }) });
     for (const r of (await g.send({ op: "state" })).queue.filter((q: any) => q.status === "held")) await g.send({ op: "dismiss", requestId: r.id });
     await g.send({ op: "open-window", pluginId: "demo", minutes: 10, code: g.nextCode() });
-    expect(await g.send(decideReq({ contentHash: H1 }))).toMatchObject({ action: "wait" });
+    expect(await g.send(decideReq({ contentHash: H1 }))).toMatchObject({ action: "reject" });
     // plain (stop=0) entry: dismissing it does not close the window
     await g.send(holdReq({ contentHash: H2 }));
     const h2 = (await g.send({ op: "state" })).queue.find((q: any) => q.status === "held" && q.contentHash === H2);
