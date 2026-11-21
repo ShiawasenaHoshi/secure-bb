@@ -21,6 +21,7 @@ import type { FeedRow } from "./src/sentinel/types";
 import { T } from "./src/text";
 import { buildPolicyChange, buildPolicySetInput, buildPolicyTouchQuery, defined } from "./src/rpc-input";
 import { createCredential, getAssertion, originProblem, type CreationOptions } from "./src/webauthn";
+import { takeEnrollToken } from "./src/enroll-link";
 import type { AgentDrift, PasskeyAssertion } from "./src/guardlink";
 import type { QueueUx } from "./src/uxview";
 import type { TrustMode } from "./src/guardlink";
@@ -132,6 +133,14 @@ function CodeField({ value, onChange }: { value: string; onChange: (v: string) =
 }
 
 type Rpc = ReturnType<typeof useRpc<SecureBbRpc>>;
+
+/** The token of the link `sbb-guard setup` printed: taken from the fragment once per page load (a re-render, or React's double call in development, must not lose it). */
+let enrollSeen: { token: string | null } | undefined;
+const enrollTokenOnce = (): string | null => {
+  if (typeof window === "undefined") return null;
+  enrollSeen ??= { token: takeEnrollToken(window.history, window.location) };
+  return enrollSeen.token;
+};
 
 // ------------------------------------------------------------------ passkey --
 // Guard mode only. The guard issues a challenge bound to ONE action and describes it in its own words; the browser signs it with a key
@@ -1863,12 +1872,23 @@ function GuardAlarm({ ov }: { ov: Overview }) {
 }
 
 /** Registering a key: the token comes from the console of the machine where the guard runs; the key is not active until it is confirmed there. */
-function PasskeyCard({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; refetch: () => void }) {
+function PasskeyCard({ ov, rpc, refetch, enrollToken }: { ov: Overview; rpc: Rpc; refetch: () => void; enrollToken: string | null }) {
   const pk = ov.guard?.passkey ?? null;
-  const [token, setToken] = useState("");
+  // The token from the link `sbb-guard setup` printed (#enroll=…) is already in the field; it is sent to the guard (passkey.register) and nowhere else.
+  const [token, setToken] = useState(enrollToken ?? "");
+  const [touching, setTouching] = useState<string | null>(null);
   const act = useCodeAction(refetch);
   const state = usePasskey(ov);
   if (!pk) return null;
+  // «Проверить касание»: the touch `sbb-guard setup` waits for. The guard describes it, the key signs it, the guard writes it into its journal. Nothing is approved.
+  const check = () =>
+    void act.run(async () => {
+      const t = await touchFor(rpc, { kind: "touch", purpose: "setup-check" }, setTouching);
+      if (!t) throw new Error("сторож не попросил касания");
+      await rpc.call("setup-check", { passkey: t.passkey } as never);
+      setTouching(null);
+      return { note: "Касание сработало. Ничего не одобрено и не изменено: сторож только записал проверку в журнал." };
+    });
   const add = () =>
     void act.run(async () => {
       const first = await rpc.call("passkey.register", { token });
@@ -1894,8 +1914,16 @@ function PasskeyCard({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; refetch: ()
         <button className={btn} disabled={act.busy || token.trim() === "" || state.problem !== null || !pk.enrollmentOpen} onClick={add}>
           Добавить passkey
         </button>
-        {pk.enrollmentOpen ? null : <span className={muted}>Окно регистрации закрыто: на консоли сторожа выполните <span className="font-mono">sbb-guard passkey-enroll</span> (5 минут, одноразовый токен).</span>}
+        {pk.enrollmentOpen ? null : <span className={muted}>Окно регистрации закрыто: на консоли сторожа выполните <span className="font-mono">sbb-guard setup</span> (или <span className="font-mono">passkey-enroll</span>): 5 минут, одноразовый токен.</span>}
       </div>
+      {enrollToken !== null && token === enrollToken ? <p className={`mt-1 ${muted}`}>Токен подставлен из ссылки консоли. Нажмите «Добавить passkey» и приложите палец.</p> : null}
+      {pk.keys.length > 0 ? (
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <button className={btn} disabled={act.busy || state.problem !== null} onClick={check}>Проверить касание</button>
+          <span className={muted}>Проверка ничего не одобряет: в журнал сторожа ложится только запись «касание сработало».</span>
+        </div>
+      ) : null}
+      <TouchNote text={touching} />
       <p className={`mt-1 ${muted}`}>Ключ заработает только после подтверждения <span className="font-mono">y</span> на консоли: так вредный плагин не сможет зарегистрировать свой ключ раньше вас. Список и удаление ключей — только консоль (<span className="font-mono">passkey-list</span>, <span className="font-mono">passkey-remove</span>).</p>
       <Msg error={act.error} ok={act.ok} />
     </div>
@@ -1981,13 +2009,13 @@ function TrustCard({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; refetch: () =
   );
 }
 
-function GuardCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void }) {
+function GuardCard({ ov, rpc, refetch, enrollToken }: { ov: Overview; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void; enrollToken: string | null }) {
   const g = ov.guard;
   const act = useCodeAction(refetch);
   if (!g) return null;
   return (
     <div className="space-y-3">
-      <PasskeyCard ov={ov} rpc={rpc} refetch={refetch} />
+      <PasskeyCard ov={ov} rpc={rpc} refetch={refetch} enrollToken={enrollToken} />
       <div className={card}>
         <p>
           Одобрения, окна доверия и секрет второго фактора — у <b>сторожа</b> (отдельный процесс и пользователь ОС). Здесь только интерфейс, проверки и «стоп по новой возможности»: этот плагин может лишь <b>добавить</b> удержание, разрешает только сторож.
@@ -2594,7 +2622,7 @@ function Wizard({ ov, rpc, refetch, onClose }: { ov: Overview; rpc: Rpc; refetch
         <div className="mt-2 space-y-2">
           <p>Второй фактор подтверждает ваши решения: без него одобрить нельзя.</p>
           <p className={second ? "text-green-700 dark:text-green-400" : "font-semibold text-red-700 dark:text-red-400"}>{second ? `Второй фактор настроен (ключей: ${keys.length}).` : "Второй фактор ещё не настроен."}</p>
-          {second ? null : <p>На машине со сторожем выполните <span className="font-mono">sudo sbb-guard setup</span>. Если такой команды в вашей сборке ещё нет, используйте <span className="font-mono">sudo sbb-guard passkey-enroll</span>, а затем вернитесь сюда.</p>}
+          {second ? null : <p>На машине со сторожем выполните <span className="font-mono">sbb-guard setup</span>: мастер сам подключит коды или ключ, напечатает ссылку для этой страницы и проверит касание. Если такой команды в вашей сборке ещё нет, используйте <span className="font-mono">sudo sbb-guard passkey-enroll</span>, а затем вернитесь сюда.</p>}
           <div className="flex flex-wrap gap-2">
             <button className={btnPrimary} onClick={onClose}>Готово</button>
             <button className={btn} onClick={() => setStep(1)}>Назад</button>
@@ -2625,7 +2653,9 @@ function GatePage() {
   const { rpc, data: ov, error, refetch } = useOverview();
   usePagePing(rpc);
   const { approval, open, lock } = useApprovalSession(rpc, refetch);
-  const [tab, setTab] = useState<TabId>("status");
+  // The link from `sbb-guard setup` (#enroll=TOKEN): taken once, from the fragment (it never went to a server), and the address bar is cleaned at once.
+  const [enrollToken] = useState<string | null>(enrollTokenOnce);
+  const [tab, setTab] = useState<TabId>(enrollToken !== null ? "more" : "status");
   const [deferredKeys, setDeferredKeys] = useState<string[]>(() => parseDeferred(lsGet(DEFERRED_KEY)));
   const [seenAt, setSeenAt] = useState<string | null>(() => lsGet(AWAY_KEY));
   const [wizardDone, setWizardDone] = useState<boolean>(() => lsGet(WIZARD_KEY) !== null);
@@ -2737,7 +2767,7 @@ function GatePage() {
           <div className="space-y-6">
             <Section title="Защита этого bb"><StageCard ov={ov} /></Section>
             <Section title="Второй фактор" id="sbb-registration"><Registration ov={ov} rpc={rpc} refetch={refetch} /></Section>
-            {ov.guard ? <Section title={`Сторож решений${ov.guard.connected ? "" : " (не отвечает!)"}`}><GuardCard ov={ov} rpc={rpc} refetch={refetch} /></Section> : null}
+            {ov.guard ? <Section title={`Сторож решений${ov.guard.connected ? "" : " (не отвечает!)"}`}><GuardCard ov={ov} rpc={rpc} refetch={refetch} enrollToken={enrollToken} /></Section> : null}
             <Section title={`Гейт плагинов — очередь, расширенный вид (${heldAll.length})`}>
               {heldAll.length === 0 ? <div className={`${card} ${muted}`}>Ничего не держится.</div> : heldAll.map((q) => <QueueCard key={q.id} q={q} ov={ov} rpc={rpc} refetch={refetch} />)}
               {settled.length > 0 ? (

@@ -276,3 +276,27 @@ describe("without a guard there are no passkeys", () => {
     expect((await ov(h)).guard).toBeUndefined();
   });
 });
+
+describe("«Проверить касание» (RPC setup-check, for `sbb-guard setup`)", () => {
+  it("with a signature over `touch setup-check` the guard journals it and nothing else changes; without a touch nothing is recorded", { timeout: 30_000 }, async () => {
+    g = await startGuardOnDate();
+    const h = await bootPlugin(g.paths.socket);
+    const auth = new SoftAuthenticator();
+    await enrollThroughPlugin(h, auth);
+    const queueBefore = (await g.send({ op: "state" })).queue;
+    // no touch at all: refused, and the guard's journal has no such touch
+    await expect(h.rpc("setup-check", {})).rejects.toThrow(/касани|touch|code/i);
+    expect(g.guard.passkeyTouches("setup-check")).toEqual([]);
+    // the page's way: a challenge for the action, a signature, the RPC
+    const c = await h.rpc<any>("passkey.challenge", { kind: "touch", purpose: "setup-check" });
+    expect(c.description).toContain("Проверка касания при настройке");
+    const a = auth.get(c.challenge);
+    await expect(h.rpc("setup-check", { passkey: a })).resolves.toEqual({ ok: true });
+    expect(g.guard.passkeyTouches("setup-check")).toMatchObject([{ key: "laptop" }]);
+    expect((await g.send({ op: "state" })).queue).toEqual(queueBefore);
+    // a signature is good once
+    await expect(h.rpc("setup-check", { passkey: a })).rejects.toThrow();
+    // a session does not cover it (the schema refuses the field)
+    await expect(h.rpc("setup-check", { session: "x".repeat(40) })).rejects.toThrow();
+  });
+});

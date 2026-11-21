@@ -92,6 +92,8 @@ const isHardFlagNote = (n: string | null): boolean => /жёсткий флаг/.
 const sha256hex = (t: string): string => createHash("sha256").update(t, "utf8").digest("hex");
 /** The window the console opens for registering a passkey, and how long a challenge lives. */
 export const ENROLL_WINDOW_MS = 5 * 60_000;
+/** The purpose of the touch that `sbb-guard setup` waits for (the page's «Проверить касание»): it changes nothing, it is only written into the journal. */
+export const SETUP_CHECK_PURPOSE = "setup-check";
 export const CHALLENGE_TTL_MS = 2 * 60_000;
 const MAX_OPEN_CHALLENGES = 200;
 const MAX_HOLDS_PER_HOUR = 200;
@@ -1363,6 +1365,28 @@ export class Guard {
     return this.db.prepare(`SELECT * FROM enrollments WHERE state = 'open' AND expires_at > ? ORDER BY id DESC LIMIT 1`).get(this.now()) as Raw | undefined;
   }
 
+  /** Console (`setup`): the id of the newest journal record, so that a later look can ask only for what happened after. */
+  lastJournalId(): number {
+    return Number((this.db.prepare(`SELECT COALESCE(MAX(id), 0) AS n FROM journal`).get() as { n: number }).n);
+  }
+  /**
+   * Console (`setup`): the touches for `purpose` that were made by a PASSKEY after journal record `sinceId`, newest first. Only a signature counts: a code
+   * passes through bb and could be spent by anything in it, a signature over this action could not.
+   */
+  passkeyTouches(purpose: string, sinceId = 0): Array<{ id: number; ts: number; key: string }> {
+    const rows = this.db.prepare(`SELECT id, ts, detail FROM journal WHERE kind = 'touch' AND id > ? ORDER BY id DESC LIMIT 200`).all(sinceId) as Raw[];
+    const out: Array<{ id: number; ts: number; key: string }> = [];
+    for (const r of rows) {
+      const d = JSON.parse(String(r.detail ?? "null")) as { purpose?: unknown; via?: unknown; key?: unknown } | null;
+      if (d && d.purpose === purpose && d.via === "passkey" && typeof d.key === "string") out.push({ id: Number(r.id), ts: Number(r.ts), key: d.key });
+    }
+    return out;
+  }
+  /** Active keys, for the console. */
+  activeKeys(): PasskeyRow[] {
+    return this.listPasskeys().filter((k) => k.state === "active");
+  }
+
   /** Console only: opens the registration window (one at a time; an earlier one and its unconfirmed key are dropped) and returns the one-time token. */
   enrollStart(label: string): { id: number; token: string; label: string; expiresAt: number } {
     const name = str(label, "label", 64, 1);
@@ -1598,6 +1622,9 @@ export class Guard {
         const list = rows.slice(0, 5).map((r) => `${String(r.path)} (${String(r.change)}, ${String(r.class)})`).join("; ");
         return `${first === rows.length ? "Первый эталон: принять всё как есть — " : ""}Принять в эталон наблюдателя за конфигурациями и памятью агентов ${rows.length} расхождений (критичных ${by("critical")}, инструкций ${by("instructions")}, прочих ${by("other")}): ${list}${rows.length > 5 ? ` и ещё ${rows.length - 5}` : ""}`;
       }
+      case "touch":
+        if (a.purpose === SETUP_CHECK_PURPOSE) return "Проверка касания при настройке: ничего не одобряется и не меняется, в журнал сторожа ляжет запись «касание сработало»";
+        return `Подтвердить действие плагина secure-bb: ${String(a.purpose)}`;
       default:
         return `Подтвердить действие плагина secure-bb: ${String(a.purpose)}`;
     }
