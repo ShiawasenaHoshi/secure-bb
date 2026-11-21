@@ -319,7 +319,7 @@ describe("review fixes (PR 2, review)", () => {
     // no hold in the period: nothing is said about waiting, even if something waits from before
     expect(groupAway([{ ts: T0 + 4, kind: "approved.source", pluginId: "p", detail: {}, from: "guard" }], T0, true, { p: { yellow: 3, red: 0 } })[0]!.text).toBe("1 версия p прошла сама");
     // stopped follows the red cards of now
-    expect(groupAway([hold(1, "a")], T0, true, { p: { yellow: 0, red: 2 } })[0]!.text).toBe("2 остановлены");
+    expect(groupAway([hold(1, "a")], T0, true, { p: { yellow: 0, red: 2 } })[0]!.text).toBe("p: 2 остановлены");
     expect(groupAway([hold(1, "a")], T0, true, { p: { yellow: 0, red: 0 } })).toEqual([]);
   });
   it("away: endings follow the number", () => {

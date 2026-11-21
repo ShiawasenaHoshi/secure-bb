@@ -132,7 +132,7 @@ describe("8. «Вы отложили» only after «Решить позже»", 
 
 describe("7. «Удалить»", () => {
   it("asks first, names the plugin and version; says «Удалён» after", () => {
-    expect(deleteConfirmText("sbb-test-hello", "0.0.9")).toBe("Удалить плагин sbb-test-hello 0.0.9? Его можно будет вернуть из Карантина");
+    expect(deleteConfirmText("sbb-test-hello", "0.0.9")).toBe("Удалить плагин sbb-test-hello 0.0.9? Чтобы вернуть, установите плагин снова");
     expect(deletedNote("sbb-test-hello", "0.0.9")).toBe("Удалён: плагин sbb-test-hello 0.0.9.");
   });
   it("the summary says «удалён», not «отклонена»", () => {
@@ -283,6 +283,31 @@ describe("13/14. stable folds, selections and data", () => {
   it("two overviews that differ only by the server's clock are the same: the page does not rebuild", () => {
     expect(sameData({ now: 1, queue: [{ id: 1 }] }, { now: 2, queue: [{ id: 1 }] })).toBe(true);
     expect(sameData({ now: 1, queue: [{ id: 1 }] }, { now: 2, queue: [{ id: 2 }] })).toBe(false);
-    expect(sameData({ a: { now: 1 } }, { a: { now: 9 } })).toBe(true);
+    // only the top-level clock is ignored: a nested field called «now» counts
+    expect(sameData({ a: { now: 1 } }, { a: { now: 9 } })).toBe(false);
+    // the guard's data about the agents is part of the comparison: a new difference is a change
+    const ag = (n: number) => ({ now: 1, agents: { state: { openTotal: n, drifts: Array.from({ length: n }, (_, i) => ({ id: i })) } } });
+    expect(sameData(ag(1), ag(2))).toBe(false);
+    expect(sameData(ag(2), { ...ag(2), now: 99 })).toBe(true);
+  });
+});
+
+describe("pilot round 2", () => {
+  it("a plugin held by the guard is enabled but not running (by status, and by the core's note)", async () => {
+    const { isRunning, runningThirdParty } = await import("../src/probe.ts");
+    const p = (id: string, status: string, statusDetail: string | null = null) => ({ id, provenance: "local", enabled: true, status, statusDetail, version: "1", source: "path:/x", rootDir: "/x" });
+    expect(isRunning({ status: "disabled", statusDetail: null })).toBe(false);
+    expect(isRunning({ status: "starting", statusDetail: 'waiting for activation guard "secure-bb"' })).toBe(false);
+    expect(isRunning({ status: "running", statusDetail: null })).toBe(true);
+    expect(runningThirdParty([p("evil-env", "disabled"), p("held", "starting", "held by secure-bb: review #3"), p("ok", "running"), { ...p("secure-bb", "running") }])).toEqual(["ok"]);
+  });
+  it("every line of «Пока вас не было» names its plugin, so two plugins' «остановлены» do not read as a contradiction", () => {
+    const stop = (pluginId: string, n: number) => ({ pluginId, counts: { auto: 0, window: 0, approved: 0, held: 0, stopped: n, rejected: 0, deleted: 0, alarm: 0 } });
+    expect(awayText(stop("evil-env", 2))).toBe("evil-env: 2 остановлены");
+    expect(awayText(stop("hello", 1))).toBe("hello: 1 остановлена");
+    const hold = (ts: number, pluginId: string): AwayEvent => ({ ts, kind: "hold", pluginId, detail: { stop: true }, from: "guard" });
+    const lines = groupAway([hold(T0 + 1, "evil-env"), hold(T0 + 2, "hello")], T0, true, { "evil-env": { yellow: 0, red: 2 }, hello: { yellow: 0, red: 1 } }).map((g) => g.text);
+    expect(lines.sort()).toEqual(["evil-env: 2 остановлены", "hello: 1 остановлена"]);
+    expect(new Set(lines.map((l) => l.split(":")[0])).size).toBe(lines.length); // one line per plugin
   });
 });

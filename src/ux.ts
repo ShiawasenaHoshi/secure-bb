@@ -390,7 +390,9 @@ export function awayText(g: Pick<AwayGroup, "pluginId" | "counts">): string {
   const head = parts[0]!;
   if (c.alarm > 0 && g.pluginId === null && parts.length === 1) return `${c.alarm} ${plural(c.alarm, "тревога", "тревоги", "тревог")} системы`;
   const tail = parts.slice(1).map((p) => p.replace(` ${name} `, " "));
-  return [head, ...tail].join(", ");
+  // A line always says WHOSE versions it counts: «2 остановлены» with no name next to «1 остановлена» of another plugin reads as a contradiction.
+  const joined = [head, ...tail].join(", ");
+  return head.includes(name) ? joined : `${name}: ${joined}`;
 }
 
 /** Events since `since`, grouped by plugin and thread, the busiest (stopped, waiting, alarm) first. Journal order does not matter. */
@@ -628,7 +630,7 @@ export const moreVersionsText = (n: number): string => `ещё ${n} ${plural(n, 
 
 /** The action on a card names the version it is about. */
 export const actionLabel = (verb: string, pluginId: string, version: string): string => `${verb} ${pluginId} ${version}`;
-export const deleteConfirmText = (pluginId: string, version: string): string => `Удалить плагин ${pluginId} ${version}? Его можно будет вернуть из Карантина`;
+export const deleteConfirmText = (pluginId: string, version: string): string => `Удалить плагин ${pluginId} ${version}? Чтобы вернуть, установите плагин снова`;
 export const deletedNote = (pluginId: string, version: string): string => `Удалён: плагин ${pluginId} ${version}.`;
 
 // ---- trust window and «доверять источнику» on a card ----------------------------------------------------------------------------
@@ -789,7 +791,14 @@ export function toggleId(ids: number[], id: number, on: boolean): number[] {
 }
 /** Two overviews that differ only by the server's clock say the same: the page keeps the old object and draws nothing again. */
 export function sameData(a: unknown, b: unknown): boolean {
-  const strip = (x: unknown): string => JSON.stringify(x, (k, v) => (k === "now" ? undefined : v));
+  // Only the TOP-level clock is ignored: everything else, the guard's data about the agents included, counts.
+  const strip = (x: unknown): string => {
+    if (typeof x === "object" && x !== null && !Array.isArray(x)) {
+      const { now: _now, ...rest } = x as Record<string, unknown>;
+      return JSON.stringify(rest);
+    }
+    return JSON.stringify(x);
+  };
   return strip(a) === strip(b);
 }
 
