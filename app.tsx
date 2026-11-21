@@ -1,7 +1,7 @@
 // secure-bb — frontend: the secure-bb page (the plugin gate is a section of it) and an always-visible banner
 // for open trust windows. Plain React + host theme tokens; no vendored UI,
 // no third-party code (this bundle runs in bb's origin, so it stays minimal).
-import { useCallback, useEffect, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { definePluginApp, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import type { SecureBbRpc } from "./server";
@@ -116,8 +116,205 @@ function CodeField({ value, onChange }: { value: string; onChange: (v: string) =
   );
 }
 
-// ------------------------------------------------------------- AI scan ----
 type Rpc = ReturnType<typeof useRpc<SecureBbRpc>>;
+
+// ----------------------------------------------------- approval session ----
+// The session token lives ONLY in this component's memory (state): not localStorage, not a cookie, not the URL. Reloading the page
+// forgets it, and so does leaving it. The server keeps only a hash. Routine actions use it instead of a code; dangerous ones never do.
+type Proof = { code: string } | { session: string };
+interface SessionLocal {
+  token: string;
+  /** When this page stops using the token (a little before the server does: the server's clock decides, this only avoids a wasted call). */
+  idleUntil: number;
+  hardUntil: number;
+}
+interface Approval {
+  session: SessionLocal | null;
+  /** Can an action run with what is typed now? `dangerous`: it needs a fresh code whatever the session says. */
+  ready: (code: string, dangerous?: boolean) => boolean;
+  /** Runs a routine action: with the code when six digits are typed, else with the session; slides the local clock on success. */
+  routine: <T>(code: string, fn: (proof: Proof) => Promise<T>, dangerous?: boolean) => Promise<T>;
+}
+const MARGIN_MS = 5_000;
+const noApproval: Approval = {
+  session: null,
+  ready: (code) => code.length === 6,
+  routine: (code, fn) => fn({ code }),
+};
+const ApprovalContext = createContext<Approval>(noApproval);
+const useApproval = () => useContext(ApprovalContext);
+
+/** A code field that gives way to the session note while a session covers the action. */
+function RoutineCode({ value, onChange, dangerous }: { value: string; onChange: (v: string) => void; dangerous?: boolean }) {
+  const ap = useApproval();
+  if (ap.session && !dangerous) return <span className={`text-xs ${muted}`}>сессия открыта: код не нужен</span>;
+  return <CodeField value={value} onChange={onChange} />;
+}
+
+function useApprovalSession(rpc: Rpc, refetch: () => void): { approval: Approval; open: (code: string) => Promise<void>; lock: () => Promise<void> } {
+  const [session, setSession] = useState<SessionLocal | null>(null);
+  const ref = useRef<SessionLocal | null>(null);
+  ref.current = session;
+  const now = useNow();
+  // Time is up for this page: forget the token (the server stops accepting it at about the same moment).
+  useEffect(() => {
+    if (session && now >= Math.min(session.idleUntil, session.hardUntil)) setSession(null);
+  }, [now, session]);
+  // Leaving the page locks the session on the server too (best effort; the token is gone with the page anyway).
+  useEffect(() => {
+    const lockOnLeave = () => {
+      if (ref.current) void rpc.call("session.close").catch(() => undefined);
+    };
+    window.addEventListener("pagehide", lockOnLeave);
+    return () => {
+      window.removeEventListener("pagehide", lockOnLeave);
+      lockOnLeave();
+    };
+  }, [rpc]);
+  const approval: Approval = {
+    session,
+    ready: (code, dangerous = false) => code.length === 6 || (session !== null && !dangerous),
+    routine: async (code, fn, dangerous = false) => {
+      const started = Date.now();
+      const useSession = code.length !== 6 && !dangerous && ref.current !== null;
+      const proof: Proof = useSession ? { session: ref.current!.token } : { code };
+      try {
+        const result = await fn(proof);
+        if (useSession) setSession((cur) => (cur ? { ...cur, idleUntil: started + 15 * 60_000 - MARGIN_MS } : cur));
+        return result;
+      } catch (e) {
+        // The server no longer knows this token: forget it here too, and say why.
+        if (useSession && e instanceof Error && /expired session|blocked|too many/.test(e.message)) setSession(null);
+        throw e;
+      }
+    },
+  };
+  const open = async (code: string) => {
+    const started = Date.now();
+    const r = await rpc.call("session.open", { code });
+    setSession({ token: r.token, idleUntil: started + r.idleMs - MARGIN_MS, hardUntil: started + r.capMs - MARGIN_MS });
+    refetch();
+  };
+  const lock = async () => {
+    setSession(null);
+    await rpc.call("session.close");
+    refetch();
+  };
+  return { approval, open, lock };
+}
+
+/** The strip at the top: open a session with one code, or see how long it lasts and lock it. */
+function SessionBar({ ov, session, open, lock }: { ov: Overview; session: SessionLocal | null; open: (code: string) => Promise<void>; lock: () => Promise<void> }) {
+  const now = useNow();
+  const [code, setCode] = useState("");
+  const act = useCodeAction(() => undefined);
+  const registered = ov.totp.state === "locked" || ov.totp.state === "external";
+  if (!registered) return null;
+  if (session) {
+    const left = Math.max(0, Math.ceil((Math.min(session.idleUntil, session.hardUntil) - now) / 60_000));
+    const ceiling = Math.max(0, Math.ceil((session.hardUntil - now) / 60_000));
+    return (
+      <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted px-3 py-2 text-sm" role="status">
+        <span className="min-w-0 flex-1">Сессия открыта, осталось {left} мин (скользящие 15 мин от каждого действия; потолок — через {ceiling} мин). Опасное всё равно требует свежего кода.</span>
+        <button className={btnPrimary} onClick={() => void act.run(() => lock())}>Заблокировать</button>
+      </div>
+    );
+  }
+  const blockers = ov.thirdPartyRunning;
+  return (
+    <div className={card}>
+      <h3 className="font-semibold">Сессия подтверждения</h3>
+      <p className={muted}>Один код открывает сессию на этой странице: 15 минут, скользящие, потолок 1 час. Рутину (одобрить версию, открыть окно, принять расхождение, одобрить скилл, принять эталон) она покрывает без кода; опасное — всегда со свежим кодом. Перезагрузка страницы закрывает сессию.</p>
+      {blockers.length > 0 ? (
+        <p className="mt-2 text-red-600">Сессию нельзя открыть, пока работают сторонние плагины: их код интерфейса в той же странице мог бы перехватить токен. Выключите: {blockers.join(", ")}.</p>
+      ) : null}
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <CodeField value={code} onChange={setCode} />
+        <button className={btn} disabled={act.busy || code.length !== 6 || blockers.length > 0 || ov.totp.blockedUntil > 0} onClick={() => void act.run(async () => { await open(code); setCode(""); })}>
+          Открыть сессию
+        </button>
+      </div>
+      <Msg error={act.error} />
+    </div>
+  );
+}
+
+/** "Approve the selected": the list is fixed on the server and shown with its hash BEFORE the code; one code approves the whole list. */
+type BatchKindUi = "queue" | "skill" | "drift";
+function BatchCard({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; refetch: () => void }) {
+  const ap = useApproval();
+  const [picked, setPicked] = useState<string[]>([]);
+  const [prepared, setPrepared] = useState<Awaited<ReturnType<Rpc["call"]>> | null>(null);
+  const [results, setResults] = useState<Array<{ kind: string; id: number; label: string; ok: boolean; note: string }> | null>(null);
+  const [code, setCode] = useState("");
+  const act = useCodeAction(refetch);
+  const registered = ov.totp.state === "locked" || ov.totp.state === "external";
+  const candidates: Array<{ key: string; kind: BatchKindUi; id: number; label: string }> = [
+    ...ov.queue.filter((q) => q.status === "held").map((q) => ({ key: `queue:${q.id}`, kind: "queue" as const, id: q.id, label: `версия ${q.pluginId}@${q.version}` })),
+    ...ov.skills.open.map((q) => ({ key: `skill:${q.id}`, kind: "skill" as const, id: q.id, label: `скилл ${q.name} (${q.scope})` })),
+    ...ov.watch.drifts.filter((d) => d.status === "open" || d.status === "rollback-failed").map((d) => ({ key: `drift:${d.id}`, kind: "drift" as const, id: d.id, label: `расхождение: ${d.label}` })),
+  ];
+  const prep = prepared as null | { batchId: string; setHash: string; expiresAt: number; items: Array<{ kind: string; id: number; label: string; detail: string }>; skipped: Array<{ kind: string; id: number; reason: string }> };
+  if (candidates.length < 2 && !prep && !results) return null;
+  const toggle = (k: string) => setPicked((cur) => (cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k]));
+  const reset = () => { setPrepared(null); setCode(""); };
+  return (
+    <div className={card}>
+      <h3 className="font-semibold">Пакетное одобрение</h3>
+      {!prep ? (
+        <>
+          <p className={muted}>Отметьте, что одобрить разом: один код на весь список. Список фиксируется на сервере до ввода кода; элементы с блоком проверок в пакет не входят.</p>
+          <ul className="mt-2 space-y-1">
+            {candidates.map((c) => (
+              <li key={c.key}><label className="flex items-center gap-2"><input type="checkbox" checked={picked.includes(c.key)} onChange={() => toggle(c.key)} /> {c.label} <span className={`text-xs ${muted}`}>#{c.id}</span></label></li>
+            ))}
+          </ul>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <button className={btn} disabled={act.busy || picked.length === 0 || !registered} onClick={() => void act.run(async () => {
+              setResults(null);
+              const items = picked.map((k) => ({ kind: k.split(":")[0] as BatchKindUi, id: Number(k.split(":")[1]) }));
+              setPrepared((await rpc.call("batch.prepare", { items })) as never);
+            })}>
+              Показать список ({picked.length})
+            </button>
+            <button className={btn} onClick={() => setPicked(candidates.map((c) => c.key))}>Выбрать всё</button>
+          </div>
+        </>
+      ) : (
+        <>
+          <p className="mt-1">Будет одобрено ({prep.items.length}) — список зафиксирован, хеш набора <span className="font-mono">{prep.setHash.slice(0, 12)}</span>:</p>
+          <ul className="mt-1 list-disc pl-5">
+            {prep.items.map((i) => <li key={`${i.kind}${i.id}`}>{i.label} <span className={`text-xs ${muted}`}>({i.kind} #{i.id}{i.detail ? ` · ${i.detail}` : ""})</span></li>)}
+          </ul>
+          {prep.skipped.length > 0 ? (
+            <div className="mt-1">
+              <p className={muted}>Не вошли (одобряются по одному):</p>
+              <ul className="list-disc pl-5 text-xs">{prep.skipped.map((i) => <li key={`${i.kind}${i.id}`}>{i.kind} #{i.id}: {i.reason}</li>)}</ul>
+            </div>
+          ) : null}
+          <p className={`mt-1 text-xs ${muted}`}>Список действует 10 минут и одобряется один раз. Если что-то изменится до ввода кода, это не будет одобрено.</p>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <RoutineCode value={code} onChange={setCode} />
+            <button className={btnPrimary} disabled={act.busy || !ap.ready(code)} onClick={() => void act.run(async () => {
+              const r = await ap.routine(code, (proof) => rpc.call("batch.approve", { batchId: prep.batchId, setHash: prep.setHash, ...proof }));
+              setResults(r.results);
+              setPicked([]);
+              reset();
+              return { note: `Одобрено: ${r.results.filter((x) => x.ok).length} из ${r.results.length}` };
+            })}>
+              Одобрить список ({prep.items.length})
+            </button>
+            <button className={btn} onClick={reset}>Отмена</button>
+          </div>
+        </>
+      )}
+      {results ? <ul className="mt-2 list-disc pl-5 text-xs">{results.map((r) => <li key={`${r.kind}${r.id}`} className={r.ok ? muted : "text-red-600"}>{r.label}: {r.ok ? "одобрено" : "не одобрено"} — {r.note}</li>)}</ul> : null}
+      <Msg error={act.error} ok={act.ok} />
+    </div>
+  );
+}
+
+// ------------------------------------------------------------- AI scan ----
 
 const MODEL_STATUS: Record<string, string> = { clean: "чисто", flag: "флаг", refusal: "отказ", invalid: "невалидный ответ", timeout: "таймаут", error: "ошибка", unavailable: "недоступна" };
 
@@ -409,6 +606,7 @@ function cfgWindowLine(w: ConfigWindowView, remainingSec: number): string {
 
 function WindowRows({ windows, cfgWindows, rpc, refetch }: { windows: WindowView[]; cfgWindows: ConfigWindowView[]; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void }) {
   const now = useNow();
+  const ap = useApproval();
   const act = useCodeAction(refetch);
   const [code, setCode] = useState("");
   const [closing, setClosing] = useState<number | null>(null);
@@ -423,13 +621,13 @@ function WindowRows({ windows, cfgWindows, rpc, refetch }: { windows: WindowView
             <span className="min-w-0 flex-1">{cfgWindowLine(w, remaining)}</span>
             {closingCfg === w.id ? (
               <>
-                <CodeField value={code} onChange={setCode} />
+                <RoutineCode value={code} onChange={setCode} />
                 <button
                   className={btnPrimary}
-                  disabled={act.busy || code.length !== 6}
+                  disabled={act.busy || !ap.ready(code)}
                   onClick={() =>
                     void act.run(async () => {
-                      await rpc.call("watch.window.close", { windowId: w.id, code });
+                      await ap.routine(code, (proof) => rpc.call("watch.window.close", { windowId: w.id, ...proof }));
                       setCode("");
                       setClosingCfg(null);
                     })
@@ -453,13 +651,13 @@ function WindowRows({ windows, cfgWindows, rpc, refetch }: { windows: WindowView
             <span className="min-w-0 flex-1">{windowLine(w, remaining)}</span>
             {closing === w.id ? (
               <>
-                <CodeField value={code} onChange={setCode} />
+                <RoutineCode value={code} onChange={setCode} />
                 <button
                   className={btnPrimary}
-                  disabled={act.busy || code.length !== 6}
+                  disabled={act.busy || !ap.ready(code)}
                   onClick={() =>
                     void act.run(async () => {
-                      await rpc.call("window.close", { windowId: w.id, code });
+                      await ap.routine(code, (proof) => rpc.call("window.close", { windowId: w.id, ...proof }));
                       setCode("");
                       setClosing(null);
                     })
@@ -716,11 +914,14 @@ function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; rpc: Re
   const registered = ov.totp.state === "locked" || ov.totp.state === "external";
   const held = q.status === "held";
   const unsafeDirNow = q.reason?.startsWith("каталог доступен на запись другим") ?? false;
-  const disabled = act.busy || code.length !== 6 || !registered || unsafeDirNow;
-  const done = () => setCode("");
+  const ap = useApproval();
   const found = ov.queueChecks[q.id];
   const blocked = (q.reason?.startsWith("заблокировано проверками") ?? false) || (found?.findings.some((f) => f.severity === "block") ?? false);
   const [ack, setAck] = useState(false);
+  // Lifting a block is dangerous: it needs a fresh code even with a session open.
+  const liftingBlock = blocked && ack;
+  const disabled = act.busy || !ap.ready(code, liftingBlock) || !registered || unsafeDirNow;
+  const done = () => setCode("");
   // The directory can be changed by someone other than the server's user: no code approves it; fix the directory, then it is looked at again.
   const unsafeDir = q.reason?.startsWith("каталог доступен на запись другим") ?? false;
   return (
@@ -746,9 +947,9 @@ function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; rpc: Re
       <ScanResultView scan={ov.ai.queueScans[q.id]} />
       {held ? (
         <div className="mt-3 flex flex-wrap items-center gap-2">
-          <CodeField value={code} onChange={setCode} />
+          <RoutineCode value={code} onChange={setCode} dangerous={liftingBlock} />
           <ScanButton ov={ov} target={{ queueId: q.id }} rpc={rpc} refetch={refetch} />
-          <button className={btnPrimary} disabled={disabled} onClick={() => void act.run(async () => { const r = await rpc.call("queue.approve", { id: q.id, code, acknowledgeBlock: ack }); done(); setAck(false); return r; })}>
+          <button className={btnPrimary} disabled={disabled} onClick={() => void act.run(async () => { const r = await ap.routine(code, (proof) => rpc.call("queue.approve", { id: q.id, ...proof, acknowledgeBlock: ack }), liftingBlock); done(); setAck(false); return r; })}>
             {blocked ? "Снять блок и одобрить" : "Одобрить версию"}
           </button>
           {blocked ? (
@@ -757,11 +958,11 @@ function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; rpc: Re
             </label>
           ) : null}
           {q.threadId && !blocked ? (
-            <button className={btn} disabled={disabled} onClick={() => void act.run(async () => { await rpc.call("window.open", { queueId: q.id, code }); done(); })}>
+            <button className={btn} disabled={disabled} onClick={() => void act.run(async () => { await ap.routine(code, (proof) => rpc.call("window.open", { queueId: q.id, ...proof })); done(); })}>
               Открыть окно
             </button>
           ) : null}
-          <button className={btn} disabled={disabled} onClick={() => void act.run(async () => { await rpc.call("queue.dismiss", { id: q.id, code }); done(); })}>
+          <button className={btn} disabled={disabled} onClick={() => void act.run(async () => { await ap.routine(code, (proof) => rpc.call("queue.dismiss", { id: q.id, ...proof })); done(); })}>
             Отклонить
           </button>
         </div>
@@ -774,6 +975,7 @@ function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; rpc: Re
 
 function PluginRow({ p, ov, rpc, refetch, registered, checks }: { p: PluginView; ov: Overview; checks: Record<string, CheckResult>; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void; registered: boolean }) {
   const now = useNow();
+  const ap = useApproval();
   const [code, setCode] = useState("");
   const act = useCodeAction(refetch);
   const remaining = p.window ? Math.max(0, Math.ceil((Math.min(p.window.expiresAt, p.window.hardExpiresAt) - now) / 1000)) : 0;
@@ -812,7 +1014,7 @@ function PluginRow({ p, ov, rpc, refetch, registered, checks }: { p: PluginView;
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <CodeField value={code} onChange={setCode} />
           {p.pin ? (
-            <button className={btn} disabled={act.busy || code.length !== 6} onClick={() => void act.run(async () => { await rpc.call("approval.revoke", { approvalId: p.pin!.id, code }); setCode(""); })}>
+            <button className={btn} disabled={act.busy || !ap.ready(code)} onClick={() => void act.run(async () => { await ap.routine(code, (proof) => rpc.call("approval.revoke", { approvalId: p.pin!.id, ...proof })); setCode(""); })}>
               Отозвать
             </button>
           ) : null}
@@ -1016,6 +1218,7 @@ const driftStatus: Record<Drift["status"], string> = {
 };
 
 function DriftRow({ d, registered, rpc, refetch }: { d: Drift; registered: boolean; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void }) {
+  const ap = useApproval();
   const [code, setCode] = useState("");
   const act = useCodeAction(refetch);
   const isOpen = d.status === "open" || d.status === "rollback-failed";
@@ -1030,12 +1233,12 @@ function DriftRow({ d, registered, rpc, refetch }: { d: Drift; registered: boole
       {d.note ? <p className={muted}>{d.note}</p> : null}
       {isOpen && registered ? (
         <div className="mt-2 flex flex-wrap items-center gap-2">
-          <CodeField value={code} onChange={setCode} />
-          <button className={btn} disabled={act.busy || code.length !== 6} onClick={() => void act.run(async () => { await rpc.call("watch.accept", { id: d.id, code }); setCode(""); })}>
+          <RoutineCode value={code} onChange={setCode} />
+          <button className={btn} disabled={act.busy || !ap.ready(code)} onClick={() => void act.run(async () => { await ap.routine(code, (proof) => rpc.call("watch.accept", { id: d.id, ...proof })); setCode(""); })}>
             Принять
           </button>
           {d.rollbackable ? (
-            <button className={btn} disabled={act.busy || code.length !== 6} onClick={() => void act.run(async () => { await rpc.call("watch.rollback", { id: d.id, code }); setCode(""); })}>
+            <button className={btn} disabled={act.busy || !ap.ready(code)} onClick={() => void act.run(async () => { await ap.routine(code, (proof) => rpc.call("watch.rollback", { id: d.id, ...proof })); setCode(""); })}>
               Откатить
             </button>
           ) : (
@@ -1057,7 +1260,9 @@ function WatchSection({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<type
   const open = w.drifts.filter((d) => d.status === "open" || d.status === "rollback-failed");
   const settled = w.drifts.filter((d) => d.status !== "open" && d.status !== "rollback-failed");
   const toggle = (s: WindowScope) => setScopes((cur) => (cur.includes(s) ? cur.filter((x) => x !== s) : [...cur, s]));
-  const need = code.length !== 6 || act.busy || !registered;
+  const ap = useApproval();
+  const need = code.length !== 6 || act.busy || !registered; // dangerous: a fresh code only
+  const needRoutine = !ap.ready(code) || act.busy || !registered; // routine: a code or the session
   return (
     <div className="space-y-3">
       <div className={card}>
@@ -1073,8 +1278,8 @@ function WatchSection({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<type
           Пока агенты работают от того же пользователя (ступени 0–2) и API без токенов, агент может вернуть изменение обратно: это сигнализация, не замок.
         </p>
         <div className="mt-3 flex flex-wrap items-center gap-2">
-          <CodeField value={code} onChange={setCode} />
-          <button className={btnPrimary} disabled={need} onClick={() => void act.run(async () => { const r = await rpc.call("watch.acceptAll", { code }); setCode(""); return { note: `Эталон принят, объектов: ${r.items}` }; })}>
+          <RoutineCode value={code} onChange={setCode} />
+          <button className={btnPrimary} disabled={needRoutine} onClick={() => void act.run(async () => { const r = await ap.routine(code, (proof) => rpc.call("watch.acceptAll", { ...proof })); setCode(""); return { note: `Эталон принят, объектов: ${r.items}` }; })}>
             {w.baselineAt === null ? "Принять текущую конфигурацию как эталон" : "Принять всё текущее как эталон"}
           </button>
           <button className={btn} disabled={act.busy} onClick={() => void act.run(async () => { await rpc.call("watch.scan"); })}>
@@ -1112,8 +1317,8 @@ function WatchSection({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<type
           ))}
         </div>
         <div className="mt-2 flex flex-wrap items-center gap-2">
-          <CodeField value={code} onChange={setCode} />
-          <button className={btnPrimary} disabled={need || scopes.length === 0 || w.baselineAt === null} onClick={() => void act.run(async () => { await rpc.call("watch.window.open", { scopes, code }); setCode(""); setScopes([]); })}>
+          <RoutineCode value={code} onChange={setCode} />
+          <button className={btnPrimary} disabled={needRoutine || scopes.length === 0 || w.baselineAt === null} onClick={() => void act.run(async () => { await ap.routine(code, (proof) => rpc.call("watch.window.open", { scopes, ...proof })); setCode(""); setScopes([]); })}>
             Открыть окно
           </button>
         </div>
@@ -1159,6 +1364,7 @@ const skillState: Record<SkillQueueView["state"], string> = {
 };
 
 function SkillRow({ q, registered, rpc, refetch }: { q: SkillQueueView; registered: boolean; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void }) {
+  const ap = useApproval();
   const [code, setCode] = useState("");
   const [ack, setAck] = useState(false);
   const [shown, setShown] = useState<Array<{ path: string; content: string | null }> | null>(null);
@@ -1199,9 +1405,9 @@ function SkillRow({ q, registered, rpc, refetch }: { q: SkillQueueView; register
       ) : null}
       {canApprove && registered ? (
         <div className="mt-2 flex flex-wrap items-center gap-2">
-          <CodeField value={code} onChange={setCode} />
+          <RoutineCode value={code} onChange={setCode} dangerous={q.decision === "block"} />
           {q.decision === "block" ? <label className="flex items-center gap-1 text-xs"><input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} /> принимаю, несмотря на жёсткий признак</label> : null}
-          <button className={btn} disabled={act.busy || code.length !== 6 || (q.decision === "block" && !ack)} onClick={() => void act.run(async () => { const r = await rpc.call("skills.approve", { id: q.id, code, acknowledgeBlock: ack }); setCode(""); setAck(false); return r; })}>
+          <button className={btn} disabled={act.busy || !ap.ready(code, q.decision === "block") || (q.decision === "block" && !ack)} onClick={() => void act.run(async () => { const r = await ap.routine(code, (proof) => rpc.call("skills.approve", { id: q.id, ...proof, acknowledgeBlock: ack }), q.decision === "block"); setCode(""); setAck(false); return r; })}>
             {q.state === "removed" ? "Одобрить хеш (поставить снова)" : "Одобрить"}
           </button>
           {isOpen && q.removable ? <button className={btn} disabled={act.busy} onClick={() => void act.run(async () => { await rpc.call("skills.remove", { id: q.id }); })}>Удалить скилл</button> : null}
@@ -1306,15 +1512,18 @@ function usePagePing(rpc: ReturnType<typeof useRpc<SecureBbRpc>>) {
 function GatePage() {
   const { rpc, data: ov, error, refetch } = useOverview();
   usePagePing(rpc);
+  const { approval, open, lock } = useApprovalSession(rpc, refetch);
   if (error && !ov) return <div className="p-6 text-destructive">Не удалось загрузить: {error}</div>;
   if (!ov) return <div className={`p-6 ${muted}`}>Загрузка…</div>;
   const registered = ov.totp.state === "locked" || ov.totp.state === "external";
   const held = ov.queue.filter((q) => q.status === "held");
   const settled = ov.queue.filter((q) => q.status !== "held").slice(0, 10);
   return (
+    <ApprovalContext.Provider value={approval}>
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-3xl space-y-6 p-4 sm:p-6">
         <h1 className="text-xl font-semibold">secure-bb</h1>
+        <SessionBar ov={ov} session={approval.session} open={open} lock={lock} />
         {ov.totp.blockedUntil > 0 ? (
           <p className="rounded-md border border-destructive p-2 text-destructive">Слишком много неверных кодов: одобрения заблокированы до {when(ov.totp.blockedUntil)}.</p>
         ) : null}
@@ -1331,6 +1540,7 @@ function GatePage() {
             </details>
           ) : null}
         </Section>
+        <BatchCard ov={ov} rpc={rpc} refetch={refetch} />
         <Section title="Гейт плагинов — сторонние плагины">
           {ov.plugins.length === 0 ? <div className={`${card} ${muted}`}>Сторонних плагинов нет.</div> : ov.plugins.map((p) => <PluginRow key={p.id} p={p} ov={ov} rpc={rpc} refetch={refetch} registered={registered} checks={ov.checks} />)}
         </Section>
@@ -1345,6 +1555,7 @@ function GatePage() {
         <Section title={`Журнал${ov.journal.ok ? "" : " (!)"}`}><LogCard ov={ov} rpc={rpc} refetch={refetch} /></Section>
       </div>
     </div>
+    </ApprovalContext.Provider>
   );
 }
 

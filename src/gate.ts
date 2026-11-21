@@ -4,6 +4,7 @@
 import { readFileSync } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
 import { runChecks as defaultRunChecks, type CheckResult } from "./checks/index.js";
+import { SESSION_CAP_MS, SESSION_IDLE_MS, groupOf, hashToken, mintListProof, mintSessionProof, newToken, SessionProof, ListProof, type Proof, type RpcName } from "./approval.js";
 import { BLOCKED_REASON, bySeverity, capabilityTokens, localCheckKey, newTokens, summarize } from "./decision.js";
 import { describeIssues, serverIds, writableByOthers, type PermIssue } from "./perms.js";
 import { validateSecondModel } from "./scan/commands.js";
@@ -150,7 +151,7 @@ export class Gate {
     if (until > 0) throw new GateError("blocked", `too many wrong codes; approvals are blocked until ${new Date(until).toISOString()}`);
   }
 
-  private recordFailure(purpose: string): never {
+  private recordFailure(purpose: string, message = "invalid or already used code"): never {
     this.store.recordAttempt(false, purpose);
     const epoch = Number(this.store.getMeta("fail_epoch") ?? 0);
     const since = Math.max(this.now - HOUR_MS, epoch);
@@ -160,26 +161,96 @@ export class Gate {
       this.store.log("totp.blocked", null, null, { purpose });
     }
     this.store.log("totp.fail", null, null, { purpose });
-    throw new GateError("invalid_code", "invalid or already used code");
+    throw new GateError("invalid_code", message);
   }
 
   /**
-   * A touch: proves a human holds the TOTP secret. Each call consumes one
-   * 30-second step; a step (or any older one) is never accepted twice.
+   * A touch: proves a human holds the TOTP secret, or holds the token of a session that such a code opened.
+   * A fresh code (a string) consumes one 30-second step; a step (or any older one) is never accepted twice.
+   * A session proof is only ever made by `proofFor`, which looked at the RPC table first.
    */
-  touch(purpose: string, code: string): void {
+  touch(purpose: string, proof: Proof): void {
+    if (proof instanceof ListProof) return; // one code for a whole fixed list was accepted a moment ago (`approveList`)
+    const code = proof instanceof SessionProof ? null : proof;
     const state = this.totpState();
     if (state === "none" || state === "pending") throw new GateError("not_registered", "no second factor is registered yet; register one on the secure-bb page");
     if (state === "external-broken") throw new GateError("not_registered", "the external TOTP secret file cannot be read");
     this.assertNotBlocked();
+    if (proof instanceof SessionProof) return this.useSession(purpose, proof.token);
     const external = state === "external";
     const secret = external ? this.readExternal()! : this.store.totp()!.secret;
     const last = external ? this.store.externalLastStep() : this.store.totp()!.lastStep;
-    const res = verifyTotp(secret, code, this.now, last);
+    const res = verifyTotp(secret, code!, this.now, last);
     if (!res.ok) this.recordFailure(purpose);
     this.store.recordAttempt(true, purpose);
     if (external) this.store.setExternalLastStep(res.step);
     else this.store.setLastStep(res.step);
+  }
+
+  // ---- approval session (docs: secure-bb-approval-ux.md §1) ------------------------------------------------------------
+  /**
+   * What an RPC may use as its proof. `escalate`: this call is the dangerous kind of an otherwise routine RPC (lifting a block,
+   * widening); it then needs a fresh code, as every "dangerous" RPC does. A fresh code is always welcome, whatever the group.
+   */
+  proofFor(rpc: RpcName, cred: { code?: string; session?: string }, opts: { escalate?: boolean } = {}): Proof {
+    if (cred.code !== undefined) return cred.code;
+    if (cred.session !== undefined) {
+      if (groupOf(rpc) !== "routine" || opts.escalate === true) throw new GateError("invalid_code", "this action needs a fresh code: a session does not cover it");
+      return mintSessionProof(cred.session);
+    }
+    throw new GateError("invalid_code", "a code, or an open session, is needed");
+  }
+
+  /** A wrong, unknown, closed or expired token is a wrong code: same counter, same one-hour block. */
+  private useSession(purpose: string, token: string): void {
+    const row = this.store.sessionByHash(hashToken(token));
+    if (!row || this.now >= row.expiresAt || this.now >= row.hardExpiresAt) {
+      if (row && this.store.closeSession(row.id, "expired")) this.store.log("session.expire", null, null);
+      this.recordFailure(`session:${purpose}`, "invalid or expired session");
+    }
+    // Sliding: every use moves the end 15 minutes ahead, never past the ceiling.
+    this.store.slideSession(row.id, this.now, Math.min(this.now + SESSION_IDLE_MS, row.hardExpiresAt));
+    this.store.log("session.use", null, null, { purpose });
+  }
+
+  /**
+   * Opens a session with one fresh code. Refused while any third-party plugin runs: its interface code lives in the page's
+   * origin and could read the token. The old session (if any) is closed: there is one.
+   */
+  async openSession(code: string): Promise<{ token: string; idleMs: number; capMs: number }> {
+    const running = await this.d.thirdPartyRunning();
+    if (running.length > 0)
+      throw new GateError("conflict", `disable these third-party plugins first: their interface code could read the session token (${running.join(", ")})`, { plugins: running });
+    this.touch("session.open", code);
+    this.store.closeSessions("replaced");
+    const token = newToken();
+    this.store.insertSession(hashToken(token), this.now, this.now + SESSION_IDLE_MS, this.now + SESSION_CAP_MS);
+    this.store.log("session.open", null, null, { idleMs: SESSION_IDLE_MS, capMs: SESSION_CAP_MS });
+    return { token, idleMs: SESSION_IDLE_MS, capMs: SESSION_CAP_MS };
+  }
+
+  /** "Lock": tightening, needs nothing. Says nothing about whether a session existed. */
+  closeSessions(reason: string): void {
+    if (this.store.closeSessions(reason) > 0) this.store.log("session.close", null, null, { reason });
+  }
+
+  /** Background pass: closes sessions whose time is up. */
+  sweepSessions(): number {
+    let n = 0;
+    for (const row of this.store.unclosedSessions()) {
+      if (this.now < row.expiresAt && this.now < row.hardExpiresAt) continue;
+      if (this.store.closeSession(row.id, "expired")) {
+        this.store.log("session.expire", null, null);
+        n++;
+      }
+    }
+    return n;
+  }
+
+  /** One code for a fixed list: the code (or session) is checked once, here; the items are then approved with the returned mark. */
+  approveList(purpose: string, proof: Proof): ListProof {
+    this.touch(purpose, proof);
+    return mintListProof();
   }
 
   /**
@@ -540,7 +611,7 @@ export class Gate {
    * Approves a held version with a touch. Returns what the server must do next:
    * install the snapshot (a proposal not yet seen by core) or just recheck.
    */
-  approveQueue(queueId: number, code: string, opts: { acknowledgeBlock?: boolean } = {}): { installDir: string | null; pluginId: string; enable: boolean; proposalId: number | null } {
+  approveQueue(queueId: number, code: Proof, opts: { acknowledgeBlock?: boolean } = {}): { installDir: string | null; pluginId: string; enable: boolean; proposalId: number | null } {
     const q = this.requireHeld(queueId);
     // No code lifts this: the directory itself must be fixed (nobody but the server's user may write there), then the version is looked at again.
     if (q.reason?.startsWith(UNSAFE_DIR_REASON))
@@ -586,7 +657,7 @@ export class Gate {
     return { installDir, pluginId: q.pluginId, enable: q.kind === "afterfact", proposalId: q.proposalId };
   }
 
-  dismissQueue(queueId: number, code: string): void {
+  dismissQueue(queueId: number, code: Proof): void {
     const q = this.requireHeld(queueId);
     this.touch(`dismiss:${q.pluginId}`, code);
     this.store.setQueueStatus(q.id, "dismissed");
@@ -600,7 +671,7 @@ export class Gate {
     return q;
   }
 
-  revoke(approvalId: number, code: string): ApprovalRow {
+  revoke(approvalId: number, code: Proof): ApprovalRow {
     const a = this.store.getApproval(approvalId);
     if (!a || a.revokedAt !== null) throw new GateError("not_found", "no such active approval");
     this.touch(`revoke:${a.pluginId}`, code);
@@ -638,7 +709,7 @@ export class Gate {
     return frozen;
   }
 
-  openWindow(queueId: number, code: string, scope?: "tree" | "thread"): WindowRow {
+  openWindow(queueId: number, code: Proof, scope?: "tree" | "thread"): WindowRow {
     const q = this.store.getQueue(queueId);
     if (!q) throw new GateError("not_found", `no review #${queueId}`);
     if (!q.threadId) throw new GateError("invalid", "this entry did not come from a thread, so a trust window cannot be bound to it; approve the version instead");
@@ -671,7 +742,7 @@ export class Gate {
     return w;
   }
 
-  closeWindow(windowId: number, code: string): void {
+  closeWindow(windowId: number, code: Proof): void {
     const w = this.store.getWindow(windowId);
     if (!w || w.closedAt !== null) throw new GateError("not_found", "no such open window");
     this.touch(`window.close:${w.pluginId}`, code);

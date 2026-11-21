@@ -13,13 +13,17 @@ import {
   experimental_PluginRpcRefusal,
   type BbPluginApi,
 } from "@get-bb/plugin-sdk";
+import { BatchService, type BatchSource } from "./src/batch.js";
+import type { Proof } from "./src/approval.js";
 import { AfterFactScanner } from "./src/afterfact.js";
 import { bbSkillSource } from "./src/skills/bb-source.js";
 import { SkillError, SkillGuard } from "./src/skills/guard.js";
 import { SkillReader } from "./src/skills/reader.js";
 import { SkillStore } from "./src/skills/store.js";
 import { rpcContract } from "./src/contract.js";
-import { Gate, GateError, type HookCtx, type ThreadTree } from "./src/gate.js";
+import { createHash } from "node:crypto";
+import { BLOCKED_REASON, bySeverity } from "./src/decision.js";
+import { Gate, GateError, UNSAFE_DIR_REASON, type HookCtx, type ThreadTree } from "./src/gate.js";
 import { buildOverview } from "./src/overview.js";
 import { collectProbe, isThirdParty, runningThirdParty, type InstalledPluginLite } from "./src/probe.js";
 import { formatReport, runChecks } from "./src/checks/index.js";
@@ -302,6 +306,73 @@ export default async function plugin(bb: BbPluginApi) {
     log: (m) => bb.log.warn(m),
   });
 
+  // ---- approving a held version (one code, a session, or one code for a whole list) ----------------------------------
+  const approveQueueFull = async (id: number, proof: Proof, opts: { acknowledgeBlock?: boolean } = {}): Promise<string> => {
+    const res = gate.approveQueue(id, proof, opts);
+    let note = "approved";
+    if (res.installDir) {
+      const installed = await bb.sdk.plugins.install({ source: res.installDir });
+      await gate.recordBuilt(res.installDir).catch((e) => bb.log.warn(`recordBuilt failed: ${String(e)}`));
+      note = `installed ${installed.id}@${installed.version}: ${installed.status}`;
+    } else if (res.enable) {
+      await bb.sdk.plugins.enable({ pluginId: res.pluginId });
+      note = `enabled ${res.pluginId}`;
+    }
+    recheck();
+    changed();
+    publisher.onApproved(res.proposalId);
+    return note;
+  };
+
+  // ---- batch approval: lists of held versions, skills and differences, one code each ----------------------------------
+  const fingerprint = (...parts: Array<string | number | null>): string => createHash("sha256").update(JSON.stringify(parts), "utf8").digest("hex");
+  const batchSources: Record<"queue" | "skill" | "drift", BatchSource> = {
+    queue: {
+      describe(id) {
+        const q = store.getQueue(id);
+        if (!q || q.status !== "held") return null;
+        if (q.reason?.startsWith(UNSAFE_DIR_REASON)) return { skip: "каталог доступен на запись другим: одобрить нельзя, пока его не исправят" };
+        const result = gate.checkForQueue(q);
+        if ((q.reason?.startsWith(BLOCKED_REASON) ?? false) || (result !== null && bySeverity(result, "block").length > 0))
+          return { skip: "заблокировано проверками: снимается отдельно, с подтверждением риска и свежим кодом" };
+        const proposal = q.proposalId === null ? null : store.getProposal(q.proposalId);
+        return {
+          fingerprint: fingerprint(q.pluginId, q.version, q.contentHash, q.proposalId, proposal?.localHash ?? null, q.source),
+          label: `${q.pluginId}@${q.version}`,
+          detail: [q.reason, result ? `возможности: ${result.capabilities.map((c) => c.kind).join(", ") || "нет"}` : "проверки не завершены"].filter(Boolean).join(" · "),
+        };
+      },
+      approve: (id, mark) => approveQueueFull(id, mark),
+    },
+    skill: {
+      describe(id) {
+        const row = skillGuard.entry(id);
+        if (!row || (row.state !== "held" && row.state !== "alarm" && row.state !== "removed")) return null;
+        if (row.decision === "block") return { skip: "жёсткий признак в проверках: одобряется отдельно, с подтверждением риска и свежим кодом" };
+        return { fingerprint: fingerprint(row.key, row.hash, row.state, row.decision), label: `${row.name} (${row.scope})`, detail: `${row.state}${row.decision ? ` · ${row.decision}` : ""}` };
+      },
+      approve: async (id, mark) => {
+        const r = await skillGuard.approve(id, mark, {});
+        changed();
+        return r.note;
+      },
+    },
+    drift: {
+      describe(id) {
+        const d = store.getDrift(id);
+        if (!d || (d.status !== "open" && d.status !== "rollback-failed")) return null;
+        return { fingerprint: fingerprint(d.key, d.kind, d.before, d.after), label: d.label, detail: `${d.kind}: ${d.source}` };
+      },
+      approve: async (id, mark) => {
+        const d = store.getDrift(id);
+        await watch.acceptDrift(id, mark, { after: d?.after ?? null });
+        changed();
+        return "принято";
+      },
+    },
+  };
+  const batches = new BatchService({ store, now, sources: batchSources, approveList: (purpose, proof) => gate.approveList(purpose, proof) });
+
   // ---- RPC ---------------------------------------------------------------
   let lastPagePing = 0;
   const wrap = <A, R>(fn: (input: A) => R | Promise<R>) => async (input: A): Promise<R> => {
@@ -341,40 +412,32 @@ export default async function plugin(bb: BbPluginApi) {
       changed();
       return { ok: true as const };
     }),
-    "queue.approve": wrap(async ({ id, code, acknowledgeBlock }) => {
-      const res = gate.approveQueue(id, code, { acknowledgeBlock });
-      let note = "approved";
-      if (res.installDir) {
-        const installed = await bb.sdk.plugins.install({ source: res.installDir });
-        await gate.recordBuilt(res.installDir).catch((e) => bb.log.warn(`recordBuilt failed: ${String(e)}`));
-        note = `installed ${installed.id}@${installed.version}: ${installed.status}`;
-      } else if (res.enable) {
-        await bb.sdk.plugins.enable({ pluginId: res.pluginId });
-        note = `enabled ${res.pluginId}`;
-      }
-      recheck();
-      changed();
-      publisher.onApproved(res.proposalId);
+    "queue.approve": wrap(async ({ id, code, session, acknowledgeBlock }) => {
+      // Lifting a block is the dangerous kind of this RPC: a fresh code, never a session.
+      const proof = gate.proofFor("queue.approve", { code, session }, { escalate: acknowledgeBlock === true });
+      const note = await approveQueueFull(id, proof, { acknowledgeBlock });
       return { ok: true as const, note };
     }),
-    "queue.dismiss": wrap(({ id, code }) => {
-      gate.dismissQueue(id, code);
+    "queue.dismiss": wrap(({ id, code, session }) => {
+      gate.dismissQueue(id, gate.proofFor("queue.dismiss", { code, session }));
       changed();
       return { ok: true as const };
     }),
-    "window.open": wrap(({ queueId, code, scope }) => {
-      gate.openWindow(queueId, code, scope);
+    "window.open": wrap(({ queueId, code, session, scope }) => {
+      // A window wider than the policy ("whole tree" when the policy says "this thread only") widens the policy: a fresh code.
+      const proof = gate.proofFor("window.open", { code, session }, { escalate: scope === "tree" && store.policy().scope === "thread" });
+      gate.openWindow(queueId, proof, scope);
       recheck();
       changed();
       return { ok: true as const };
     }),
-    "window.close": wrap(({ windowId, code }) => {
-      gate.closeWindow(windowId, code);
+    "window.close": wrap(({ windowId, code, session }) => {
+      gate.closeWindow(windowId, gate.proofFor("window.close", { code, session }));
       changed();
       return { ok: true as const };
     }),
-    "approval.revoke": wrap(async ({ approvalId, code }) => {
-      const a = gate.revoke(approvalId, code);
+    "approval.revoke": wrap(async ({ approvalId, code, session }) => {
+      const a = gate.revoke(approvalId, gate.proofFor("approval.revoke", { code, session }));
       try {
         await bb.sdk.plugins.disable({ pluginId: a.pluginId });
       } catch (err) {
@@ -388,18 +451,18 @@ export default async function plugin(bb: BbPluginApi) {
       changed();
       return { ok: true as const };
     }),
-    "watch.acceptAll": wrap(async ({ code }) => {
-      const { items } = await watch.acceptAll(code);
+    "watch.acceptAll": wrap(async ({ code, session }) => {
+      const { items } = await watch.acceptAll(gate.proofFor("watch.acceptAll", { code, session }));
       changed();
       return { ok: true as const, items };
     }),
-    "watch.accept": wrap(async ({ id, code }) => {
-      await watch.acceptDrift(id, code);
+    "watch.accept": wrap(async ({ id, code, session }) => {
+      await watch.acceptDrift(id, gate.proofFor("watch.accept", { code, session }));
       changed();
       return { ok: true as const };
     }),
-    "watch.rollback": wrap(async ({ id, code }) => {
-      await watch.rollbackDrift(id, code);
+    "watch.rollback": wrap(async ({ id, code, session }) => {
+      await watch.rollbackDrift(id, gate.proofFor("watch.rollback", { code, session }));
       changed();
       return { ok: true as const };
     }),
@@ -408,13 +471,13 @@ export default async function plugin(bb: BbPluginApi) {
       changed();
       return { ok: true as const };
     }),
-    "watch.window.open": wrap(async ({ scopes, code }) => {
-      await watch.openWindow(scopes, code);
+    "watch.window.open": wrap(async ({ scopes, code, session }) => {
+      await watch.openWindow(scopes, gate.proofFor("watch.window.open", { code, session }));
       changed();
       return { ok: true as const };
     }),
-    "watch.window.close": wrap(async ({ windowId, code }) => {
-      await watch.closeWindow(windowId, code);
+    "watch.window.close": wrap(async ({ windowId, code, session }) => {
+      await watch.closeWindow(windowId, gate.proofFor("watch.window.close", { code, session }));
       changed();
       return { ok: true as const };
     }),
@@ -423,8 +486,9 @@ export default async function plugin(bb: BbPluginApi) {
       changed();
       return { ok: true as const };
     }),
-    "skills.approve": wrap(async ({ id, code, acknowledgeBlock }) => {
-      const r = await skillGuard.approve(id, code, { acknowledgeBlock });
+    "skills.approve": wrap(async ({ id, code, session, acknowledgeBlock }) => {
+      const proof = gate.proofFor("skills.approve", { code, session }, { escalate: acknowledgeBlock === true });
+      const r = await skillGuard.approve(id, proof, { acknowledgeBlock });
       await watch.scan().catch((e) => bb.log.warn(`scan after skill approval failed: ${String(e)}`));
       changed();
       return { ok: true as const, note: r.note };
@@ -439,6 +503,23 @@ export default async function plugin(bb: BbPluginApi) {
       const sources = skillGuard.setTrustedSource(change, code);
       changed();
       return { ok: true as const, sources };
+    }),
+    "session.open": wrap(async ({ code }) => {
+      const opened = await gate.openSession(code);
+      changed();
+      return opened;
+    }),
+    "session.close": () => {
+      gate.closeSessions("locked");
+      changed();
+      return { ok: true as const };
+    },
+    "batch.prepare": wrap(({ items }) => batches.prepare(items)),
+    "batch.approve": wrap(async ({ batchId, setHash, code, session }) => {
+      const results = await batches.approve(batchId, setHash, gate.proofFor("batch.approve", { code, session }));
+      recheck();
+      changed();
+      return { ok: true as const, results };
     }),
     "ai.settings": wrap(({ code, ...patch }) => {
       gate.setAiSettings(patch, code);
@@ -522,7 +603,8 @@ export default async function plugin(bb: BbPluginApi) {
               // For an agent: only whether it holds. Which record, and how, is for the human on the page.
               return { exitCode: report.ok ? 0 : 2, stdout: agentLine(report) };
             }
-            const rows = store.listLog(input.options.limit);
+            // Whether an approval session is open is not for agents: its records stay on the page.
+            const rows = store.listLog(input.options.limit, "session.");
             // No reasons here: agents read this too (spec §11). The page has them.
             const text = rows
               .map((r) => {
@@ -726,6 +808,7 @@ export default async function plugin(bb: BbPluginApi) {
         if (signal.aborted) break;
         try {
           if (gate.sweep() > 0) changed();
+          if (gate.sweepSessions() > 0) changed();
           if (watch.sweep() > 0) changed();
           if (gate.openWindows().length > 0 || watch.openWindows().length > 0) sweepTaint();
           await sentinel.refreshOutcomes();

@@ -1,39 +1,47 @@
 // RPC contract shared by server.ts and app.tsx (the app imports only its type).
 import { defineRpcContract } from "@get-bb/plugin-sdk";
+import type { BatchPrepared, BatchResult } from "./batch.js";
 import type { JournalReport } from "./journal.js";
 import type { Overview } from "./overview.js";
 import * as s from "./schema.js";
 
 const code = s.string({ min: 1, max: 16 });
 const id = s.integer({ min: 1 });
+/** Routine RPCs take a fresh code or the token of an open approval session (src/approval.ts says which RPC is routine). */
+const proof = { code: s.optional(code), session: s.optional(s.string({ min: 1, max: 128 })) };
+const batchKind = s.oneOf(["queue", "skill", "drift"] as const);
 
 export const rpcContract = defineRpcContract({
   overview: { input: s.nullValue(), output: s.json<Overview>() },
   "journal.verify": { input: s.nullValue(), output: s.json<JournalReport>() },
   "trusted.set": { input: s.object({ add: s.optional(s.string({ min: 1, max: 140 })), remove: s.optional(s.string({ min: 1, max: 140 })), code }), output: s.json<{ ok: true; repos: string[] }>() },
+  "session.open": { input: s.object({ code }), output: s.json<{ token: string; idleMs: number; capMs: number }>() },
+  "session.close": { input: s.nullValue(), output: s.json<{ ok: true }>() },
+  "batch.prepare": { input: s.object({ items: s.array(s.object({ kind: batchKind, id }), { max: 50 }) }), output: s.json<BatchPrepared>() },
+  "batch.approve": { input: s.object({ batchId: s.string({ min: 1, max: 64 }), setHash: s.string({ min: 64, max: 64 }), ...proof }), output: s.json<{ ok: true; results: BatchResult[] }>() },
   "page.ping": { input: s.nullValue(), output: s.json<{ ok: true }>() },
   "totp.begin": {
     input: s.nullValue(),
     output: s.json<{ secret: string; uri: string; matrix: boolean[][] }>(),
   },
   "totp.confirm": { input: s.object({ code }), output: s.json<{ ok: true }>() },
-  "queue.approve": { input: s.object({ id, code, acknowledgeBlock: s.optional(s.boolean()) }), output: s.json<{ ok: true; note: string }>() },
-  "queue.dismiss": { input: s.object({ id, code }), output: s.json<{ ok: true }>() },
+  "queue.approve": { input: s.object({ id, ...proof, acknowledgeBlock: s.optional(s.boolean()) }), output: s.json<{ ok: true; note: string }>() },
+  "queue.dismiss": { input: s.object({ id, ...proof }), output: s.json<{ ok: true }>() },
   "window.open": {
-    input: s.object({ queueId: id, code, scope: s.optional(s.oneOf(["tree", "thread"] as const)) }),
+    input: s.object({ queueId: id, ...proof, scope: s.optional(s.oneOf(["tree", "thread"] as const)) }),
     output: s.json<{ ok: true }>(),
   },
-  "window.close": { input: s.object({ windowId: id, code }), output: s.json<{ ok: true }>() },
-  "approval.revoke": { input: s.object({ approvalId: id, code }), output: s.json<{ ok: true }>() },
+  "window.close": { input: s.object({ windowId: id, ...proof }), output: s.json<{ ok: true }>() },
+  "approval.revoke": { input: s.object({ approvalId: id, ...proof }), output: s.json<{ ok: true }>() },
   "watch.scan": { input: s.nullValue(), output: s.json<{ ok: true }>() },
-  "watch.acceptAll": { input: s.object({ code }), output: s.json<{ ok: true; items: number }>() },
-  "watch.accept": { input: s.object({ id, code }), output: s.json<{ ok: true }>() },
-  "watch.rollback": { input: s.object({ id, code }), output: s.json<{ ok: true }>() },
+  "watch.acceptAll": { input: s.object({ ...proof }), output: s.json<{ ok: true; items: number }>() },
+  "watch.accept": { input: s.object({ id, ...proof }), output: s.json<{ ok: true }>() },
+  "watch.rollback": { input: s.object({ id, ...proof }), output: s.json<{ ok: true }>() },
   "watch.rollbackMode": { input: s.object({ enabled: s.boolean(), code }), output: s.json<{ ok: true }>() },
-  "watch.window.open": { input: s.object({ scopes: s.array(s.string({ max: 32 }), { max: 16 }), code }), output: s.json<{ ok: true }>() },
-  "watch.window.close": { input: s.object({ windowId: id, code }), output: s.json<{ ok: true }>() },
+  "watch.window.open": { input: s.object({ scopes: s.array(s.string({ max: 32 }), { max: 16 }), ...proof }), output: s.json<{ ok: true }>() },
+  "watch.window.close": { input: s.object({ windowId: id, ...proof }), output: s.json<{ ok: true }>() },
   "skills.scan": { input: s.nullValue(), output: s.json<{ ok: true }>() },
-  "skills.approve": { input: s.object({ id, code, acknowledgeBlock: s.optional(s.boolean()) }), output: s.json<{ ok: true; note: string }>() },
+  "skills.approve": { input: s.object({ id, ...proof, acknowledgeBlock: s.optional(s.boolean()) }), output: s.json<{ ok: true; note: string }>() },
   "skills.remove": { input: s.object({ id }), output: s.json<{ ok: true }>() },
   "skills.removed": { input: s.object({ id }), output: s.json<Array<{ path: string; content: string | null }>>() },
   "skills.trusted": { input: s.object({ add: s.optional(s.string({ min: 1, max: 140 })), remove: s.optional(s.string({ min: 1, max: 140 })), code }), output: s.json<{ ok: true; sources: string[] }>() },

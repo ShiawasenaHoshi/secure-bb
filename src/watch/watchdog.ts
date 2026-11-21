@@ -8,6 +8,7 @@
 //     undo exists (disable a built-in plugin, delete a new env variable, restore the
 //     instructions), undone.
 // The snapshot itself is only ever changed by a touch (TOTP) or by a window.
+import type { Proof } from "../approval.js";
 import type { SkillGuard } from "../skills/guard.js";
 import type { TaintAssessment } from "../taint/monitor.js";
 import { collect, type WatchSource } from "./collect.js";
@@ -38,7 +39,7 @@ export interface WatchDeps {
   source: WatchSource;
   actions: WatchActions;
   /** A touch: throws unless `code` is a fresh valid TOTP code. Provided by the gate. */
-  touch: (purpose: string, code: string) => void;
+  touch: (purpose: string, code: Proof) => void;
   /** Stage 6: the skills guard. Absent: skills are only compared by their hash, as before. */
   skills?: SkillGuard;
   log?: (message: string) => void;
@@ -188,7 +189,7 @@ export class Watchdog {
   }
 
   /** Opens a configuration window on the chosen objects. Needs a touch. */
-  async openWindow(scopes: string[], code: string): Promise<ConfigWindowRow> {
+  async openWindow(scopes: string[], code: Proof): Promise<ConfigWindowRow> {
     const chosen = [...new Set(scopes)];
     if (chosen.length === 0) throw new WatchError("invalid", "choose at least one object the window is opened on");
     const bad = chosen.filter((s) => !isWindowScope(s));
@@ -216,7 +217,7 @@ export class Watchdog {
   }
 
   /** Closes a window by hand (a touch). Changes made until now are taken first. */
-  async closeWindow(windowId: number, code: string): Promise<void> {
+  async closeWindow(windowId: number, code: Proof): Promise<void> {
     const w = this.store.getCfgWindow(windowId);
     if (!w || w.closedAt !== null) throw new WatchError("not_found", "no such open configuration window");
     this.d.touch("watch.window.close", code);
@@ -388,7 +389,7 @@ export class Watchdog {
   }
 
   /** The first snapshot, or a full re-approval: everything observed right now becomes the approved state. */
-  async acceptAll(code: string): Promise<{ items: number }> {
+  async acceptAll(code: Proof): Promise<{ items: number }> {
     this.d.touch("watch.baseline", code);
     const obs = await this.observe();
     this.last = obs;
@@ -403,18 +404,23 @@ export class Watchdog {
   }
 
   /** Accepts one drift as the new approved value (a touch). */
-  async acceptDrift(driftId: number, code: string): Promise<void> {
+  async acceptDrift(driftId: number, code: Proof, expect?: { after: string | null }): Promise<void> {
     const drift = this.requireOpen(driftId);
     this.d.touch("watch.accept", code);
     const obs = await this.observe();
     this.last = obs;
+    if (expect) {
+      // A list was shown with this value: what is observed now must be that value, or the person approved something else.
+      const now = diffSnapshot(this.store.listSnapshot(), obs).find((x) => x.key === drift.key);
+      if ((now?.after ?? null) !== expect.after) throw new WatchError("conflict", "the value changed after the list was shown; it was not accepted");
+    }
     this.applyToSnapshot(drift.key, obs, "touch");
     this.store.resolveDrift(drift.id, "accepted-touch", "принято человеком");
     this.store.log("watch.accept.touch", null, null, { key: drift.key });
   }
 
   /** Undoes one drift now (a touch), whether or not automatic rollback is on. */
-  async rollbackDrift(driftId: number, code: string): Promise<void> {
+  async rollbackDrift(driftId: number, code: Proof): Promise<void> {
     const drift = this.requireOpen(driftId);
     if (!drift.rollbackable) throw new WatchError("invalid", "no safe rollback exists for this change; accept it or fix it by hand");
     this.d.touch("watch.rollback", code);
