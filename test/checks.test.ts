@@ -69,9 +69,10 @@ describe("structure (spec §5.1)", () => {
     const r = await tree({ ".claude/settings.json": "{}\n", ".cursor/rules": "x\n", "index.js": "export {};\n" });
     expect(r.findings.filter((f) => f.rule === "agent-config").map((f) => f.file).sort()).toEqual([".claude", ".cursor"]);
   });
-  it("blocks .github/workflows and .vscode", async () => {
-    const r = await tree({ ".github/workflows/ci.yml": "on: push\n", ".vscode/tasks.json": "{}\n", "index.js": "export {};\n" });
-    expect(r.findings.filter((f) => f.rule === "agent-config").map((f) => f.file).sort()).toEqual([".github/workflows", ".vscode"]);
+  it("blocks .vscode, .codex, CLAUDE.md and AGENTS.md; GitHub CI is only information", async () => {
+    const r = await tree({ ".github/workflows/ci.yml": "on: push\n", ".vscode/tasks.json": "{}\n", ".codex/config.toml": "x\n", "CLAUDE.md": "x\n", "AGENTS.md": "x\n", "index.js": "export {};\n" });
+    expect(r.findings.filter((f) => f.rule === "agent-config" && f.severity === "block").map((f) => f.file).sort()).toEqual([".codex", ".vscode", "AGENTS.md", "CLAUDE.md"]);
+    expect(r.findings.find((f) => f.file === ".github/workflows")).toMatchObject({ rule: "ci-config", severity: "info" });
   });
   it("blocks minified source", async () => expect(rules(await fixture("minified"), "block")).toContain("minified"));
   it("blocks obfuscated identifiers", async () => {
@@ -471,10 +472,10 @@ describe("review 2.1 — what used to be silent", () => {
   });
 
   describe("dependencies (item 8) and secrets with network (item 10)", () => {
-    it("workspace: is a review, git+https: is a block", async () => {
+    it("workspace: and git+https: are a review", async () => {
       const r = await fixture("workspace-dep");
       expect(r.findings.find((f) => f.rule === "workspace-dependency")!.severity).toBe("review");
-      expect(r.findings.find((f) => f.rule === "url-dependency")!.severity).toBe("block");
+      expect(r.findings.find((f) => f.rule === "url-dependency")!.severity).toBe("review");
     });
     it("a secret-looking env variable next to dns is a review", async () => {
       const r = await fixture("dns-secret");

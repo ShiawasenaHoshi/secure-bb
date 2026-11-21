@@ -77,8 +77,13 @@ const NATIVE_EXT = new Set([".node", ".wasm", ".so", ".dylib", ".dll", ".exe", "
 const MEDIA_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".icns", ".bmp", ".woff", ".woff2", ".ttf", ".otf", ".eot", ".pdf", ".mp3", ".mp4", ".wav", ".ogg"]);
 const INSTALL_SCRIPTS = ["preinstall", "install", "postinstall", "prepare"];
 const DEP_FIELDS = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"];
-const AGENT_DIRS = new Set([".claude", ".cursor", ".vscode", ".windsurf"]);
-const AGENT_FILES = new Set([".cursorrules", ".mcp.json"]);
+const AGENT_DIRS = new Set([".claude", ".cursor", ".vscode", ".windsurf", ".codex", ".gemini"]);
+const AGENT_FILES = new Set([".cursorrules", ".windsurfrules", ".mcp.json", "CLAUDE.md", "AGENTS.md", "GEMINI.md"]);
+/**
+ * Characters that change what code or text means to a person or a model without being seen: direction controls, Unicode Tags,
+ * variation selectors, zero-width characters, soft hyphen, line/paragraph separators. Always a block in the plugin's own files.
+ */
+const HARD_INVISIBLE = /[\u00AD\u180E\u200B-\u200F\u2028\u2029\u202A-\u202E\u2060\u2066-\u2069\uFE00-\uFE0F\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}]/u;
 
 function invisibleFindings(rel: string, text: string): Finding[] {
   const out: Finding[] = [];
@@ -88,7 +93,12 @@ function invisibleFindings(rel: string, text: string): Finding[] {
     if (i === 0 && line.startsWith("\uFEFF")) line = line.slice(1);
     // U+FE0F right after a pictographic symbol or a keycap base is how an emoji (✔️, ⚠️) is written; anywhere else it stays invisible.
     line = line.replace(/([\p{Extended_Pictographic}0-9#*])\uFE0F/gu, "$1");
-    if ([...line].some(isInvisible)) out.push({ rule: "invisible-chars", severity: "block", file: rel, line: i + 1, excerpt: excerptOf(escapeInvisible(line)) });
+    const hidden = [...line].filter(isInvisible);
+    if (hidden.length === 0) continue;
+    // Anything else invisible (a BOM inside a string, a raw control character in a regex) in code is odd but does not change what the
+    // code says to a reader: a warning. In text a reader or a model takes as instructions it stays a block.
+    const hard = hidden.some((c) => HARD_INVISIBLE.test(c)) || !isCodeFile(rel);
+    out.push({ rule: "invisible-chars", severity: hard ? "block" : "review", file: rel, line: i + 1, excerpt: excerptOf(escapeInvisible(line)) });
   }
   return out;
 }
@@ -164,7 +174,19 @@ export function minifiedReason(text: string): string | null {
   return null;
 }
 
-function isUrlSpec(spec: string): boolean {
+/** The host a non-registry dependency spec points at. */
+export function specHost(spec: string): string {
+  const short = /^(github|gitlab|bitbucket|gist):/i.exec(spec);
+  if (short) return { github: "github.com", gitlab: "gitlab.com", bitbucket: "bitbucket.org", gist: "gist.github.com" }[short[1]!.toLowerCase() as "github"];
+  if (/^[\w.-]+\/[\w.-]+(#.*)?$/.test(spec)) return "github.com";
+  try {
+    return new URL(spec.replace(/^git\+/i, "")).hostname || "an unknown host";
+  } catch {
+    return "an unknown host";
+  }
+}
+
+export function isUrlSpec(spec: string): boolean {
   return /^(git\+|git:|github:|gitlab:|bitbucket:|gist:|https?:|ssh:|file:|link:)/i.test(spec) || /^[\w.-]+\/[\w.-]+(#.*)?$/.test(spec) /* user/repo shorthand */;
 }
 /** `workspace:` is how bb's own monorepo plugins refer to each other: not a URL, but not a registry version either. */
@@ -198,7 +220,11 @@ function packageFindings(rel: string, raw: string, isRoot: boolean): { findings:
     if (!deps || typeof deps !== "object") continue;
     for (const [name, spec] of Object.entries(deps as Record<string, unknown>)) {
       if (typeof spec !== "string") continue;
-      if (isUrlSpec(spec.trim())) findings.push({ rule: "url-dependency", severity: "block", file: rel, line: lineOf(name), excerpt: excerptOf(`${field}: ${name}@${spec}`) });
+      if (isUrlSpec(spec.trim())) {
+        // Code from a URL or a git host cannot be compared with the registry: one warning. A local path is a block (nothing can vouch for it).
+        const local = /^(file:|link:)/i.test(spec.trim());
+        findings.push({ rule: "url-dependency", severity: local ? "block" : "review", file: rel, line: lineOf(name), excerpt: excerptOf(`${field}: ${name}@${spec} — dependency ${name} comes from ${local ? "a local path" : specHost(spec.trim())}, not from npm; its content cannot be compared with the registry`) });
+      }
       else if (isWorkspaceSpec(spec.trim())) findings.push({ rule: "workspace-dependency", severity: "review", file: rel, line: lineOf(name), excerpt: excerptOf(`${field}: ${name}@${spec}`) });
     }
   }
@@ -285,10 +311,13 @@ export async function scanTree(root: string, opts: ScanOptions = {}): Promise<Tr
     }
 
     if (st.isDirectory()) {
-      if (AGENT_DIRS.has(name) || (name === "workflows" && segs.at(-2) === ".github")) {
+      if (name === "workflows" && segs.at(-2) === ".github") {
+        // GitHub's CI: bb does not load it and no agent reads it.
+        findings.push({ rule: "ci-config", severity: "info", file: rel, line: 0, excerpt: dep ? ".github/workflows inside a dependency" : "the repository has GitHub CI (.github/workflows); bb does not load it" });
+      } else if (AGENT_DIRS.has(name)) {
         // Inside a dependency it is a file of that package's repository, not a configuration anyone loads for this plugin.
         if (dep) findings.push({ rule: "agent-config", severity: "info", file: rel, line: 0, excerpt: `${name}/ inside a dependency (not a configuration of this plugin)` });
-        else findings.push({ rule: "agent-config", severity: "block", file: rel, line: 0, excerpt: `${name}/ (agent / IDE / CI configuration inside a plugin)` });
+        else findings.push({ rule: "agent-config", severity: "block", file: rel, line: 0, excerpt: `${name}/ (agent / IDE configuration inside a plugin)` });
       }
       return;
     }
@@ -319,7 +348,9 @@ export async function scanTree(root: string, opts: ScanOptions = {}): Promise<Tr
 
     const exempt = dist; // bb's own build output may contain wasm/minified code
     const executable = isExecutableMagic(buf);
-    const binary = NATIVE_EXT.has(ext) || executable || (!MEDIA_EXT.has(ext) && looksBinary(buf));
+    // A few raw control characters in readable source (a regex written with real bytes) are a warning (invisible-chars), not "binary data".
+    const textyCode = isCodeFile(rel) && !executable && !buf.toString("utf8").includes("\uFFFD") && buf.reduce((n, b) => n + (b === 0 ? 1 : 0), 0) <= 16;
+    const binary = NATIVE_EXT.has(ext) || executable || (!MEDIA_EXT.has(ext) && looksBinary(buf) && !textyCode);
     if (binary) {
       if (!exempt && !verified) findings.push({ rule: "binary", severity: "block", file: rel, line: 0, excerpt: NATIVE_EXT.has(ext) ? `native/binary file (${ext})` : executable ? "executable binary (by magic bytes)" : "binary data" });
       return;

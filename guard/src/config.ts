@@ -23,6 +23,8 @@ export interface GuardPaths {
   pluginsRoots: string[];
   /** Sources the owner names as the official catalog (`github:owner/name`, `github:owner/*`): the level "known". Empty: no source is known. */
   knownSources: string[];
+  /** No network for the checks: node_modules is not compared with the npm registry, everything is scanned in full (`--offline`, for companies that forbid the guard to reach out). */
+  offline: boolean;
 }
 
 export const DEFAULT_DATA_DIR = "/var/sbb-guard";
@@ -31,7 +33,7 @@ export const DEFAULT_AGENTS_HOME = "/var/bbagent";
 /** Outside the data directory: that one is 0700, and the bb user must reach the socket through a directory of its own (0750, owner the guard, group the bb user's). */
 export const DEFAULT_SOCKET = "/var/run/sbb-guard/guard.sock";
 
-export function resolvePaths(opts: { data?: string; socket?: string; socketGid?: string; rpId?: string; origin?: string; agentsHome?: string; agentsRoots?: string; pluginsRoots?: string; knownSources?: string }, env: Record<string, string | undefined> = process.env): GuardPaths {
+export function resolvePaths(opts: { data?: string; socket?: string; socketGid?: string; rpId?: string; origin?: string; agentsHome?: string; agentsRoots?: string; pluginsRoots?: string; knownSources?: string; offline?: boolean }, env: Record<string, string | undefined> = process.env): GuardPaths {
   const dataDir = opts.data ?? env.SBB_GUARD_DATA ?? DEFAULT_DATA_DIR;
   const stateDir = join(dataDir, "state");
   const gidText = opts.socketGid ?? env.SBB_GUARD_SOCKET_GID;
@@ -55,6 +57,7 @@ export function resolvePaths(opts: { data?: string; socket?: string; socketGid?:
       .map((x) => absolute(x, "--agents-root")),
     pluginsRoots: list(opts.pluginsRoots ?? env.SBB_GUARD_PLUGINS_ROOTS).map((x) => absolute(x, "--plugins-root")),
     knownSources: list(opts.knownSources ?? env.SBB_GUARD_KNOWN_SOURCES),
+    offline: opts.offline === true || /^(1|true|yes|on)$/i.test(env.SBB_GUARD_OFFLINE ?? ""),
   };
 }
 

@@ -3,7 +3,7 @@
 // list of capabilities the code can use.
 import { posix, sep } from "node:path";
 import { analyze, parseSource, type FileFacts, type Site } from "./ast.ts";
-import { excerptOf, isCodeFile, packageDirOf, scanTree, type SourceFile } from "./files.ts";
+import { excerptOf, isCodeFile, isUrlSpec, packageDirOf, scanTree, type SourceFile } from "./files.ts";
 import { entryPoints, fileCandidates, resolveSpecifier, type GraphContext } from "./reach.ts";
 import { inventoryPackages, verifyInstalledPackages, type Integrity, type IntegrityEnv } from "../deps/integrity.ts";
 import { collectDependencies, nameFindings } from "../deps/collect.ts";
@@ -216,6 +216,9 @@ export async function runChecks(dir: string, opts: CheckOptions = {}): Promise<C
     if (pd) pkgReached.add(pd);
   }
   const STRUCTURAL = new Set(["writable-by-others", "escaping-symlink", "special-file", "limit-exceeded"]);
+  // Dependencies that do not come from the npm registry (git, a URL): the registry cannot vouch for them, so their content is scanned,
+  // but "looks odd" heuristics (minified, invisible characters) are warnings there. What the code does (reachable) stays as it is.
+  const nonRegistry = new Set(tree.declared.filter((d) => isUrlSpec(d.spec) && !/^(file:|link:)/i.test(d.spec)).map((d) => `node_modules/${d.name}`));
   const counted: Finding[] = [];
   const ignored = new Map<string, { list: Finding[]; why: string }>();
   const ignore = (label: string, why: string, f: Finding): void => {
@@ -237,6 +240,7 @@ export async function runChecks(dir: string, opts: CheckOptions = {}): Promise<C
     }
     if (STRUCTURAL.has(f.rule) || f.rule.startsWith("dep-")) counted.push(f); // dep-*: about the package itself, not a file the core loads
     else if (verifiedDirs.has(pd)) ignore(pd, "verified npm release", f);
+    else if (nonRegistry.has(pd) && f.severity === "block" && (f.rule === "minified" || f.rule === "invisible-chars") && reached.has(fp)) counted.push({ ...f, severity: "review", excerpt: excerptOf(`(package not from npm) ${f.excerpt}`) });
     else if (reached.has(fp) || (pkgReached.has(pd) && !TEXT_RULES.has(f.rule) && !f.rule.startsWith("parse-"))) counted.push(f);
     else ignore(pd, "not loaded by the plugin", f);
   }
@@ -257,6 +261,7 @@ export async function runChecks(dir: string, opts: CheckOptions = {}): Promise<C
   if (opts.integrity) {
     const bad: string[] = [];
     for (const [pdir, st] of opts.integrity) {
+      if (nonRegistry.has(pdir)) continue; // url-dependency already says it
       if (st.state === "modified") findings.push({ rule: "dep-modified", severity: "review", file: `${pdir}/package.json`, line: 0, excerpt: excerptOf(`${pdir}: ${st.reason}; the copy is scanned in full`) });
       else if (st.state === "unverified") bad.push(`${pdir.replace(/^.*node_modules\//, "")} (${st.reason})`);
     }
