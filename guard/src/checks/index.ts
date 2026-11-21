@@ -7,7 +7,7 @@ import { excerptOf, isCodeFile, isUrlSpec, packageDirOf, scanTree, type SourceFi
 import { entryPoints, fileCandidates, pluginDirOf, resolveSpecifier, type GraphContext } from "./reach.ts";
 import { inventoryPackages, verifyInstalledPackages, type Integrity, type IntegrityEnv } from "../deps/integrity.ts";
 import { collectDependencies, nameFindings } from "../deps/collect.ts";
-import { FS_HOME, UI_CLICK_ANSWERS } from "./sdk-rights.ts";
+import { FS_HOME, UI_CLICK_ANSWERS, UI_CLICK_GATE, UI_CLICK_NAV, UI_CLICK_OTHER } from "./sdk-rights.ts";
 import { CHECKS_VERSION, CAPABILITY_KINDS, UNRESOLVED_HOST, type Capability, type CapabilityKind, type CheckResult, type Finding } from "./types.ts";
 
 export type { Capability, CapabilityKind, CheckResult, Finding, Severity } from "./types.ts";
@@ -200,9 +200,16 @@ export async function runChecks(dir: string, opts: CheckOptions = {}): Promise<C
   resolveEnvPassed(perFile, findings);
   // Pressing buttons of bb's page: an element looked up that the plugin did not draw, and a press on an element, anywhere in the plugin.
   if (perFile.some((f) => f.facts.domLookups.length > 0)) {
-    const answers = perFile.some((f) => f.facts.answerButtons);
     for (const { rel, facts } of perFile) for (const p of facts.domPresses) addCap(caps, "ui_click", p.detail, rel, p.line);
-    if (answers && caps.has("ui_click")) addCap(caps, "ui_click", UI_CLICK_ANSWERS, caps.get("ui_click")!.sites[0]!.file, caps.get("ui_click")!.sites[0]!.line);
+    if (caps.has("ui_click")) {
+      // Where it presses: by the selectors it looks elements up with, and the labels it knows. A target the code does not show is the worse one when it speaks of approving.
+      const targets = new Set(perFile.flatMap((f) => f.facts.domLookups.map((l) => l.target)));
+      if (perFile.some((f) => f.facts.answerText)) targets.add("answers");
+      if (targets.delete("unknown")) targets.add(perFile.some((f) => f.facts.approveText) ? "gate" : "other");
+      const detailOf = { answers: UI_CLICK_ANSWERS, nav: UI_CLICK_NAV, gate: UI_CLICK_GATE, other: UI_CLICK_OTHER } as const;
+      const site = caps.get("ui_click")!.sites[0]!;
+      for (const t of targets) if (t !== "unknown") addCap(caps, "ui_click", detailOf[t], site.file, site.line);
+    }
   }
   // Files: «your documents» are said only when the code reaches the person's own folders (home directory, Documents…); otherwise the files are not known.
   if (caps.has("fs") && (perFile.some((f) => f.facts.homeRef) || [...(caps.get("env")?.detail ?? [])].some((d) => /^(env:)?(HOME|USERPROFILE|HOMEPATH)$/i.test(d)))) {

@@ -117,7 +117,7 @@ export interface DependencyStats {
  * The version of the analysis a result was made by. Results are stored by the content hash and shown for as long as the version lives, so a change of
  * what the checks count (which directory of a repository, which calls are which right) must make the stored ones be made again: they carry this number.
  */
-export const CHECKS_VERSION = 3;
+export const CHECKS_VERSION = 4;
 
 export interface CheckResult {
   /** `CHECKS_VERSION` at the time; absent on results of the first checks. */

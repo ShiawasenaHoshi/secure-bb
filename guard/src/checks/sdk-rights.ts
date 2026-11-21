@@ -111,18 +111,27 @@ export const DOM_PRESSES: Record<string, { minArgs: number; maxArgs: number; det
 };
 /** Events built by hand to be sent to an element. */
 export const SYNTHETIC_EVENTS = new Set(["MouseEvent", "PointerEvent", "KeyboardEvent", "InputEvent", "TouchEvent", "FocusEvent", "SubmitEvent"]);
-/**
- * A string that says which button the plugin goes for. The buttons of an agent's question or permission request («Next», «Submit», «Allow»)
- * are the ones a plugin presses to answer for the person.
- */
-const ANSWER_WORDS = /\b(question|answer|permission|approv\w*|interaction|ask-?user|elicitation)\b/i;
-const ANSWER_BUTTONS = /^(next|submit|allow|approve|accept|confirm|continue|yes|ok|send|deny|reject|allow once|allow always)$/i;
-export const looksLikeAnswerButton = (s: string): boolean => {
-  const t = s.trim();
-  return t.length > 0 && t.length <= 80 && (ANSWER_BUTTONS.test(t) || ANSWER_WORDS.test(t));
-};
-/** The detail of the `ui_click` right when the plugin goes for an agent's question widget. */
-export const UI_CLICK_ANSWERS = "agent-prompts";
+/** What a press goes for, by the selector the code looks the element up with (its literal start). */
+export type DomTarget = "answers" | "nav" | "gate" | "other" | "unknown";
+const GATE_TARGET = /secure-?bb|sbb-/i;
+const ANSWER_TARGET = /question|interaction|elicitation|ask-?user|permission-?(request|prompt)|approval|answer/i;
+const NAV_TARGET = /thread-?id|sidebar|href|(^|[^a-z])nav([^a-z]|$)|\[role=["']?(link|tab|treeitem)|^a([\s.#:\[>]|$)/i;
+export function domTarget(selector: string | null): DomTarget {
+  if (selector === null || selector.trim() === "") return "unknown";
+  if (GATE_TARGET.test(selector)) return "gate";
+  if (ANSWER_TARGET.test(selector)) return "answers";
+  if (NAV_TARGET.test(selector)) return "nav";
+  return "other";
+}
+/** The labels of the buttons of an agent's question widget («Next», «Submit»): a string that is exactly one of them says what is pressed. */
+export const isAnswerButtonText = (s: string): boolean => /^(next|submit)$/i.test(s.trim());
+/** Words of an approval («Allow», «Approve», «Разрешить»): with a target the code does not show, they say what it may be after. */
+export const isApproveText = (s: string): boolean => s.trim().length <= 80 && /(^|[^a-zа-я])(approve|allow|разрешить|одобрить)([^a-zа-я]|$)/i.test(s);
+/** Details of the `ui_click` right: where the plugin presses. */
+export const UI_CLICK_ANSWERS = "target:answers";
+export const UI_CLICK_NAV = "target:nav";
+export const UI_CLICK_GATE = "target:gate";
+export const UI_CLICK_OTHER = "target:other";
 
 /** The detail of an `fs` right when the code reaches the person's own folders (home directory, Documents…). */
 export const FS_HOME = "home";

@@ -66,16 +66,16 @@ describe("a plugin that finds a button in the page and clicks it (auto-answer)",
   it("has the right to press bb's buttons, and to answer the agent's questions", async () => {
     const r = await fixture("dom-click-answer");
     expect(kinds(r)).toContain("ui_click");
-    expect(detail(r, "ui_click")).toEqual(expect.arrayContaining(["agent-prompts", "click()", "requestSubmit()"]));
+    expect(detail(r, "ui_click")).toEqual(expect.arrayContaining(["target:answers", "click()", "requestSubmit()"]));
     const h = headline(r);
     expect(h.level).toBe("danger");
-    expect(h.text).toBe("Нажимает кнопки в интерфейсе bb и отвечает на вопросы агентов за вас");
+    expect(h.text).toBe("Отвечает на вопросы агентов за вас (нажимает кнопки их виджета)");
   });
   it("a click on an element found by selector (no question words) is yellow, in plain words", async () => {
     const r = await app('export default function A() { document.getElementById("go")?.click(); return null; }');
-    expect(detail(r, "ui_click")).toEqual(["click()"]);
-    expect(headline(r)).toEqual({ level: "caution", text: "Нажимает кнопки в интерфейсе bb за вас" });
-    expect(capabilityPhrase({ kind: "ui_click", detail: ["click()"] })).toContain("нажимать кнопки в интерфейсе bb за вас");
+    expect(detail(r, "ui_click")).toEqual(["click()", "target:other"]);
+    expect(headline(r)).toEqual({ level: "caution", text: "Может нажимать элементы интерфейса bb" });
+    expect(capabilityPhrase({ kind: "ui_click", detail: ["click()"] })).toContain("нажимать элементы интерфейса bb");
   });
   it("dispatchEvent with a hand-made event counts as a press", async () => {
     const r = await app('export default function A() { const b = document.querySelector(".x"); b?.dispatchEvent(new MouseEvent("click", { bubbles: true })); return null; }');
@@ -225,5 +225,43 @@ describe("a repository of several plugins: only the plugin's own code counts", (
   it("the guard asks with the id too: its run function takes it", async () => {
     const r = await runChecks(monoDir(), { pluginId: "beautiful-theme" });
     expect(r.findings.filter((f) => f.severity !== "info")).toEqual([]);
+  });
+});
+
+describe("what a press goes for decides what the card says", () => {
+  it("a click on a thread's row in the sidebar (notify): opens threads, soft yellow", async () => {
+    const r = await fixture("dom-click-nav");
+    expect(detail(r, "ui_click")).toEqual(["click()", "target:nav"]);
+    expect(headline(r)).toEqual({ level: "caution", text: "Открывает треды и разделы bb за вас" });
+    expect(headline(r).text).not.toMatch(/отвечает|вопрос/i);
+  });
+  it("a click on the Submit button of a question widget: answers for the person", async () => {
+    const r = await app('export default function A() { const b = document.querySelector("form button"); if (b?.textContent === "Submit") (b as HTMLElement).click(); return null; }');
+    expect(detail(r, "ui_click")).toContain("target:answers");
+    expect(headline(r)).toEqual({ level: "danger", text: "Отвечает на вопросы агентов за вас (нажимает кнопки их виджета)" });
+  });
+  it("a click on an arbitrary selector: may press elements of bb", async () => {
+    const r = await fixture("dom-click-other");
+    expect(detail(r, "ui_click")).toEqual(["dispatchEvent()", "new MouseEvent()", "target:other"]);
+    expect(headline(r)).toEqual({ level: "caution", text: "Может нажимать элементы интерфейса bb" });
+  });
+  it("the protection's own buttons: red", async () => {
+    const r = await app('export default function A() { (document.querySelector("[data-secure-bb-card] button") as HTMLElement).click(); return null; }');
+    expect(detail(r, "ui_click")).toContain("target:gate");
+    expect(headline(r)).toEqual({ level: "danger", text: "Может нажимать кнопки защиты secure-bb и «Разрешить» за вас" });
+  });
+  it("a target the code does not show, next to words of approval: red; without them: yellow", async () => {
+    const hidden = (extra: string) => `export default function A(p: { sel: string }) { ${extra} (document.querySelector(p.sel) as HTMLElement).click(); return null; }`;
+    expect(headline(await app(hidden('const w = "Allow";')))).toMatchObject({ level: "danger" });
+    expect(headline(await app(hidden('const w = "Разрешить";')))).toMatchObject({ level: "danger" });
+    expect(headline(await app(hidden("")))).toEqual({ level: "caution", text: "Может нажимать элементы интерфейса bb" });
+  });
+  it("words of approval next to a known harmless target do not make it red", async () => {
+    const r = await app('export default function A() { const label = "Allow notifications"; (document.querySelector("[data-sidebar-thread-id]") as HTMLElement).click(); return label; }');
+    expect(headline(r)).toEqual({ level: "caution", text: "Открывает треды и разделы bb за вас" });
+  });
+  it("interactions.respond is still answering", async () => {
+    const r = await app("export default function A({ sdk }: any) { sdk.threads.interactions.respond({}); return null; }");
+    expect(headline(r).text).toBe("Отвечает на вопросы агентов за вас");
   });
 });

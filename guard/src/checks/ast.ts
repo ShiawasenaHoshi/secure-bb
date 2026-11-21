@@ -7,7 +7,7 @@ import * as acorn from "../../vendor/acorn.mjs";
 import jsx from "../../vendor/acorn-jsx.mjs";
 import { tsPlugin } from "../../vendor/acorn-typescript.mjs";
 import { excerptOf } from "./files.ts";
-import { classifyEvent, classifySdkChain, DOM_LOOKUPS, DOM_PRESSES, isThreadsArea, looksLikeAnswerButton, SYNTHETIC_EVENTS, UI_CLICK_ANSWERS } from "./sdk-rights.ts";
+import { classifyEvent, classifySdkChain, DOM_LOOKUPS, DOM_PRESSES, domTarget, isAnswerButtonText, isApproveText, isThreadsArea, SYNTHETIC_EVENTS, type DomTarget } from "./sdk-rights.ts";
 import type { CapabilityKind, Finding } from "./types.ts";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -54,13 +54,15 @@ export interface FileFacts {
   /** Path-like string literals (`./worker.js`, `src/x.ts`): a file named this way may be loaded by other means (`new Worker`, `spawn("node", […])`). Capped. */
   pathStrings: string[];
   /** Lines where the code looks up an element of the page (`document.querySelector`, `closest`, `getElementById`…). */
-  domLookups: number[];
+  domLookups: Array<{ line: number; target: DomTarget }>;
   /** Presses on an element (`.click()`, `.dispatchEvent(…)`, `.requestSubmit()`, `new MouseEvent(…)`), with the line. */
   domPresses: Array<{ detail: string; line: number }>;
   /** The code reaches the person's own folders: `os.homedir()`, `~/…`, `Documents` / `Desktop` / `Downloads`, `/Users/…`. Only then do «ваши документы» belong on a card. */
   homeRef: boolean;
   /** A string in this file names a button of an agent's question («Next», «Submit», «Allow») or the question widget itself. */
-  answerButtons: boolean;
+  answerText: boolean;
+  /** A string says «Allow» / «Approve» / «Разрешить». */
+  approveText: boolean;
 }
 
 // ---- module tables --------------------------------------------------------
@@ -435,7 +437,7 @@ export function sqlRules(value: string): string[] {
 export function analyze(rel: string, parsed: { ast: N; code: string }): FileFacts {
   const { ast, code } = parsed;
   const lines = code.split("\n");
-  const facts: FileFacts = { findings: [], sites: [], hosts: [], unresolvedHosts: [], programs: [], programsUnknown: false, credentials: [], secretPaths: [], rcPaths: [], fsPaths: [], network: false, childProcess: false, execSink: false, fsWrite: false, parsed: true, envCalls: [], relImports: new Map(), envReaders: new Map(), specs: [], pathStrings: [], domLookups: [], domPresses: [], answerButtons: false, homeRef: false };
+  const facts: FileFacts = { findings: [], sites: [], hosts: [], unresolvedHosts: [], programs: [], programsUnknown: false, credentials: [], secretPaths: [], rcPaths: [], fsPaths: [], network: false, childProcess: false, execSink: false, fsWrite: false, parsed: true, envCalls: [], relImports: new Map(), envReaders: new Map(), specs: [], pathStrings: [], domLookups: [], domPresses: [], answerText: false, approveText: false, homeRef: false };
   const consts = collectConsts(ast);
   const lineOf = (n: N): number => n.loc?.start.line ?? 0;
   const text = (line: number): string => excerptOf(lines[line - 1] ?? "");
@@ -1082,7 +1084,8 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
   const visitors: Record<string, (n: N, anc: N[]) => void> = {
     Literal(n) {
       if (typeof n.value === "string") {
-        if (!facts.answerButtons && looksLikeAnswerButton(n.value)) facts.answerButtons = true;
+        if (!facts.answerText && isAnswerButtonText(n.value)) facts.answerText = true;
+        if (!facts.approveText && isApproveText(n.value)) facts.approveText = true;
         notePathString(n.value);
         stringChecks(n.value, n);
         sqlChecks(n);
@@ -1267,7 +1270,7 @@ export function analyze(rel: string, parsed: { ast: N; code: string }): FileFact
         if (callee.object.type === "Identifier" && callee.object.name === "Reflect" && n.arguments[0] && isGlobalLike(n.arguments[0])) finding("dynamic-access", "review", n);
       }
       if (callee.type === "MemberExpression" && simple !== null) {
-        if (DOM_LOOKUPS.has(simple)) facts.domLookups.push(lineOf(n));
+        if (DOM_LOOKUPS.has(simple)) facts.domLookups.push({ line: lineOf(n), target: n.arguments[0] ? domTarget(foldPrefix(n.arguments[0]).text) : "unknown" });
         const press = DOM_PRESSES[simple];
         if (press && n.arguments.length >= press.minArgs && n.arguments.length <= press.maxArgs) facts.domPresses.push({ detail: press.detail, line: lineOf(n) });
         // `bb.events.on("thread.idle", …)`: the handler is handed the conversation.

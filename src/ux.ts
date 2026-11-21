@@ -3,7 +3,7 @@
 //
 // Nothing here decides anything about plugins: approving and holding stay with the guard. These functions choose what to SHOW.
 import type { TrustMode } from "./guardlink.js";
-import { FS_HOME, UI_CLICK_ANSWERS } from "./checks/sdk-rights.js";
+import { FS_HOME, UI_CLICK_ANSWERS, UI_CLICK_GATE, UI_CLICK_NAV } from "./checks/sdk-rights.js";
 
 // ---- modes ------------------------------------------------------------------------------------------------------------------
 export interface DetailLevel {
@@ -237,9 +237,7 @@ export function capabilityPhrase(c: CapLike): string {
     case "sdk_settings":
       return "менять настройки bb: ставить и включать плагины, задавать переменные окружения";
     case "ui_click":
-      return c.detail.includes(UI_CLICK_ANSWERS)
-        ? "нажимать кнопки в интерфейсе bb за вас, в том числе отвечать на вопросы агентов (плагин находит их виджет на странице и жмёт «Next» или «Submit»)"
-        : "нажимать кнопки в интерфейсе bb за вас (какие именно — из кода не видно)";
+      return uiClickLine(c).phrase;
     default:
       return "использовать возможность «" + c.kind + "»";
   }
@@ -1259,7 +1257,7 @@ const SAFE_KINDS = new Set(["ui", "database"]);
 /** The rights of bb's own API and of pressing bb's buttons, worst first, each in the words of the card. */
 const SDK_LINES: Array<{ kind: string; danger: boolean; text: string }> = [
   { kind: "sdk_answer", danger: true, text: "отвечает на вопросы агентов за вас" },
-  { kind: "ui_click", danger: false, text: "нажимает кнопки в интерфейсе bb за вас" },
+  { kind: "ui_click", danger: false, text: "может нажимать элементы интерфейса bb" },
   { kind: "sdk_send", danger: true, text: "отправляет сообщения от вашего имени" },
   { kind: "sdk_agents", danger: true, text: "может запускать и останавливать агентов" },
   { kind: "sdk_settings", danger: true, text: "меняет настройки bb" },
@@ -1267,12 +1265,24 @@ const SDK_LINES: Array<{ kind: string; danger: boolean; text: string }> = [
   { kind: "sdk_questions", danger: false, text: "видит, какие вопросы агенты задают" },
   { kind: "sdk_meta", danger: false, text: "знает названия и состояние ваших тредов (когда агенты начинают и заканчивают)" },
 ];
+/**
+ * What a plugin that presses elements of bb's page presses, by where its code goes for them: the buttons of an agent's question (answers for the
+ * person: red), the protection's own buttons or a target the code hides next to words of approval (red), a row or a link of the navigation (opens a thread
+ * or a section: soft yellow), anything else (yellow).
+ */
+export function uiClickLine(c: CapLike): { danger: boolean; text: string; phrase: string } {
+  const has = (d: string): boolean => c.detail.includes(d);
+  if (has(UI_CLICK_GATE)) return { danger: true, text: "может нажимать кнопки защиты secure-bb и «Разрешить» за вас", phrase: "нажимать кнопки защиты secure-bb и «Разрешить» за вас (кнопки защиты ещё требуют код, но плагин может нажать и их)" };
+  if (has(UI_CLICK_ANSWERS)) return { danger: true, text: "отвечает на вопросы агентов за вас (нажимает кнопки их виджета)", phrase: "отвечать на вопросы агентов за вас: плагин находит виджет вопроса на странице и нажимает «Next» или «Submit»" };
+  if (has(UI_CLICK_NAV) && !has("target:other")) return { danger: false, text: "открывает треды и разделы bb за вас", phrase: "открывать треды и разделы bb за вас (нажимает на строки списка и ссылки)" };
+  return { danger: false, text: "может нажимать элементы интерфейса bb", phrase: "нажимать элементы интерфейса bb за вас (какие именно — из кода видно не всегда)" };
+}
 /** The first line for a plugin that uses bb's own API or presses bb's buttons; null when it does neither. «Безопасно: только оформление» is never said of it. */
 export function sdkHeadline(caps: CapLike[]): Risk | null {
   const mine = SDK_LINES.filter((l) => caps.some((c) => c.kind === l.kind));
   if (mine.length === 0) return null;
-  const answersByClick = caps.some((c) => c.kind === "ui_click" && c.detail.includes(UI_CLICK_ANSWERS));
-  const lines = mine.map((l) => (l.kind === "ui_click" && answersByClick ? { ...l, danger: true, text: "нажимает кнопки в интерфейсе bb и отвечает на вопросы агентов за вас" } : l));
+  const click = caps.find((c) => c.kind === "ui_click");
+  const lines = mine.map((l) => (l.kind === "ui_click" && click ? { ...l, danger: uiClickLine(click).danger, text: uiClickLine(click).text } : l));
   const sendsOut = caps.some((c) => c.kind === "network");
   const danger = lines.some((l) => l.danger) || (lines.some((l) => l.kind === "sdk_read") && sendsOut);
   const shown = lines.slice(0, 3).map((l) => l.text);
