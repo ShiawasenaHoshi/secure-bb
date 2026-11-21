@@ -1596,7 +1596,7 @@ export class Guard {
         origin: this.rp.origin,
         keys: this.listPasskeys()
           .filter((k) => k.state === "active")
-          .map((k) => ({ id: k.id, label: k.label, createdAt: k.createdAt, lastUsedAt: k.lastUsedAt })),
+          .map((k) => ({ id: k.id, label: k.label, createdAt: k.createdAt, lastUsedAt: k.lastUsedAt, aaguid: k.aaguid })),
         enrollmentOpen: this.openEnrollment() !== undefined,
       },
       policy: this.policy(),
