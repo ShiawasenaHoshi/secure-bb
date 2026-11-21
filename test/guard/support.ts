@@ -94,12 +94,12 @@ import plugin from "../../server.js";
 import { Guard as GuardClass } from "../../guard/src/guard.ts";
 
 /** A guard whose clock is the (faked) Date, so the plugin and the guard agree on time. */
-export async function startGuardOnDate(opts: { agents?: AgentsConfig } = {}): Promise<TestGuard> {
+export async function startGuardOnDate(opts: { agents?: AgentsConfig; trust?: TrustConfig } = {}): Promise<TestGuard> {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "sbb-guard-")));
   const paths = resolvePaths({ data: dir, socket: join(dir, "run", "guard.sock") });
   privateDir(paths.stateDir);
   const db = openDb(paths.db);
-  const guard = new GuardClass({ db, now: () => Date.now(), secretPath: paths.secret, headPath: paths.head, ...(opts.agents ? { agents: opts.agents } : {}) });
+  const guard = new GuardClass({ db, now: () => Date.now(), secretPath: paths.secret, headPath: paths.head, ...(opts.agents ? { agents: opts.agents } : {}), ...(opts.trust ? { trust: opts.trust } : {}) });
   const secret = generateSecret();
   const code = (): string => hotp(base32Decode(secret), stepAt(Date.now()));
   guard.registerSecret(secret, code());

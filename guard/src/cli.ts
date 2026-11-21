@@ -1,4 +1,4 @@
-// sbb-guard: serve | totp-register | totp-disable | passkey-enroll | passkey-list | passkey-remove | status | journal-verify | import
+// sbb-guard: serve | totp-register | totp-disable | passkey-enroll | passkey-list | passkey-remove | troubleshoot | status | journal-verify | import
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import net from "node:net";
@@ -47,6 +47,7 @@ const USAGE = `sbb-guard ${VERSION} — decision guard for secure-bb
   sbb-guard passkey-enroll [--data DIR] [--label NAME] [--rp-id ID] [--origin URL]
   sbb-guard passkey-list [--data DIR]
   sbb-guard passkey-remove ID [--data DIR] [--yes]
+  sbb-guard troubleshoot MINUTES|off [--data DIR] [--code CODE]
   sbb-guard status [--data DIR] [--socket PATH]
   sbb-guard journal-verify [--data DIR]
   sbb-guard import FILE [--data DIR] [--yes] [--digest SHA256]
@@ -57,6 +58,8 @@ from the console only. --agents-scan-sec (default 120) is the period of the scan
 Trust by source (serve): --plugins-root DIR (repeatable) / SBB_GUARD_PLUGINS_ROOTS: where the core keeps plugins installed from git; the guard reads a version
 only from there (the guard's user needs read access: the installer's ACL), and without it nothing from git passes by itself. --known-source ENTRY (repeatable) /
 SBB_GUARD_KNOWN_SOURCES: sources of the official catalog (github:owner/name or github:owner/*), the level "known". The owner's own sources are kept by the guard (a touch adds one).
+Troubleshooting (console only, with a code): "troubleshoot 30" (or "30m") makes the guard pass everything for that long (at most 240 minutes), write every
+decision into the journal and return by itself; the page shows a red bar with the time left. It is not an off switch: the guard has none. "troubleshoot off" ends it earlier.
 Paths: --data / SBB_GUARD_DATA (default /var/sbb-guard), --socket / SBB_GUARD_SOCKET (default <data>/run/guard.sock),
 --socket-gid / SBB_GUARD_SOCKET_GID.
 Passkeys: --rp-id / SBB_GUARD_RP_ID (default localhost) and --origin / SBB_GUARD_ORIGIN (default http://localhost:38886): the page must be opened
@@ -309,6 +312,43 @@ export async function totpDisable(paths: GuardPaths, io: Io, opts: Opts, now: ()
   }
 }
 
+/** `troubleshoot 30m`: the guard passes everything for a while and writes it all down. Needs the console and a code (a passkey cannot be given at a terminal). */
+export async function troubleshoot(paths: GuardPaths, io: Io, arg: string, opts: Opts, now: () => number = Date.now): Promise<number> {
+  const { guard, close } = open(paths, now);
+  try {
+    if (arg === "off") {
+      io.out(guard.troubleshootStop() ? "Troubleshooting mode is over: the guard decides as usual." : "Troubleshooting mode was not on.");
+      return 0;
+    }
+    const m = /^(\d{1,4})\s*m?$/i.exec(arg.trim());
+    if (m === null) {
+      io.err("troubleshoot needs minutes (for example `troubleshoot 30` or `30m`), or `off`");
+      return 64;
+    }
+    if (!guard.totpRegistered()) {
+      io.err("troubleshooting mode needs a code, and no TOTP secret is registered here (`sbb-guard totp-register`)");
+      return 1;
+    }
+    io.out(`For ${m[1]} min the guard will let EVERY plugin load, and write each decision into the journal. Then it returns by itself.`);
+    const code = optStr(opts, "code") ?? (await io.ask("Code of the authenticator: ")) ?? undefined;
+    if (code === undefined) {
+      io.err("no code given; nothing changed");
+      return 1;
+    }
+    const r = guard.troubleshootStart(Number(m[1]), code.trim());
+    io.out(`Troubleshooting mode until ${new Date(r.until).toISOString()}. \`sbb-guard troubleshoot off\` ends it earlier.`);
+    return 0;
+  } catch (err) {
+    if (err instanceof GuardError) {
+      io.err(err.message);
+      return 1;
+    }
+    throw err;
+  } finally {
+    close();
+  }
+}
+
 export async function status(paths: GuardPaths, io: Io, now: () => number = Date.now): Promise<number> {
   io.out(`data:    ${paths.dataDir}`);
   io.out(`socket:  ${paths.socket}`);
@@ -332,6 +372,10 @@ export async function status(paths: GuardPaths, io: Io, now: () => number = Date
       windows: Array<{ pluginId: string; remainingSec: number }>;
     };
     io.out(`second factor: ${s.totp.registered ? "registered" : "NOT registered (run `sbb-guard totp-register`)"}${s.totp.blockedUntil > 0 ? `; approvals blocked until ${new Date(s.totp.blockedUntil).toISOString()}` : ""}`);
+    {
+      const t = guard.troubleshootUntil();
+      if (t > 0) io.out(`TROUBLESHOOTING MODE: the guard passes everything until ${new Date(t).toISOString()} (every decision is in the journal)`);
+    }
     io.out(`passkeys: ${guard.listPasskeys().filter((k) => k.state === "active").length} active (rp ${paths.rp.rpId}, origin ${paths.rp.origin}); codes: ${guard.totpDisabled() ? "switched off" : guard.totpRegistered() ? "on" : "not registered"}`);
     io.out(`held: ${s.queue.filter((q) => q.status === "held").length}; approved versions: ${s.approvals.length}; open windows: ${s.windows.length}${s.windows.map((w) => ` [${w.pluginId}, ${Math.ceil(w.remainingSec / 60)} min]`).join("")}`);
     const j = guard.verifyJournal();
@@ -528,6 +572,12 @@ export async function main(argv: string[], io: Io = terminalIo): Promise<number>
           return 64;
         }
         return await passkeyRemove(paths, io, positionals[0]!, opts);
+      case "troubleshoot":
+        if (positionals.length !== 1) {
+          io.err("troubleshoot needs minutes (`troubleshoot 30`) or `off`");
+          return 64;
+        }
+        return await troubleshoot(paths, io, positionals[0]!, opts);
       case "status":
         return await status(paths, io);
       case "journal-verify":

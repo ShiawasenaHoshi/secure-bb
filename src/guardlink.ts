@@ -80,13 +80,16 @@ export interface PasskeyAssertion {
   authenticatorData: string;
   signature: string;
 }
-/** A touch: a TOTP code (a plain string) or a passkey assertion. */
-export type GuardProof = string | { passkey: PasskeyAssertion };
-const proofFields = (p: GuardProof): Record<string, unknown> => (typeof p === "string" ? { code: p } : { passkey: p.passkey });
+/** A touch: a TOTP code (a plain string), a passkey assertion, or — for a routine action only — the token of an approval session (the guard checks which). */
+export type GuardProof = string | { passkey: PasskeyAssertion } | { session: string };
+const proofFields = (p: GuardProof): Record<string, unknown> => (typeof p === "string" ? { code: p } : "passkey" in p ? { passkey: p.passkey } : { session: p.session });
 
 /** An action the guard issues a challenge for (see the guard's design: the signature is good for this action only). */
 export type GuardAction =
-  | { op: "approve"; requestId: number }
+  | { op: "approve"; requestId: number; acknowledgeBlock?: boolean }
+  | { op: "approve-trust"; requestId: number }
+  | { op: "session-open" }
+  | { op: "batch-approve"; batchId: string; setHash: string }
   | { op: "open-window"; pluginId: string; minutes?: number; scope?: "tree" | "thread" }
   | { op: "policy"; patch: Partial<GuardPolicy> }
   | { op: "touch"; purpose: string }
@@ -151,6 +154,10 @@ export interface AgentsState {
 export interface GuardState {
   now: number;
   totp: { registered: boolean; disabled?: boolean; blockedUntil: number };
+  /** Open approval sessions (no secret of theirs: only that they exist and until when). Absent in a guard that predates them. */
+  sessions?: Array<{ id: number; openedAt: number; expiresAt: number; hardExpiresAt: number; uses: number }>;
+  /** Troubleshooting mode: the guard passes everything until this time and writes every decision down. Null or absent: off. */
+  troubleshoot?: { until: number } | null;
   /** Absent in a guard that predates passkeys. */
   passkeys?: { rpId: string; origin: string; keys: Array<{ id: number; label: string; createdAt: number; lastUsedAt: number | null; aaguid?: string }>; enrollmentOpen: boolean };
   policy: GuardPolicy;
@@ -168,6 +175,31 @@ export interface GuardLookup {
   approval: { id: number; via: string; windowId: number | null } | null;
   window: { id: number; expiresAt: number; hardExpiresAt: number; mode: string; sizeSec: number } | null;
   requestId: number | null;
+  /** Troubleshooting mode is on until this time (0: off). */
+  troubleshootUntil: number;
+}
+/** One item of a list the guard fixes for one touch. */
+export interface GuardBatchItem {
+  kind: "queue" | "skill" | "drift";
+  id: number;
+  label: string;
+  fingerprint: string;
+}
+export interface GuardBatchPrepared {
+  batchId: string;
+  setHash: string;
+  expiresAt: number;
+  items: GuardBatchItem[];
+  skipped: Array<{ kind: string; id: number; reason: string }>;
+}
+export interface GuardBatchResult {
+  kind: "queue" | "skill" | "drift";
+  id: number;
+  label: string;
+  ok: boolean;
+  /** Not the guard's own: the touch was accepted and the plugin approves it. */
+  local: boolean;
+  note: string;
 }
 export interface GuardJournalReport {
   valid: boolean;
@@ -198,7 +230,15 @@ export interface GuardPort {
   /** Asks the guard to keep a version for a human; `stop`: even if a window is open (a window does not lift it). Tightening: no code. */
   hold(ctx: GuardHoldRequest, stop: boolean): Promise<void>;
   annotate(target: { requestId?: number; contentHash?: string }, findings: unknown): Promise<void>;
-  approve(requestId: number, proof: GuardProof): Promise<{ approval: GuardApproval }>;
+  approve(requestId: number, proof: GuardProof, opts?: { acknowledgeBlock?: boolean }): Promise<{ approval: GuardApproval }>;
+  /** «Вернуть и доверять источнику»: approves the version and adds its source, one touch, one operation at the guard. */
+  approveTrust(requestId: number, proof: GuardProof): Promise<{ approval: GuardApproval; entry: string; mySources: string[] }>;
+  /** Approval sessions: opening takes a fresh touch (never a session); the token comes back once. Locking tightens: no touch. */
+  sessionOpen(proof: GuardProof): Promise<{ token: string; idleMs: number; capMs: number }>;
+  sessionClose(): Promise<void>;
+  /** A list for one touch: fixed at the guard first, then one touch names only its id and hash. */
+  batchPrepare(items: Array<{ kind: "queue" | "skill" | "drift"; id: number; fingerprint?: string; label?: string }>): Promise<GuardBatchPrepared>;
+  batchApprove(batchId: string, setHash: string, proof: GuardProof): Promise<GuardBatchResult[]>;
   /** Tightening: no code. */
   dismiss(requestId: number): Promise<void>;
   openWindow(pluginId: string, minutes: number | undefined, proof: GuardProof, scope?: "tree" | "thread"): Promise<GuardWindow>;
@@ -274,7 +314,7 @@ export class GuardLink implements GuardPort {
   }
   async lookup(pluginId: string, contentHash: string): Promise<GuardLookup> {
     const r = await this.call({ op: "lookup", pluginId, contentHash });
-    return { approved: r.approved === true, approval: r.approval ?? null, window: r.window ?? null, requestId: r.requestId ?? null };
+    return { approved: r.approved === true, approval: r.approval ?? null, window: r.window ?? null, requestId: r.requestId ?? null, troubleshootUntil: typeof r.troubleshootUntil === "number" ? r.troubleshootUntil : 0 };
   }
   async decide(ctx: GuardHoldRequest): Promise<{ action: "proceed" | "wait" }> {
     const r = await this.call({ op: "decide", ...ctx });
@@ -286,8 +326,25 @@ export class GuardLink implements GuardPort {
   async annotate(target: { requestId?: number; contentHash?: string }, findings: unknown): Promise<void> {
     await this.call({ op: "annotate", ...target, findings });
   }
-  async approve(requestId: number, proof: GuardProof): Promise<{ approval: GuardApproval }> {
-    return (await this.call({ op: "approve", requestId, ...proofFields(proof) })) as unknown as { approval: GuardApproval };
+  async approve(requestId: number, proof: GuardProof, opts: { acknowledgeBlock?: boolean } = {}): Promise<{ approval: GuardApproval }> {
+    return (await this.call({ op: "approve", requestId, ...(opts.acknowledgeBlock === true ? { acknowledgeBlock: true } : {}), ...proofFields(proof) })) as unknown as { approval: GuardApproval };
+  }
+  async approveTrust(requestId: number, proof: GuardProof): Promise<{ approval: GuardApproval; entry: string; mySources: string[] }> {
+    return (await this.call({ op: "approve-trust", requestId, ...proofFields(proof) })) as unknown as { approval: GuardApproval; entry: string; mySources: string[] };
+  }
+  async sessionOpen(proof: GuardProof): Promise<{ token: string; idleMs: number; capMs: number }> {
+    const r = await this.call({ op: "session-open", ...proofFields(proof) });
+    return { token: String(r.token), idleMs: Number(r.idleMs), capMs: Number(r.capMs) };
+  }
+  async sessionClose(): Promise<void> {
+    await this.call({ op: "session-close" });
+  }
+  async batchPrepare(items: Array<{ kind: "queue" | "skill" | "drift"; id: number; fingerprint?: string; label?: string }>): Promise<GuardBatchPrepared> {
+    const { ok: _ok, id: _id, ...rest } = await this.call({ op: "batch-prepare", items });
+    return rest as unknown as GuardBatchPrepared;
+  }
+  async batchApprove(batchId: string, setHash: string, proof: GuardProof): Promise<GuardBatchResult[]> {
+    return (await this.call({ op: "batch-approve", batchId, setHash, ...proofFields(proof) })).results as GuardBatchResult[];
   }
   async dismiss(requestId: number): Promise<void> {
     await this.call({ op: "dismiss", requestId });

@@ -57,7 +57,7 @@ export function sourceLabel(sourceKind: string, source: string): string {
     const m = /github\.com[/:]([^/\s]+)\/([^/@#\s]+?)(?:\.git)?(?:[@#\s]|$)/i.exec(source);
     return m ? `github.com/${m[1]}/${m[2]}` : source.replace(/^git:/, "").slice(0, 80);
   }
-  if (sourceKind === "path") return `папки ${source.replace(/^path:/, "").slice(0, 80)}`;
+  if (sourceKind === "path") return `из папки ${source.replace(/^path:/, "").slice(0, 80)}`;
   if (sourceKind === "npm") return `npm: ${source.replace(/^npm:/, "").slice(0, 60)}`;
   return source.slice(0, 80);
 }
@@ -354,6 +354,9 @@ export function groupAway(events: AwayEvent[], since: number, guardMode: boolean
     if (e.ts <= since) continue;
     const cls = classifyAway(e, guardMode);
     if (cls === null) continue;
+    // A decision about a plugin version always names the plugin. A record without one is the system's own: only an alarm is told of it ("1 остановлена"
+    // with no subject next to the line of the plugin itself said the same thing twice).
+    if (e.pluginId === null && cls !== "alarm") continue;
     // The same record can come twice (both journals list recent entries, the page re-reads them): one line per record.
     const id = `${e.from}|${e.ts}|${e.kind}|${e.pluginId ?? ""}|${JSON.stringify(e.detail ?? null)}`;
     if (seen.has(id)) continue;
@@ -384,6 +387,20 @@ export function groupAway(events: AwayEvent[], since: number, guardMode: boolean
         latest.counts.held = now.yellow;
         latest.counts.stopped = now.red;
       }
+    }
+  }
+  // A plugin's «остановлена» and «ждёт решения» are said once, on its latest line, however many threads the plugin's records came from.
+  const byPlugin = new Map<string, AwayGroup[]>();
+  for (const g of groups.values()) if (g.pluginId !== null) byPlugin.set(g.pluginId, [...(byPlugin.get(g.pluginId) ?? []), g]);
+  for (const list of byPlugin.values()) {
+    if (list.length < 2) continue;
+    const latest = list.reduce((x, y) => (y.last > x.last ? y : x));
+    for (const g of list) {
+      if (g === latest) continue;
+      latest.counts.stopped = Math.max(latest.counts.stopped, g.counts.stopped);
+      latest.counts.held = Math.max(latest.counts.held, g.counts.held);
+      g.counts.stopped = 0;
+      g.counts.held = 0;
     }
   }
   const weight = (g: AwayGroup): number => (g.counts.stopped + g.counts.alarm > 0 ? 2 : g.counts.held > 0 ? 1 : 0);

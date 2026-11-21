@@ -33,7 +33,7 @@ export const rpcContract = defineRpcContract({
   "trust.remove": { input: s.object({ entry: s.string({ min: 1, max: 1024 }) }), output: s.json<{ ok: true; mySources: string[] }>() },
   // The old list of trusted repositories of this plugin (pollution tracker), moved into "my sources" by a touch.
   "trust.migrate": { input: s.object({ ...factor }), output: s.json<{ ok: true; mySources: string[]; moved: string[] }>() },
-  "session.open": { input: s.object({ code }), output: s.json<{ token: string; idleMs: number; capMs: number }>() },
+  "session.open": { input: s.object({ ...factor }), output: s.json<{ token: string; idleMs: number; capMs: number }>() },
   "session.close": { input: s.nullValue(), output: s.json<{ ok: true }>() },
   "batch.prepare": { input: s.object({ items: s.array(s.object({ kind: batchKind, id }), { max: 50 }) }), output: s.json<BatchPrepared>() },
   "batch.approve": { input: s.object({ batchId: s.string({ min: 1, max: 64 }), setHash: s.string({ min: 64, max: 64 }), ...proof }), output: s.json<{ ok: true; results: BatchResult[] }>() },
@@ -46,7 +46,9 @@ export const rpcContract = defineRpcContract({
   // Guard mode: a challenge bound to one action (the guard describes it in its own words), and registering a key (token from the console).
   "passkey.challenge": {
     input: s.object({
-      kind: s.oneOf(["approve", "window.open", "policy", "touch", "agents.accept", "trust.mode", "trust.add", "trust.migrate"] as const),
+      kind: s.oneOf(["approve", "approve.trust", "session.open", "batch.approve", "window.open", "policy", "touch", "agents.accept", "trust.mode", "trust.add", "trust.migrate"] as const),
+      batchId: s.optional(s.string({ min: 1, max: 64 })),
+      setHash: s.optional(s.string({ min: 64, max: 64 })),
       trustMode: s.optional(s.oneOf(["simple", "detailed", "strict"] as const)),
       entries: s.optional(s.array(s.string({ min: 1, max: 1024 }), { max: 100 })),
       ids: s.optional(s.array(id, { max: 2000 })),
@@ -69,6 +71,8 @@ export const rpcContract = defineRpcContract({
     output: s.json<Record<string, unknown>>(),
   },
   "queue.approve": { input: s.object({ id: queueId, ...proof, acknowledgeBlock: s.optional(s.boolean()) }), output: s.json<{ ok: true; note: string }>() },
+  // «Вернуть и доверять источнику» (guard mode): the version is approved AND its source goes into "my sources" — one touch, one operation at the guard.
+  "queue.approveTrust": { input: s.object({ id, ...factor }), output: s.json<{ ok: true; note: string; entry: string }>() },
   "queue.dismiss": { input: s.object({ id: queueId }), output: s.json<{ ok: true }>() },
   "window.open": {
     input: s.object({ queueId: id, ...proof, scope: s.optional(s.oneOf(["tree", "thread"] as const)) }),

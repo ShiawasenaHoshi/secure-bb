@@ -251,9 +251,29 @@ export class Gate {
     return { token, idleMs: SESSION_IDLE_MS, capMs: SESSION_CAP_MS };
   }
 
+  /**
+   * Guard mode: the guard issues the session (a code or a signature, checked there) and keeps only the token's hash. The same rule as without a guard:
+   * not while a third-party plugin runs (its interface code shares the page's origin and could read the token).
+   */
+  async openGuardSession(proof: GuardProof): Promise<{ token: string; idleMs: number; capMs: number }> {
+    const guard = this.d.guard;
+    if (!guard) throw new GateError("invalid", "not in guard mode");
+    const running = await this.d.thirdPartyRunning();
+    if (running.length > 0)
+      throw new GateError("conflict", `disable these third-party plugins first: their interface code could read the session token (${running.join(", ")})`, { plugins: running });
+    const opened = await guard.sessionOpen(proof);
+    this.store.log("session.open", null, null, { idleMs: opened.idleMs, capMs: opened.capMs, at: "guard" });
+    return opened;
+  }
+
   /** "Lock": tightening, needs nothing. Says nothing about whether a session existed. */
   closeSessions(reason: string): void {
     if (this.store.closeSessions(reason) > 0) this.store.log("session.close", null, null, { reason });
+  }
+  /** Guard mode: the same, at the guard (no touch: it only tightens). */
+  async closeGuardSessions(reason: string): Promise<void> {
+    await this.d.guard?.sessionClose();
+    this.store.log("session.close", null, null, { reason, at: "guard" });
   }
 
   /**
@@ -262,6 +282,15 @@ export class Gate {
    * is open). The interface of a plugin is not visible to us, so every running third-party plugin counts. Returns who ran.
    */
   async closeSessionsForThirdParty(): Promise<string[]> {
+    if (this.d.guard) {
+      // The sessions are the guard's: ask it whether one is open (no secret in the answer), and close it there if a third-party plugin runs.
+      const open = (await this.d.guard.state().catch(() => null))?.sessions ?? [];
+      if (open.length === 0) return [];
+      const running = await this.d.thirdPartyRunning();
+      if (running.length === 0) return [];
+      await this.closeGuardSessions(`third-party plugin running: ${running.slice(0, 5).join(", ")}`);
+      return running;
+    }
     if (this.store.unclosedSessions().length === 0) return [];
     const running = await this.d.thirdPartyRunning();
     if (running.length === 0) return [];
@@ -578,6 +607,12 @@ export class Gate {
       // Fail closed, as the core does when the guard does not answer.
       this.store.logDecision("hold", ctx.pluginId, ctx.contentHash, { version: ctx.version, trigger: ctx.trigger, reason: "guard unreachable", message: err instanceof Error ? err.message : String(err) });
       return { action: "wait", reason: T.agentHeldNoReview };
+    }
+    // Troubleshooting mode (the owner switched it on at the guard's console): the guard passes everything and writes each decision down. This hook stands aside
+    // for as long, with a record of its own: the core asks the guard itself, and a hook that held would keep out what the guard let in.
+    if (look.troubleshootUntil > this.now) {
+      this.store.logDecision("troubleshoot", ctx.pluginId, ctx.contentHash, { version: ctx.version, trigger: ctx.trigger, until: look.troubleshootUntil, approved: look.approved });
+      return { action: "proceed" };
     }
     // Not approved and no window: the guard may let it in by itself (an own source, rights not grown). The core runs the hooks before it asks the
     // guard, so without this question the hook would hold such a version once and it would wait for a recheck. What the guard decides is the guard's:

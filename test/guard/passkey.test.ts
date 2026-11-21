@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { main, passkeyEnroll, passkeyList, passkeyRemove, totpDisable, type Io } from "../../guard/src/cli.ts";
 import { resolvePaths, resolveRp } from "../../guard/src/config.ts";
 import { cborDecode, coseToSpki, newToken, normalizeToken, PasskeyError, parseAttestationObject } from "../../guard/src/passkey.ts";
-import { MAX_FAILURES } from "../../guard/src/guard.ts";
+import { MAX_FAILURES, PASSKEY_FAIL_LOG_EVERY_MS } from "../../guard/src/guard.ts";
 import { cbor, FLAGS, SoftAuthenticator } from "./authenticator.ts";
 import { decideReq, enrollKey, startGuard, touchFor, type TestGuard } from "./support.ts";
 
@@ -265,7 +265,8 @@ describe("what a touch must NOT do", () => {
     // ...and not another kind of action either
     expect((await g.send({ op: "open-window", pluginId: "demo", minutes: 30, passkey })).ok).toBe(false);
     expect((await g.send({ op: "touch", purpose: "approve", passkey })).ok).toBe(false);
-    expect((await journal()).filter((j) => j.kind === "passkey.fail")).toHaveLength(3);
+    // three refusals in one minute: one summary record now, the rest counted for the next one
+    expect((await journal()).filter((j) => j.kind === "passkey.fail")).toHaveLength(1);
   });
 
   it("the same signature cannot be used twice", async () => {
@@ -339,21 +340,54 @@ describe("what a touch must NOT do", () => {
     expect(await g.send({ op: "approve", requestId: 1, passkey: "yes please" })).toMatchObject({ ok: false, error: { code: "invalid" } });
   });
 
-  it("wrong signatures and wrong codes are one counter: five of them block both for an hour", async () => {
+  it("wrong codes block codes, wrong signatures pause signatures: two counters, neither takes the other's way", async () => {
     const auth = await ready();
+    // three wrong signatures and two wrong codes: five failures in all, and nothing is blocked (they are not one counter any more)
     for (let i = 0; i < 3; i++) {
       const bad = await touchFor(g, auth, approve(1), { corrupt: true });
       expect((await g.send({ op: "approve", requestId: 1, passkey: bad.passkey })).ok).toBe(false);
     }
     for (let i = 0; i < 2; i++) expect(await g.send({ op: "approve", requestId: 1, code: "000000" })).toMatchObject({ ok: false, error: { code: "invalid_code" } });
-    // the fifth failure blocked everything: a genuine touch and a genuine code are both refused
-    const good = await touchFor(g, auth, approve(1));
-    expect(await g.send({ op: "approve", requestId: 1, passkey: good.passkey })).toMatchObject({ ok: false, error: { code: "blocked" } });
-    expect(await g.send({ op: "approve", requestId: 1, code: g.code() })).toMatchObject({ ok: false, error: { code: "blocked" } });
+    const still = await touchFor(g, auth, approve(1));
+    expect((await g.send({ op: "approve", requestId: 1, passkey: still.passkey })).ok).toBe(true);
+    // the fifth wrong CODE blocks codes for an hour…
+    for (let i = 0; i < 3; i++) await g.send({ op: "approve", requestId: 2, code: "000000" });
+    expect(await g.send({ op: "approve", requestId: 2, code: g.code() })).toMatchObject({ ok: false, error: { code: "blocked" } });
     expect((await journal()).some((j) => j.kind === "totp.blocked")).toBe(true);
+    const st = await g.send({ op: "state" });
+    expect(st.totp.blockedUntil).toBeGreaterThan(g.clock.t);
+    // …and a passkey touch still works while they are blocked: the owner is not locked out by a process that spams wrong codes
+    const good = await touchFor(g, auth, approve(2));
+    expect((await g.send({ op: "approve", requestId: 2, passkey: good.passkey })).ok).toBe(true);
     g.clock.advance(3_600_001);
-    const later = await touchFor(g, auth, approve(1));
-    expect((await g.send({ op: "approve", requestId: 1, passkey: later.passkey })).ok).toBe(true);
+    expect((await g.send({ op: "state" })).totp.blockedUntil).toBe(0);
+  });
+
+  it("wrong signatures have no limit: 1000 in a row do not stop a genuine one, and the journal grows only by summaries", async () => {
+    const auth = await ready();
+    const c = await g.send({ op: "challenge", action: approve(1) });
+    const before = (g.guard.state().journal as { head: { id: number } }).head.id;
+    for (let i = 0; i < 1000; i++) {
+      const bad = auth.get(c.challenge, { corrupt: true });
+      expect(await g.send({ op: "approve", requestId: 1, passkey: bad })).toMatchObject({ ok: false, error: { code: "invalid_passkey" } });
+    }
+    // nothing blocks anybody, and the guard's rows did not grow per attempt: one summary in this minute
+    const st = await g.send({ op: "state" });
+    expect(st.totp.blockedUntil).toBe(0);
+    expect(st.passkeys.blockedUntil).toBeUndefined();
+    const grown = (g.guard.state().journal as { head: { id: number } }).head.id - before;
+    expect(grown).toBe(1);
+    expect((g.guard as any).db.prepare("SELECT COUNT(*) AS n FROM attempts WHERE kind = 'passkey' AND ok = 0").get().n).toBe(0);
+    // the genuine touch goes through, and so does a code
+    expect((await g.send({ op: "approve", requestId: 1, passkey: auth.get(c.challenge) })).ok).toBe(true);
+    expect((await g.send({ op: "touch", purpose: "t", code: g.code() })).ok).toBe(true);
+    // a minute later the next refusal writes a summary with the number since the last one
+    g.clock.advance(PASSKEY_FAIL_LOG_EVERY_MS + 1);
+    const c2 = await g.send({ op: "challenge", action: approve(2) });
+    for (let i = 0; i < 10; i++) await g.send({ op: "approve", requestId: 2, passkey: auth.get(c2.challenge, { corrupt: true }) });
+    const sums = (await journal()).filter((j) => j.kind === "passkey.fail");
+    expect(sums).toHaveLength(2);
+    expect(sums.map((j) => j.detail.failures).sort((a, b) => a - b)).toEqual([1, 1000]); // the first at once, then the 999 held back plus the one that came a minute later
   });
 
   it("a harmful plugin in the process that captured the signature cannot approve something else with it", async () => {
@@ -369,10 +403,10 @@ describe("what a touch must NOT do", () => {
       { op: "touch", purpose: "anything", passkey: captured },
     ];
     for (const a of attempts.slice(0, 4)) expect(await g.send(a)).toMatchObject({ ok: false, error: { code: "invalid_passkey" } });
-    // the fifth wrong attempt of the hour blocks touches (the same denial of service as with codes: a block, not a way in)
+    // five wrong signatures do not lock the owner out (they have their own, looser counter): the human's real touch for #2 still works
     expect(await g.send(attempts[4]!)).toMatchObject({ ok: false, error: { code: "invalid_passkey" } });
-    expect(await g.send({ op: "approve", requestId: 2, passkey: captured })).toMatchObject({ ok: false, error: { code: "blocked" } });
-    g.clock.advance(3_600_001);
+    expect(await g.send({ op: "approve", requestId: 2, passkey: captured })).toMatchObject({ ok: false, error: { code: "invalid_passkey" } });
+    expect((await g.send({ op: "state" })).approvals).toEqual([]);
     expect((await g.send({ op: "state" })).approvals).toEqual([]);
     expect((await g.send({ op: "state" })).windows).toEqual([]);
     expect((await g.send({ op: "state" })).policy).toMatchObject({ windowMin: 30, capMin: 240 });
