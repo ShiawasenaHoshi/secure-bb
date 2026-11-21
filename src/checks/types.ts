@@ -1,18 +1,7 @@
 // Result shapes of the deterministic plugin checks (spec §5.1).
 
-export type Severity = "block" | "review" | "info";
-
-export interface Finding {
-  /** Stable rule id, e.g. `invisible-chars`, `decode-eval`. */
-  rule: string;
-  severity: Severity;
-  /** Path relative to the checked directory (`""` for the tree as a whole). */
-  file: string;
-  /** 1-based line, `0` when the finding is about the whole file or tree. */
-  line: number;
-  /** The offending text (shortened, control characters escaped). */
-  excerpt: string;
-}
+import type { Finding, Severity } from "../../guard/src/text-rules.ts";
+export type { Finding, Severity };
 
 export type CapabilityKind =
   | "network"

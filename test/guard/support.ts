@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type net from "node:net";
 import { resolvePaths, type GuardPaths } from "../../guard/src/config.ts";
 import { openDb, privateDir } from "../../guard/src/db.ts";
-import { Guard } from "../../guard/src/guard.ts";
+import { Guard, type AgentsConfig } from "../../guard/src/guard.ts";
 import { request } from "../../guard/src/cli.ts";
 import { listen } from "../../guard/src/server.ts";
 import { base32Decode, generateSecret, hotp, stepAt } from "../../guard/src/totp.ts";
@@ -34,13 +34,13 @@ export interface TestGuard {
   close(): Promise<void>;
 }
 
-export async function startGuard(opts: { register?: boolean; serve?: boolean; rp?: RelyingParty } = {}): Promise<TestGuard> {
+export async function startGuard(opts: { register?: boolean; serve?: boolean; rp?: RelyingParty; agents?: AgentsConfig } = {}): Promise<TestGuard> {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "sbb-guard-")));
   const paths = resolvePaths({ data: dir, socket: join(dir, "run", "guard.sock") });
   privateDir(paths.stateDir);
   const clock = new Clock();
   const db = openDb(paths.db);
-  const guard = new Guard({ db, now: clock.now, secretPath: paths.secret, headPath: paths.head, ...(opts.rp ? { rp: opts.rp } : {}) });
+  const guard = new Guard({ db, now: clock.now, secretPath: paths.secret, headPath: paths.head, ...(opts.rp ? { rp: opts.rp } : {}), ...(opts.agents ? { agents: opts.agents } : {}) });
   const secret = generateSecret();
   const code = (): string => hotp(base32Decode(secret), stepAt(clock.t));
   if (opts.register !== false) {
@@ -94,12 +94,12 @@ import plugin from "../../server.js";
 import { Guard as GuardClass } from "../../guard/src/guard.ts";
 
 /** A guard whose clock is the (faked) Date, so the plugin and the guard agree on time. */
-export async function startGuardOnDate(): Promise<TestGuard> {
+export async function startGuardOnDate(opts: { agents?: AgentsConfig } = {}): Promise<TestGuard> {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "sbb-guard-")));
   const paths = resolvePaths({ data: dir, socket: join(dir, "run", "guard.sock") });
   privateDir(paths.stateDir);
   const db = openDb(paths.db);
-  const guard = new GuardClass({ db, now: () => Date.now(), secretPath: paths.secret, headPath: paths.head });
+  const guard = new GuardClass({ db, now: () => Date.now(), secretPath: paths.secret, headPath: paths.head, ...(opts.agents ? { agents: opts.agents } : {}) });
   const secret = generateSecret();
   const code = (): string => hotp(base32Decode(secret), stepAt(Date.now()));
   guard.registerSecret(secret, code());
@@ -136,7 +136,7 @@ export interface Installed {
 }
 
 /** Boots the plugin with BB_SECURE_BB_GUARD_SOCKET set (or without it: `socket: null`). */
-export async function bootPlugin(socket: string | null, opts: { onInstall?: (source: string) => Promise<void> } = {}) {
+export async function bootPlugin(socket: string | null, opts: { onInstall?: (source: string) => Promise<void>; environments?: Array<{ id: string; path: string | null }>; threadsOfEnvironment?: Record<string, string[]> } = {}) {
   let plugins: Installed[] = [];
   const installs: string[] = [];
   const dataDir = realpathSync(mkdtempSync(join(tmpdir(), "sbb-gm-")));
@@ -158,13 +158,14 @@ export async function bootPlugin(socket: string | null, opts: { onInstall?: (sou
         },
       },
       system: { config: async () => ({ generalSettings: { telemetryEnabled: true }, primaryHostId: "h1" }) },
-      environments: { get: async () => ({ hostId: "h1" }) },
+      environments: { get: async () => ({ hostId: "h1" }), list: async () => opts.environments ?? [] },
       projects: { fileContent: async () => Promise.reject(Object.assign(new Error("not found"), { status: 404 })) },
       threads: {
         experimental_listAncestors: async ({ threadIds }: { threadIds: string[] }) => ({ threads: threadIds.map((threadId) => ({ threadId, ancestorIds: [] })) }),
         experimental_listDescendants: async ({ threadIds }: { threadIds: string[] }) => ({ threads: threadIds.map((threadId) => ({ threadId, descendantIds: [] })) }),
         get: async ({ threadId }: { threadId: string }) => ({ environmentId: "e1", projectId: `P-${threadId}` }),
         events: { list: async () => [] },
+        list: async ({ environmentId }: { environmentId?: string }) => ((environmentId && opts.threadsOfEnvironment?.[environmentId]) || []).map((id) => ({ id })),
       },
     } as never,
   } as never);

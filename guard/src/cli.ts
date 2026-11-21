@@ -12,6 +12,8 @@ import { generateSecret, otpauthUri } from "./totp.ts";
 
 export const VERSION = "0.1.0";
 const ALIVE_EVERY_MS = 5000;
+/** Agent watch: the period of the scan in `serve` (the design says every N minutes, 2 by default). */
+export const AGENTS_SCAN_SEC = 120;
 /** A start this long after the last mark of life is journaled as a gap (a crash, a stop, the machine was off). */
 const GAP_MS = 30_000;
 
@@ -37,7 +39,7 @@ export const terminalIo: Io = {
 
 const USAGE = `sbb-guard ${VERSION} — decision guard for secure-bb
 
-  sbb-guard serve [--data DIR] [--socket PATH] [--socket-gid GID] [--rp-id ID] [--origin URL]
+  sbb-guard serve [--data DIR] [--socket PATH] [--socket-gid GID] [--rp-id ID] [--origin URL] [--agents-home DIR] [--agents-root DIR]... [--agents-scan-sec N]
   sbb-guard totp-register [--data DIR] [--code CODE] [--replacing-code CODE]
   sbb-guard totp-disable [--data DIR] [--yes]
   sbb-guard passkey-enroll [--data DIR] [--label NAME] [--rp-id ID] [--origin URL]
@@ -47,6 +49,9 @@ const USAGE = `sbb-guard ${VERSION} — decision guard for secure-bb
   sbb-guard journal-verify [--data DIR]
   sbb-guard import FILE [--data DIR] [--yes] [--digest SHA256]
 
+Agent watch (serve): --agents-home / SBB_GUARD_AGENTS_HOME (default /var/bbagent) is the agents' home; the working directories of threads are found in it
+(data/plugins/*/host-data/workspaces/*). --agents-root DIR (repeatable) / SBB_GUARD_AGENTS_ROOTS (comma-separated) add more roots: the list is extended
+from the console only. --agents-scan-sec (default 120) is the period of the scan. The guard's user needs read access to the home (the installer's ACL).
 Paths: --data / SBB_GUARD_DATA (default /var/sbb-guard), --socket / SBB_GUARD_SOCKET (default <data>/run/guard.sock),
 --socket-gid / SBB_GUARD_SOCKET_GID.
 Passkeys: --rp-id / SBB_GUARD_RP_ID (default localhost) and --origin / SBB_GUARD_ORIGIN (default http://localhost:38886): the page must be opened
@@ -62,12 +67,13 @@ export function parseArgs(argv: string[]): { cmd: string | undefined; positional
     if (a.startsWith("--")) {
       const key = a.slice(2);
       const eq = key.indexOf("=");
-      if (eq >= 0) opts[key.slice(0, eq)] = key.slice(eq + 1);
+      if (eq >= 0) opts[key.slice(0, eq)] = key.slice(0, eq) === "agents-root" && typeof opts["agents-root"] === "string" ? `${opts["agents-root"] as string},${key.slice(eq + 1)}` : key.slice(eq + 1);
       else if (key === "yes" || key === "help") opts[key] = true;
       else {
         const v = argv[i + 1];
         if (v === undefined || v.startsWith("--")) throw new Error(`--${key} needs a value`);
-        opts[key] = v;
+        // `--agents-root` may be given several times (the roots are joined with a comma).
+        opts[key] = key === "agents-root" && typeof opts[key] === "string" ? `${opts[key] as string},${v}` : v;
         i++;
       }
     } else if (cmd === undefined) cmd = a;
@@ -81,7 +87,7 @@ const optStr = (o: Opts, k: string): string | undefined => (typeof o[k] === "str
 function open(paths: GuardPaths, now: () => number): { guard: Guard; close: () => void } {
   privateDir(paths.stateDir);
   const db = openDb(paths.db);
-  return { guard: new Guard({ db, now, secretPath: paths.secret, headPath: paths.head, rp: paths.rp }), close: () => db.close() };
+  return { guard: new Guard({ db, now, secretPath: paths.secret, headPath: paths.head, rp: paths.rp, agents: { home: paths.agentsHome, extraRoots: paths.agentsRoots } }), close: () => db.close() };
 }
 
 /** One request to a running guard. */
@@ -423,7 +429,7 @@ export async function importCmd(paths: GuardPaths, io: Io, file: string, opts: O
   }
 }
 
-export async function serve(paths: GuardPaths, io: Io, signal?: AbortSignal): Promise<number> {
+export async function serve(paths: GuardPaths, io: Io, signal?: AbortSignal, o: { scanSec?: number } = {}): Promise<number> {
   process.umask(0o077);
   const { guard, close } = open(paths, Date.now);
   const markAlive = (): void => {
@@ -451,6 +457,19 @@ export async function serve(paths: GuardPaths, io: Io, signal?: AbortSignal): Pr
   const server = await listen({ guard, socket: paths.socket, socketGid: paths.socketGid, version: VERSION });
   markAlive();
   const timers = [setInterval(markAlive, ALIVE_EVERY_MS), setInterval(() => void guard.sweep(), 15_000)];
+  // Agent watch: a scan at start and then every `scanSec` seconds. A failure of a scan is reported and the next one tries again; it never stops the guard.
+  const scanAgents = (): void => {
+    try {
+      guard.agentsScan({ force: true });
+    } catch (err) {
+      process.stderr.write(`sbb-guard: agent watch scan failed: ${err instanceof Error ? err.message : String(err)}\n`);
+    }
+  };
+  if (guard.agentsEnabled()) {
+    scanAgents();
+    const sec = Number.isFinite(o.scanSec) && (o.scanSec as number) >= 5 ? (o.scanSec as number) : AGENTS_SCAN_SEC;
+    timers.push(setInterval(scanAgents, sec * 1000));
+  }
   io.out(`sbb-guard ${VERSION} listening on ${paths.socket}${guard.totpRegistered() ? "" : " (no second factor yet: run `sbb-guard totp-register`)"}`);
   await new Promise<void>((resolve) => {
     const stop = (): void => resolve();
@@ -480,7 +499,7 @@ export async function main(argv: string[], io: Io = terminalIo): Promise<number>
   }
   let paths: GuardPaths;
   try {
-    paths = resolvePaths({ data: optStr(opts, "data"), socket: optStr(opts, "socket"), socketGid: optStr(opts, "socket-gid"), rpId: optStr(opts, "rp-id"), origin: optStr(opts, "origin") });
+    paths = resolvePaths({ data: optStr(opts, "data"), socket: optStr(opts, "socket"), socketGid: optStr(opts, "socket-gid"), rpId: optStr(opts, "rp-id"), origin: optStr(opts, "origin"), agentsHome: optStr(opts, "agents-home"), agentsRoots: optStr(opts, "agents-root") });
   } catch (err) {
     io.err(err instanceof Error ? err.message : String(err));
     return 64;
@@ -488,7 +507,7 @@ export async function main(argv: string[], io: Io = terminalIo): Promise<number>
   try {
     switch (cmd) {
       case "serve":
-        return await serve(paths, io);
+        return await serve(paths, io, undefined, { scanSec: Number(optStr(opts, "agents-scan-sec") ?? AGENTS_SCAN_SEC) });
       case "totp-register":
         return await totpRegister(paths, io, opts);
       case "totp-disable":

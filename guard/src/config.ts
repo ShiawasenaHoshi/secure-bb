@@ -1,5 +1,5 @@
 // Where the guard keeps things. Never hardcoded in the logic: arguments, then environment, then the documented default.
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 export interface GuardPaths {
   /** Root of the guard's data (default /var/sbb-guard). */
@@ -16,13 +16,18 @@ export interface GuardPaths {
   socketGid: number | null;
   /** The WebAuthn relying party passkeys are bound to. */
   rp: RelyingParty;
+  /** Agent watch: the agents' home, and the extra roots the console names (absolute paths; extending the list is a console matter only). */
+  agentsHome: string;
+  agentsRoots: string[];
 }
 
 export const DEFAULT_DATA_DIR = "/var/sbb-guard";
+/** The agents' home: where the daemon of the agents keeps its settings, and (data/plugins/*\/host-data/workspaces/*) the working directories of threads. */
+export const DEFAULT_AGENTS_HOME = "/var/bbagent";
 /** Outside the data directory: that one is 0700, and the bb user must reach the socket through a directory of its own (0750, owner the guard, group the bb user's). */
 export const DEFAULT_SOCKET = "/var/run/sbb-guard/guard.sock";
 
-export function resolvePaths(opts: { data?: string; socket?: string; socketGid?: string; rpId?: string; origin?: string }, env: Record<string, string | undefined> = process.env): GuardPaths {
+export function resolvePaths(opts: { data?: string; socket?: string; socketGid?: string; rpId?: string; origin?: string; agentsHome?: string; agentsRoots?: string }, env: Record<string, string | undefined> = process.env): GuardPaths {
   const dataDir = opts.data ?? env.SBB_GUARD_DATA ?? DEFAULT_DATA_DIR;
   const stateDir = join(dataDir, "state");
   const gidText = opts.socketGid ?? env.SBB_GUARD_SOCKET_GID;
@@ -38,7 +43,18 @@ export function resolvePaths(opts: { data?: string; socket?: string; socketGid?:
     socket: opts.socket ?? env.SBB_GUARD_SOCKET ?? DEFAULT_SOCKET,
     socketGid,
     rp: resolveRp({ rpId: opts.rpId, origin: opts.origin }, env),
+    agentsHome: absolute(opts.agentsHome ?? env.SBB_GUARD_AGENTS_HOME ?? DEFAULT_AGENTS_HOME, "--agents-home"),
+    agentsRoots: (opts.agentsRoots ?? env.SBB_GUARD_AGENTS_ROOTS ?? "")
+      .split(",")
+      .map((x) => x.trim())
+      .filter((x) => x !== "")
+      .map((x) => absolute(x, "--agents-root")),
   };
+}
+
+function absolute(p: string, flag: string): string {
+  if (!isAbsolute(p)) throw new Error(`${flag} must be an absolute path`);
+  return p.length > 1 ? p.replace(/\/+$/, "") : p;
 }
 
 export const DEFAULT_RP_ID = "localhost";

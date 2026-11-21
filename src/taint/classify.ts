@@ -5,7 +5,7 @@
 
 import { ghTrusted, gitAddressesTrusted, segments } from "./repos.js";
 
-export type TaintKind = "web" | "repo" | "mcp" | "skill" | "env-setup";
+export type TaintKind = "web" | "repo" | "mcp" | "skill" | "env-setup" | "agent-config";
 
 export const TAINT_LABEL: Record<TaintKind, string> = {
   web: "веб (WebFetch/WebSearch, curl/wget)",
@@ -13,6 +13,7 @@ export const TAINT_LABEL: Record<TaintKind, string> = {
   mcp: "инструмент MCP",
   skill: "установка скилла",
   "env-setup": "проект с .bb-env-setup.sh",
+  "agent-config": "критичное изменение конфигурации агента в рабочем каталоге",
 };
 
 export interface EventLike {
