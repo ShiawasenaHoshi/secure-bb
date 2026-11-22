@@ -66,7 +66,7 @@ const TabsTrigger = React.forwardRef<HTMLButtonElement, Omit<React.ButtonHTMLAtt
       aria-controls={`${s.idBase}-p-${value}`}
       tabIndex={active ? 0 : -1}
       data-state={active ? "active" : "inactive"}
-      className={cn("-mb-px inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap border-b-2 border-transparent px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring data-[state=active]:border-foreground data-[state=active]:text-foreground", className)}
+      className={cn("-mb-px inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap border-b-2 px-3 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring", active ? "border-foreground text-foreground" : "border-transparent text-muted-foreground hover:text-foreground", className)}
       onClick={(e) => {
         onClick?.(e);
         if (!e.defaultPrevented) s.setValue(value);
