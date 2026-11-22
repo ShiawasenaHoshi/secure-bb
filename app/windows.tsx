@@ -1,8 +1,9 @@
-import { useRpc } from "@get-bb/plugin-sdk/app";
+import { useState } from "react";
+import { useBbNavigate, useRpc } from "@get-bb/plugin-sdk/app";
 import type { SecureBbRpc } from "../server";
 import type { Overview, WindowView } from "../src/overview";
 import type { ConfigWindowView } from "../src/watch/watchdog";
-import { gapsBySeverity } from "../src/pageview";
+import { gapsBySeverity, OVERLAY_COLLAPSE_KEY, overlayView } from "../src/pageview";
 import { useApproval } from "./approval";
 import { useCodeAction } from "./code";
 import { card, btn, muted, minutes, when, useOverview, useNow, Msg } from "./ui";
@@ -94,14 +95,52 @@ export function AliveAlarm({ ov }: { ov: Overview }) {
   );
 }
 
-/** Always-on-screen strip: open windows are never hidden. */
+/** Where the folded state is kept: the key of the alarm that was folded. A private mode or a full disk must not break the strip. */
+function readCollapsed(): string | null {
+  try {
+    return window.localStorage.getItem(OVERLAY_COLLAPSE_KEY);
+  } catch {
+    return null;
+  }
+}
+function writeCollapsed(key: string | null): void {
+  try {
+    if (key === null) window.localStorage.removeItem(OVERLAY_COLLAPSE_KEY);
+    else window.localStorage.setItem(OVERLAY_COLLAPSE_KEY, key);
+  } catch {
+    /* not remembered: the strip is simply unfolded the next time */
+  }
+}
+
+/**
+ * The strip that floats over every screen of bb: it stays SMALL. The alarm about a pause is one line with a link to the plugin's page (the words and lists are there), «×» folds it
+ * to a red dot in the same corner until a NEW alarm comes; folding hides nothing on the page and confirms nothing. An open trust window is never folded: its row is always here.
+ */
 export function WindowOverlay() {
   const { rpc, data, refetch } = useOverview();
-  if (!data || (data.windows.length === 0 && data.watch.windows.length === 0 && data.journal.ok && gapsBySeverity(data).critical.length === 0 && data.alive.safeMode !== true)) return null;
+  const nav = useBbNavigate();
+  const [stored, setStored] = useState<string | null>(readCollapsed);
+  if (!data) return null;
+  const v = overlayView(data, stored);
+  if (!v.show) return null;
+  const fold = (key: string | null): void => {
+    writeCollapsed(key);
+    setStored(key);
+  };
+  const dotOnly = v.alarmLine !== null && v.collapsed && !v.windows && !v.journalAlarm;
   return (
-    <div className="pointer-events-auto fixed bottom-3 left-3 z-50 max-w-[min(32rem,calc(100vw-1.5rem))] space-y-2 rounded-lg border border-border bg-card p-2 shadow-lg" data-secure-bb-banner>
+    <div className={`pointer-events-auto fixed bottom-3 left-3 z-50 max-w-[min(24rem,calc(100vw-1.5rem))] space-y-2 rounded-lg border border-border bg-card shadow-lg ${dotOnly ? "p-1.5" : "p-2"}`} data-secure-bb-banner>
       <JournalAlarm ov={data} rpc={rpc} refetch={refetch} />
-      <AliveAlarm ov={data} />
+      {v.alarmLine !== null && v.collapsed ? (
+        <button type="button" className="block h-3 w-3 rounded-full bg-destructive" aria-label={`${v.alarmLine}. Развернуть`} title={v.alarmLine} data-secure-bb-alarm-dot onClick={() => fold(null)} />
+      ) : null}
+      {v.alarmLine !== null && !v.collapsed ? (
+        <div className="flex items-center gap-2 text-sm text-destructive" role="alert" data-secure-bb-alarm-line>
+          <span className="min-w-0 flex-1 font-semibold">{v.alarmLine}</span>
+          <button type="button" className="shrink-0 underline hover:no-underline" onClick={() => nav.toPluginPanel("gate")}>Открыть</button>
+          <button type="button" className="shrink-0 px-1 leading-none" aria-label="Свернуть" title="Свернуть (тревога останется на странице secure-bb)" onClick={() => fold(v.alarmKey)}>×</button>
+        </div>
+      ) : null}
       <WindowRows windows={data.windows} cfgWindows={data.watch.windows} rpc={rpc} refetch={refetch} />
     </div>
   );
