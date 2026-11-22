@@ -8,9 +8,9 @@ import { listen } from "../../guard/src/server.ts";
 import { openDb } from "../../guard/src/db.ts";
 import { Guard } from "../../guard/src/guard.ts";
 import { encodeQr as pluginQr } from "../../src/qr.ts";
-import { hotp as pluginHotp, base32Decode as pluginDecode } from "../../src/totp.ts";
+import { hotp as pluginHotp, base32Decode as pluginDecode, otpauthUri as pluginOtpauthUri } from "../../src/totp.ts";
 import { encodeQr as guardQr } from "../../guard/src/qr.ts";
-import { base32Decode, hotp, stepAt } from "../../guard/src/totp.ts";
+import { base32Decode, hotp, otpauthUri, stepAt } from "../../guard/src/totp.ts";
 import { Clock, decideReq, startGuard, type TestGuard } from "./support.ts";
 
 let g: TestGuard;
@@ -678,13 +678,15 @@ describe("serve / status", () => {
 });
 
 describe("agrees with the plugin's own primitives", () => {
-  it("same TOTP codes and same QR matrix as src/totp.ts and src/qr.ts", () => {
-    for (const t of [1_700_000_000_000, 1_800_000_123_456]) {
-      const secret = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
-      expect(hotp(base32Decode(secret), stepAt(t))).toBe(pluginHotp(pluginDecode(secret), stepAt(t)));
-    }
-    const uri = "otpauth://totp/secure-bb:bb?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=secure-bb";
-    expect(guardQr(uri)).toEqual(pluginQr(uri));
+  it("the plugin's totp.ts and qr.ts are the guard's own functions (no copy that could drift); only the issuer of the plugin's own code differs", () => {
+    expect(pluginHotp).toBe(hotp);
+    expect(pluginDecode).toBe(base32Decode);
+    expect(pluginQr).toBe(guardQr);
+    const secret = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+    expect(pluginOtpauthUri(secret)).toContain("issuer=secure-bb");
+    expect(pluginOtpauthUri(secret)).not.toContain("secure-bb-guard");
+    expect(otpauthUri(secret)).toContain("issuer=secure-bb-guard");
+    expect(pluginOtpauthUri(secret, "x")).toBe(otpauthUri(secret, "x"));
   });
 
   it("has no dependencies and imports only node:* and its own files", () => {

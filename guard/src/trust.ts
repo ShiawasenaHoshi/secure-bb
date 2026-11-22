@@ -50,8 +50,13 @@ export interface SourceIdentity {
   id: string;
 }
 
-/** `https://github.com/o/r.git@ref#subdir`, `git@github.com:o/r@ref`, `ssh://git@github.com/o/r`: the host must be exactly github.com. */
-function githubRepo(address: string): string | null {
+/**
+ * The ONE reading of a github.com address as `owner/name` (lower case); the plugin's pollution tracker (`src/taint/repos.ts`) calls it too.
+ * `https://github.com/o/r.git`, `git@github.com:o/r`, `ssh://git@github.com/o/r`: the host must be exactly github.com.
+ * `@ref` is the syntax of bb's PLUGIN SOURCES (`git@github.com:o/r@v1`): only with `allowRef` is it cut off. Anywhere else (an address in a shell command) a name with
+ * `@` is not a repository of GitHub, so it is not one here: the choice that never trusts more (a repo is not «the same» because a suffix was ignored).
+ */
+export function githubRepo(address: string, opts: { allowRef?: boolean } = {}): string | null {
   let host: string;
   let path: string;
   const scp = /^[\w.-]+@([\w.-]+):(.+)$/.exec(address);
@@ -69,10 +74,12 @@ function githubRepo(address: string): string | null {
     }
   }
   if (host.toLowerCase() !== "github.com") return null;
-  const parts = path.replace(/^\/+/, "").split("/");
+  const parts = path.split(/[?#]/)[0]!.replace(/^\/+/, "").split("/");
   if (parts.length < 2) return null;
   const owner = parts[0]!.toLowerCase();
-  const name = parts[1]!.split("@")[0]!.replace(/\.git$/i, "").toLowerCase();
+  const rawName = parts[1]!;
+  if (!opts.allowRef && rawName.includes("@")) return null;
+  const name = rawName.split("@")[0]!.replace(/\.git$/i, "").toLowerCase();
   return OWNER.test(owner) && REPO.test(name) && name !== "." && name !== ".." ? `${owner}/${name}` : null;
 }
 
@@ -85,7 +92,7 @@ export function identityOf(sourceKind: string, source: string): SourceIdentity |
   }
   if (sourceKind === "git") {
     if (!source.startsWith("git:")) return null;
-    const repo = githubRepo(source.slice(4).replace(/#.*$/, "").replace(/\s.*$/, ""));
+    const repo = githubRepo(source.slice(4).replace(/#.*$/, "").replace(/\s.*$/, ""), { allowRef: true });
     return repo === null ? null : { kind: "git", id: `github:${repo}` };
   }
   return null;

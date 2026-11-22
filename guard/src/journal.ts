@@ -5,22 +5,15 @@
 // What this proves and what it does not: it shows edits and deletions made without rewriting everything
 // after them. Whoever can write both files (the guard's own user, or root) can rewrite the whole chain.
 // It is evidence for the owner, not a lock; the lock is that the files belong to a user bb does not run as.
-import { createHash } from "node:crypto";
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import type { DatabaseSync } from "node:sqlite";
 
-export const GENESIS = "0".repeat(64);
+import { entryHash, GENESIS, scanChain, type ChainRow, type JournalHead } from "./journal-chain.ts";
 
-export function entryHash(prev: string, ts: number, kind: string, pluginId: string | null, contentHash: string | null, detail: string | null): string {
-  return createHash("sha256").update(JSON.stringify([prev, ts, kind, pluginId, contentHash, detail])).digest("hex");
-}
-
-export interface JournalHead {
-  id: number;
-  hash: string;
-}
+export { entryHash, GENESIS, type JournalHead };
 
 export type ProblemKind =
+  | "missing-hash" // not met here: the guard's table does not allow a record without a hash (the kind exists because the shared walk can name it)
   | "hash-mismatch" // a record no longer matches its hash
   | "prev-mismatch" // a record does not continue the one before it
   | "tail-removed" // ids were handed out that no longer exist
@@ -39,17 +32,6 @@ export interface JournalReport {
   entries: number;
   head: JournalHead | null;
   problems: JournalProblem[];
-}
-
-interface Row {
-  id: number;
-  ts: number;
-  kind: string;
-  plugin_id: string | null;
-  content_hash: string | null;
-  detail: string | null;
-  prev_hash: string;
-  hash: string;
 }
 
 export function readHead(db: DatabaseSync): JournalHead | null {
@@ -90,18 +72,13 @@ export class HeadFile {
 export function verify(db: DatabaseSync, anchor: HeadFile): JournalReport {
   const problems: JournalProblem[] = [];
   const add = (kind: ProblemKind, id: number | null, detail: string) => problems.push({ kind, id, detail });
-  let entries = 0;
-  let prev = GENESIS;
-  let head: JournalHead | null = null;
-  let maxId = 0;
-  for (const r of db.prepare(`SELECT id, ts, kind, plugin_id, content_hash, detail, prev_hash, hash FROM journal ORDER BY id`).iterate() as Iterable<unknown> as Iterable<Row>) {
-    entries++;
-    maxId = r.id;
-    if (r.prev_hash !== prev) add("prev-mismatch", r.id, `record #${r.id} does not continue the one before it: something was removed, inserted or reordered`);
-    if (entryHash(r.prev_hash, r.ts, r.kind, r.plugin_id, r.content_hash, r.detail) !== r.hash) add("hash-mismatch", r.id, `record #${r.id} (${r.kind}) was changed after it was written`);
-    prev = r.hash; // continue from what is stored: one edit is reported once, not for every record after it
-    head = { id: r.id, hash: r.hash };
+  const scan = scanChain(db.prepare(`SELECT id, ts, kind, plugin_id, content_hash, detail, prev_hash, hash FROM journal ORDER BY id`).iterate() as Iterable<unknown> as Iterable<ChainRow>);
+  for (const b of scan.breaks) {
+    if (b.kind === "prev-mismatch") add("prev-mismatch", b.id, `record #${b.id} does not continue the one before it: something was removed, inserted or reordered`);
+    else if (b.kind === "hash-mismatch") add("hash-mismatch", b.id, `record #${b.id} (${b.recordKind}) was changed after it was written`);
+    else add("missing-hash", b.id, `record #${b.id} (${b.recordKind}) has no hash`);
   }
+  const { entries, head, maxId } = scan;
   const seq = db.prepare(`SELECT seq FROM sqlite_sequence WHERE name = 'journal'`).get() as { seq: number } | undefined;
   if (seq && seq.seq > maxId) add("tail-removed", null, `records were issued up to #${seq.seq}, the last one now is #${maxId}: the tail was removed`);
 

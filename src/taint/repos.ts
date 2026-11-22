@@ -1,6 +1,8 @@
 // Repositories that do not taint a thread («trusted» in the names of the functions below): patterns `owner/name` and `owner/*` (github.com only). A `git clone` of, or a `gh` call on,
 // such a repository is the user's own work and does not taint a thread; anything else with an address does.
 
+import { githubRepo } from "../../guard/src/trust.ts";
+
 export const REPO_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,38})\/(?:\*|[a-z0-9._-]{1,100})$/;
 
 /** Normalised pattern, or null when it is not `owner/name` / `owner/*`. */
@@ -18,33 +20,12 @@ export function isTrustedRepo(slug: string, patterns: readonly string[]): boolea
 const ADDRESS = /\b(?:https?|ssh|git|ftp):\/\/[^\s"']+|\bgit@[\w.-]+:[^\s"']+/gi;
 
 /**
- * `owner/name` of a github.com address; null for other hosts or unparsable ones. The host is read from the parsed address
- * and must be exactly `github.com`: `github.com` in the path (`https://evil.tld/github.com/o/r`), in a longer host name
- * (`github.com.evil.tld`) or in the user part (`github.com@evil.tld`) is not GitHub (threat model F10).
+ * `owner/name` of a github.com address; null for other hosts or unparsable ones. One reading for the guard and the tracker: `githubRepo` in guard/src/trust.ts
+ * (the host is exactly `github.com`; `github.com` in the path, in a longer host name or in the user part is not GitHub: threat model F10).
+ * A `@ref` is no ref in a shell command: such a name is not a repository, so it does not count as a trusted one.
  */
 export function githubSlug(address: string): string | null {
-  let host: string;
-  let path: string;
-  const scp = /^[\w.-]+@([\w.-]+):(.+)$/.exec(address); // git@github.com:owner/name.git
-  if (scp) {
-    host = scp[1]!;
-    path = scp[2]!;
-  } else {
-    try {
-      const u = new URL(address);
-      if (!["https:", "http:", "ssh:", "git:"].includes(u.protocol)) return null;
-      host = u.hostname;
-      path = u.pathname;
-    } catch {
-      return null;
-    }
-  }
-  if (host.toLowerCase() !== "github.com") return null;
-  const parts = path.split(/[?#]/)[0]!.split("/").filter(Boolean);
-  if (parts.length < 2) return null;
-  const owner = parts[0]!;
-  const name = parts[1]!.replace(/\.git$/i, "");
-  return /^[\w.-]+$/.test(owner) && /^[\w.-]+$/.test(name) ? `${owner}/${name}`.toLowerCase() : null;
+  return githubRepo(address);
 }
 
 /** True when the segment has addresses and every one is a trusted github.com repository. */

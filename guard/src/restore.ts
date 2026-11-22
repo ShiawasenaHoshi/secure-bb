@@ -14,7 +14,9 @@ import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs";
 import net from "node:net";
 import { basename, dirname, isAbsolute, join, normalize, sep } from "node:path";
+import { canonicalJson } from "./canonical-json.ts";
 import { chownGroup, SocketGroupError, type ChownFn } from "./chown.ts";
+import { listenLines, probeListener } from "./line-socket.ts";
 import { KEEP_BYTES, MAX_DEPTH, MAX_READ_BYTES, globalKind, workspaceKind } from "./agents-scan.ts";
 
 export const VERSION = "0.1.0";
@@ -410,12 +412,6 @@ export function parseJsonPathRequest(r: Record<string, unknown>): RestoreJsonPat
   return { path: r.path, fileSha256: r.fileSha256, pointer: k as string[], action, ...(r.value !== undefined ? { value: r.value } : {}) };
 }
 
-const stableJson = (v: unknown): string => {
-  if (Array.isArray(v)) return `[${v.map(stableJson).join(",")}]`;
-  if (isPlain(v)) return `{${Object.keys(v).sort().map((x) => `${JSON.stringify(x)}:${stableJson(v[x])}`).join(",")}}`;
-  return JSON.stringify(v) ?? "null";
-};
-
 /** Applies one change to a parsed document. Returns "written" or "absent" (there was nothing to do). Pure; exported for tests and for the guard's own check. */
 export function applyPathChange(doc: Record<string, unknown>, pointer: readonly string[], action: PathAction, value: unknown): RestoreResult {
   const parents: Array<{ holder: Record<string, unknown>; key: string }> = [];
@@ -456,14 +452,14 @@ export function applyPathChange(doc: Record<string, unknown>, pointer: readonly 
         return "written";
       }
       if (!Array.isArray(cur)) throw new RestoreError("invalid", "the key is not a list: refused");
-      if (cur.some((e) => stableJson(e) === stableJson(value))) return "absent";
+      if (cur.some((e) => canonicalJson(e) === canonicalJson(value))) return "absent";
       cur.push(value);
       return "written";
     }
     case "array-remove": {
       const cur = has(holder, last) ? holder[last] : undefined;
       if (!Array.isArray(cur)) return "absent";
-      const at = cur.findIndex((e) => stableJson(e) === stableJson(value));
+      const at = cur.findIndex((e) => canonicalJson(e) === canonicalJson(value));
       if (at < 0) return "absent";
       cur.splice(at, 1);
       if (cur.length === 0) {
@@ -598,15 +594,6 @@ export function answer(home: string, line: string, log: (l: string) => void = ()
   }
 }
 
-/** Asks by connecting (and at once closing): is something already listening there? Not a pure check. */
-function probeListener(path: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const c = net.connect(path);
-    c.once("connect", () => (c.destroy(), resolve(true)));
-    c.once("error", () => resolve(false));
-  });
-}
-
 /**
  * Listens. The socket's directory must not be reachable by "others": a directory that already exists with such a mode is a refusal
  * (the installer makes it 0750, owner the agents' user, group the guard's); a missing one is made 0750 (tests).
@@ -627,31 +614,8 @@ export async function listen(o: ServeOptions): Promise<net.Server> {
   } catch {
     /* there was none */
   }
-  let open = 0;
-  const server = net.createServer((conn) => {
-    if (open >= MAX_CONNECTIONS) return void conn.destroy();
-    open++;
-    conn.once("close", () => open--);
-    conn.setTimeout(o.timeoutMs ?? REQUEST_TIMEOUT_MS, () => conn.destroy());
-    let buf = "";
-    conn.setEncoding("utf8");
-    conn.on("data", (chunk: string) => {
-      buf += chunk;
-      let nl: number;
-      while ((nl = buf.indexOf("\n")) >= 0) {
-        const line = buf.slice(0, nl);
-        buf = buf.slice(nl + 1);
-        if (line.trim() !== "" && !conn.destroyed) conn.write(`${answer(o.home, line, log)}\n`);
-      }
-      if (buf.length > MAX_LINE_BYTES) conn.destroy();
-    });
-    conn.on("error", () => conn.destroy());
-  });
   // The socket is born with the umask's mode: nobody gets in through the directory (0750) before the group and mode below are set.
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(o.socket, resolve);
-  });
+  const server = await listenLines(o.socket, { maxLine: MAX_LINE_BYTES, maxConn: MAX_CONNECTIONS, timeoutMs: o.timeoutMs ?? REQUEST_TIMEOUT_MS, onLine: (line) => answer(o.home, line, log) });
   try {
     if (o.socketGid !== null) chownGroup({ program: "sbb-restore" }, o.socket, o.socketGid, o.chown);
     chmodSync(o.socket, 0o660);

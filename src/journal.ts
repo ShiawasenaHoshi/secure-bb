@@ -7,20 +7,12 @@
 //    rolled back to an older copy, or cut at the tail, no longer matches that file;
 //  - whoever can write both the database and that file (the same OS user, before stage 3) can
 //    rewrite the whole chain consistently. The chain is evidence, not a lock.
-import { createHash } from "node:crypto";
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
+import { entryHash, GENESIS, scanChain, type ChainRow, type JournalHead } from "../guard/src/journal-chain.ts";
 import type { Db } from "./store.js";
 
-export const GENESIS = "0".repeat(64);
+export { entryHash, GENESIS, type JournalHead };
 
-export function entryHash(prev: string, ts: number, kind: string, pluginId: string | null, contentHash: string | null, detail: string | null): string {
-  return createHash("sha256").update(JSON.stringify([prev, ts, kind, pluginId, contentHash, detail])).digest("hex");
-}
-
-export interface JournalHead {
-  id: number;
-  hash: string;
-}
 /** Where the head is kept outside the database (a file next to it). */
 export interface JournalAnchor {
   read(): JournalHead | null;
@@ -51,16 +43,7 @@ export interface JournalReport {
   checkedAt: number;
 }
 
-interface RawRow {
-  id: number;
-  ts: number;
-  kind: string;
-  plugin_id: string | null;
-  content_hash: string | null;
-  detail: string | null;
-  prev_hash: string | null;
-  hash: string | null;
-}
+type RawRow = ChainRow;
 
 export function lastHead(db: Db): JournalHead | null {
   const r = db.prepare(`SELECT id, hash FROM log WHERE hash IS NOT NULL ORDER BY id DESC LIMIT 1`).get() as { id: number; hash: string } | undefined;
@@ -94,25 +77,13 @@ export function sealLegacy(db: Db): number {
 export function verifyChain(db: Db, now: number, anchor?: JournalAnchor | null): JournalReport {
   const problems: JournalProblem[] = [];
   const add = (kind: ProblemKind, id: number | null, detail: string) => problems.push({ kind, id, detail });
-  let entries = 0;
-  let prev = GENESIS;
-  let head: JournalHead | null = null;
-  let maxId = 0;
-
-  const rows = db.prepare(`SELECT id, ts, kind, plugin_id, content_hash, detail, prev_hash, hash FROM log ORDER BY id`).iterate() as Iterable<RawRow>;
-  for (const r of rows) {
-    entries++;
-    maxId = r.id;
-    if (r.hash === null || r.prev_hash === null) {
-      add("missing-hash", r.id, `запись #${r.id} (${r.kind}) без хеша`);
-      continue; // the chain cannot continue through it: the next record will report a break too
-    }
-    if (r.prev_hash !== prev) add("prev-mismatch", r.id, `запись #${r.id} не продолжает предыдущую: между ними что-то удалено, вставлено или переставлено`);
-    const expect = entryHash(r.prev_hash, r.ts, r.kind, r.plugin_id, r.content_hash, r.detail);
-    if (expect !== r.hash) add("hash-mismatch", r.id, `запись #${r.id} (${r.kind}) изменена после записи`);
-    prev = r.hash; // continue from what is stored, so one edit is reported once, not for every record after it
-    head = { id: r.id, hash: r.hash };
+  const scan = scanChain(db.prepare(`SELECT id, ts, kind, plugin_id, content_hash, detail, prev_hash, hash FROM log ORDER BY id`).iterate() as Iterable<RawRow>);
+  for (const b of scan.breaks) {
+    if (b.kind === "missing-hash") add("missing-hash", b.id, `запись #${b.id} (${b.recordKind}) без хеша`);
+    else if (b.kind === "prev-mismatch") add("prev-mismatch", b.id, `запись #${b.id} не продолжает предыдущую: между ними что-то удалено, вставлено или переставлено`);
+    else add("hash-mismatch", b.id, `запись #${b.id} (${b.recordKind}) изменена после записи`);
   }
+  const { entries, head, maxId } = scan;
 
   const seq = db.prepare(`SELECT seq FROM sqlite_sequence WHERE name = 'log'`).get() as { seq: number } | undefined;
   if (seq && seq.seq > maxId) add("tail-removed", null, `выдано записей до #${seq.seq}, последняя сейчас #${maxId}: хвост журнала удалён`);
