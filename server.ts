@@ -18,7 +18,7 @@ import { AgentWatchLink, type AgentThreadSource } from "./src/agents.js";
 import { AgentStopper } from "./src/stop.js";
 import { agentAcceptProblem } from "./src/ux.js";
 import { GuardLink, GuardLinkError, guardSocketFromEnv, type GuardAction, type GuardPolicy, type GuardProof, type GuardQueueEntry, type PasskeyAssertion } from "./src/guardlink.js";
-import { MODE_RANK, normalizeEntry } from "./guard/src/trust.ts";
+import { MODE_RANK, liftBlock, normalizeEntry } from "./guard/src/trust.ts";
 import { buildExport, writeExport } from "./src/export.js";
 import { localCheckKey } from "./src/decision.js";
 import { mintListProof } from "./src/approval.js";
@@ -666,6 +666,10 @@ export default async function plugin(bb: BbPluginApi) {
     const f = await entryFacts(q);
     if (f.unsafeDir) throw new GateError("invalid", "this version lies in a directory that others can write to; it cannot be approved from there (see the page)", { unsafeDir: true });
     if (f.blocked && !acknowledgeBlock) throw new GateError("invalid", "this version was blocked by the checks; confirm that you accept the risk to approve it anyway", { blocked: true });
+    // The guard's own facts (the same function it applies): a hard flag it found, or a version it did not read, is lifted only with the page's «accept the risk» and a fresh touch.
+    const lift = liftBlock(q, null);
+    if (lift.never) throw new GateError("invalid", "the directory's hash did not match the request's: this version is never approved (reinstall the plugin from its source)");
+    if (lift.needsAck && !acknowledgeBlock) throw new GateError("invalid", "the guard found a hard flag in this version or did not read it; confirm that you accept the risk to approve it anyway", { blocked: true });
     // Lifting a stop is always a fresh touch: the guard also refuses a session for it, in Strict mode, and on a hash mismatch (here only the way is shortened).
     if (acknowledgeBlock === true && typeof proof === "object" && "session" in proof) throw new GateError("invalid_code", "lifting a block needs a fresh code or a touch: a session does not cover it");
     await link.approve(id, proof, { acknowledgeBlock: acknowledgeBlock === true });

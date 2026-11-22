@@ -326,6 +326,9 @@ export interface QueueRow {
   proposalId: number | null;
   status: "held" | "approved" | "dismissed" | "stale";
   reason: string | null;
+  /** From the guard's entry (guard mode): the facts its own reading found. Absent for the plugin's own rows (no guard) and for a guard that predates them. */
+  reasonKind?: string | null;
+  blocks?: string[] | null;
   firstSeen: number;
   lastSeen: number;
 }

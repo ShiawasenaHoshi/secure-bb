@@ -304,6 +304,9 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
         proposalId: proposal?.id ?? null,
         status: g.status,
         reason: g.note ?? (typeof note?.reason === "string" ? note.reason : null),
+        // The guard's facts, not its words: a guard that predates them sends none, and then the entry counts as not read.
+        reasonKind: g.reasonKind ?? null,
+        blocks: g.blocks ?? null,
         firstSeen: g.firstSeen,
         lastSeen: g.lastSeen,
       });

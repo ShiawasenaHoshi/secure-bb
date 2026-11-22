@@ -4,7 +4,7 @@ import type { Overview } from "../src/overview";
 import type { QueueRow } from "../src/store";
 import type { QueueUx } from "../src/uxview";
 import { approvedNote, uniqueSentences, capsWithPaths, redWhere, cardFoldId, cardKey, capabilitySegments, cardColor, detailLevel, MISMATCH_HINT, cardRisk, FREQ_BUTTON, FREQ_NOT_NOW, type FreqHint, bypassAllowed, mismatchText, redText, yellowText, actionLabel, deleteConfirmText, deletedNote, trustButton, windowAvailability } from "../src/ux";
-import { isMismatch, approveVerb, enabledWhat, agentConfigNote, scopeText, meaningfulCaps } from "../src/ux";
+import { isMismatchEntry, approveVerb, enabledWhat, agentConfigNote, scopeText, meaningfulCaps } from "../src/ux";
 import { Card } from "../components/ui/card";
 import { DELETE_CONFIRM_BUTTONS, hasNoGuardRecord, NO_RECORD_FIX, NO_RECORD_HEADLINE, NO_RECORD_LINE } from "../src/ux";
 import { ChecksView } from "./checks";
@@ -118,18 +118,18 @@ export function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onKeep, onT
   const found = ov.queueChecks[q.id] ?? (q.contentHash ? ov.checks[q.contentHash] : undefined);
   const ux = ov.ux[q.id];
   const detail = detailLevel(ov.guard?.trust?.mode ?? null);
-  const color = cardColor({ reason: q.reason, findings: found?.findings ?? [] });
+  const color = cardColor({ reason: q.reason, reasonKind: q.reasonKind, blocks: q.blocks, findings: found?.findings ?? [] });
   const unsafeDir = q.reason?.startsWith("каталог доступен на запись другим") ?? false;
   const caps = capsWithPaths(found);
   const red = color === "red";
-  const text = isMismatch(q.reason)
+  const text = isMismatchEntry(q)
     ? mismatchText(q.pluginId, q.version)
     : red
     ? (() => {
         const r = redText((found?.findings ?? []).filter((f) => f.severity === "block").map((f) => f.rule));
         return { title: `Остановлено: ${r.title}`, line: `Плагин «${q.pluginId}» ${q.version}. ${r.line}${redWhere(caps) ? ` ${redWhere(caps)}` : ""} Плагин не запущен.` };
       })()
-    : yellowText({ pluginId: q.pluginId, version: q.version, level: ux?.level ?? "unknown", sourceLabel: ux?.sourceLabel ?? q.source, reason: q.reason, caps });
+    : yellowText({ pluginId: q.pluginId, version: q.version, level: ux?.level ?? "unknown", sourceLabel: ux?.sourceLabel ?? q.source, reason: q.reason, reasonKind: q.reasonKind, caps });
   // A version the guard has no record of (it loaded without the guard's check): nothing here can approve it, and a green «можно включить» would be a lie.
   const noRecord = hasNoGuardRecord(q);
   const risk = noRecord ? { level: "caution" as const, text: NO_RECORD_HEADLINE } : cardRisk(q, found, ov.policy.flowDowngrade);
@@ -177,7 +177,7 @@ export function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onKeep, onT
         <SourceChip ux={ux} q={q} />
         <Origin ux={ux} />
       </div>
-      {red || isMismatch(q.reason) ? <p className="mt-3 font-medium text-destructive">{text.title}</p> : null}
+      {red || isMismatchEntry(q) ? <p className="mt-3 font-medium text-destructive">{text.title}</p> : null}
       <p className="mt-3" data-secure-bb-why>
         {why.byAuthor ? <><em>«{why.text}»</em> <span className={`text-xs ${muted}`}>— со слов автора, не проверено</span></> : red || noRecord ? <Emph text={noRecord ? NO_RECORD_LINE : text.line} /> : <Emph text={why.text} />}
       </p>
@@ -279,7 +279,7 @@ export function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onKeep, onT
             <p className="break-all text-xs">{q.sourceKind}: {q.source} · версия {q.version}{q.trigger ? ` · ${q.trigger}` : ""}</p>
             {q.reason ? <p className="text-xs">Причина: {q.reason}</p> : null}
             {detail.hashes && q.contentHash ? <p className="break-all font-mono text-xs">{q.contentHash}</p> : null}
-            {red && bypassAllowed(ov.guard?.trust?.mode ?? null, q.reason) ? (
+            {red && bypassAllowed(ov.guard?.trust?.mode ?? null, q) ? (
               <Fold id={cardFoldId(q, "bypass")} className="mt-2 rounded-md border border-destructive p-2" summaryClassName="cursor-pointer text-destructive" summary="Всё равно разрешить…">
                 <p className="mt-2">Так ведут себя вредоносные плагины. Разрешайте, только если вы сами написали этот плагин и знаете, почему проверки сработали. Для этого нужны касание и имя плагина.</p>
                 <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -291,8 +291,8 @@ export function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onKeep, onT
                 </div>
               </Fold>
             ) : null}
-            {red && isMismatch(q.reason) ? <p className={`mt-2 ${muted}`}>{MISMATCH_HINT}</p> : null}
-            {red && !isMismatch(q.reason) && !detail.bypass ? <p className={`mt-2 ${muted}`}>В режиме «Строгий» обойти остановку нельзя. Чтобы разрешить, сначала ослабьте режим (касанием) на вкладке «Доверие и исключения».</p> : null}
+            {red && isMismatchEntry(q) ? <p className={`mt-2 ${muted}`}>{MISMATCH_HINT}</p> : null}
+            {red && !isMismatchEntry(q) && !detail.bypass ? <p className={`mt-2 ${muted}`}>В режиме «Строгий» обойти остановку нельзя. Чтобы разрешить, сначала ослабьте режим (касанием) на вкладке «Доверие и исключения».</p> : null}
           </TabsContent>
         </Tabs>
       </FoldAccordion>

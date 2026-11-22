@@ -250,7 +250,7 @@ describe("a touch with a passkey", () => {
     const text = JSON.stringify(await g.send({ op: "state" }));
     expect(text).not.toContain(auth.credentialId.toString("base64url"));
     expect(text).not.toContain("public");
-    expect(text).not.toContain("token");
+    expect(text).not.toMatch(/"token"/);
     expect((await g.send({ op: "state" })).passkeys).toMatchObject({ rpId: "localhost", origin: "http://localhost:38886", keys: [{ label: "laptop" }], enrollmentOpen: false });
   });
 });

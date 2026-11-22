@@ -4,7 +4,7 @@ import type { SecureBbRpc } from "../server";
 import type { Overview } from "../src/overview";
 import type { QueueRow } from "../src/store";
 import { cardFoldId, isBlockedEntry, MISMATCH_HINT } from "../src/ux";
-import { isMismatch } from "../src/ux";
+import { isMismatchEntry } from "../src/ux";
 import { useApproval, RoutineCode } from "./approval";
 import { ChecksView } from "./checks";
 import { useCodeAction, usePasskey, TouchNote, touchFor } from "./code";
@@ -22,7 +22,7 @@ export function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; 
   const unsafeDirNow = q.reason?.startsWith("каталог доступен на запись другим") ?? false;
   const ap = useApproval();
   const found = ov.queueChecks[q.id];
-  const blocked = isBlockedEntry({ reason: q.reason, findings: found?.findings ?? [] });
+  const blocked = isBlockedEntry({ reason: q.reason, reasonKind: q.reasonKind, blocks: q.blocks, findings: found?.findings ?? [] });
   const [ack, setAck] = useState(false);
   // Lifting a block is dangerous: it needs a fresh code even with a session open.
   const liftingBlock = blocked && ack;
@@ -76,7 +76,7 @@ export function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; 
                 <span className={muted}>Без кода: отклонение только ужесточает.</span>
                 <ScanButton ov={ov} target={{ queueId: q.id }} rpc={rpc} refetch={refetch} />
               </div>
-              {isMismatch(q.reason) ? <p className={muted}>{MISMATCH_HINT}</p> : <Fold id={cardFoldId(q, "force")} className="rounded-md border border-destructive p-2" summaryClassName="cursor-pointer text-destructive" summary="Всё равно одобрить (опасно)…">
+              {isMismatchEntry(q) ? <p className={muted}>{MISMATCH_HINT}</p> : <Fold id={cardFoldId(q, "force")} className="rounded-md border border-destructive p-2" summaryClassName="cursor-pointer text-destructive" summary="Всё равно одобрить (опасно)…">
                 <div className="mt-2 flex flex-wrap items-center gap-2">
                   {pk.keyOnly ? null : <RoutineCode value={code} onChange={setCode} dangerous />}
                   <label className="flex items-center gap-1 text-xs">

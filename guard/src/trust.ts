@@ -154,3 +154,38 @@ export const hardFlags = (r: CheckResult): Finding[] => r.findings.filter((f) =>
 export function brief(items: string[], max = 4): string {
   return items.slice(0, max).join(", ") + (items.length > max ? ` и ещё ${items.length - max}` : "");
 }
+
+// ---- what may lift a held version: the guard's facts, not a note's words ------------------------------------------------------------
+/** Why a version is held (the guard's own reading). `mismatch`: the directory's hash is not the request's; `block`: a hard flag; `growth`: a new right. */
+export const REASON_KINDS = ["mismatch", "block", "growth", "unknown-source", "strict", "first", "other"] as const;
+export type ReasonKind = (typeof REASON_KINDS)[number];
+export const isReasonKind = (x: unknown): x is ReasonKind => typeof x === "string" && (REASON_KINDS as readonly string[]).includes(x);
+
+export interface LiftInput {
+  /** Absent (an entry older than the column, or from a guard that predates it): unknown. */
+  reasonKind?: string | null;
+  /** The hard flags the guard's own `evaluate` found. `null` or absent: the guard did not read the version, so a block may be there. */
+  blocks?: string[] | null;
+}
+export interface Lift {
+  /** Never: the directory is not what the request says (reinstall). */
+  never: boolean;
+  /** A hard flag is there, or may be (not read): approving takes `acknowledgeBlock` AND a fresh touch; a session never covers it. */
+  needsAck: boolean;
+  /** Why `needsAck`: `block` (flags found) or `unread` (nothing was read). */
+  why: "mismatch" | "block" | "unread" | null;
+  /** Strict mode lets no block be lifted. */
+  refusedByMode: boolean;
+}
+/**
+ * The ONE rule of lifting a stop, used by the guard (`approve`, batch, «Вернуть», «доверять источнику») and by the page (the buttons it shows).
+ * It reads facts: `reasonKind === "mismatch"`, a non-empty `blocks`, or `blocks` not read at all. A note's text is never looked at.
+ */
+export function liftBlock(e: LiftInput, mode: TrustMode | null): Lift {
+  const kind = e.reasonKind ?? null;
+  if (kind === "mismatch") return { never: true, needsAck: true, why: "mismatch", refusedByMode: false };
+  const unread = e.blocks === null || e.blocks === undefined;
+  const found = !unread && (e.blocks as string[]).length > 0;
+  const needsAck = unread || found || kind === "block";
+  return { never: false, needsAck, why: !needsAck ? null : found || kind === "block" ? "block" : "unread", refusedByMode: needsAck && mode === "strict" };
+}
