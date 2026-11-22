@@ -43,6 +43,28 @@ const pressedLabel = (): string => {
   return text || "Подтвердите действие";
 };
 
+type Tried<T> = { ran: true; value: T } | { ran: false };
+
+/**
+ * An action that may only tighten needs no touch, and then runs at once, with no dialog. The guard says so when asked; without a guard the action itself is tried
+ * with no proof, and only an answer «a code or a touch is needed» (it widens) sends the person to the dialog.
+ */
+async function tryWithoutProof<T>(ov: Overview, rpc: Rpc, query: TouchQuery, call: (proof: AnyProof) => Promise<T>): Promise<Tried<T>> {
+  let widens = false;
+  if (ov.guard) {
+    const c = await rpc.call("passkey.challenge", query as never).catch(() => null);
+    if (c && !c.needed) return { ran: true, value: await call({}) };
+    widens = c !== null && c.needed;
+  }
+  if (widens) return { ran: false };
+  try {
+    return { ran: true, value: await call({}) };
+  } catch (e) {
+    if (!NEEDS_PROOF.test(e instanceof Error ? e.message : String(e))) throw e;
+    return { ran: false };
+  }
+}
+
 export function useProof(ov: Overview, rpc: Rpc, draftKey?: string): ProofHook {
   const ap = useApproval();
   const ask = useAskConfirm();
@@ -56,21 +78,8 @@ export function useProof(ov: Overview, rpc: Rpc, draftKey?: string): ProofHook {
   const run: ProofHook["run"] = async (query, call, o = {}) => {
     if (viaSession(o)) return await ap.routine("", (p) => call(p as AnyProof), o.dangerous);
     if (o.optional) {
-      // An action that may only tighten needs no touch, and then runs at once, with no dialog. The guard says so when asked; without a guard the action itself is tried
-      // with no proof, and only an answer «a code or a touch is needed» (it widens) sends the person to the dialog.
-      let widens = false;
-      if (ov.guard) {
-        const c = await rpc.call("passkey.challenge", query as never).catch(() => null);
-        if (c && !c.needed) return await call({});
-        widens = c !== null && c.needed;
-      }
-      if (!widens) {
-        try {
-          return await call({});
-        } catch (e) {
-          if (!NEEDS_PROOF.test(e instanceof Error ? e.message : String(e))) throw e;
-        }
-      }
+      const tried = await tryWithoutProof(ov, rpc, query, call);
+      if (tried.ran) return tried.value;
     }
     return (await ask({ what: o.what ?? pressedLabel(), ...(o.detail ? { detail: o.detail } : {}), query, draftKey: key, call: (p) => call(p as AnyProof) })) as Awaited<ReturnType<typeof call>>;
   };

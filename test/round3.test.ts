@@ -156,7 +156,7 @@ describe("5. the same sentence once; no dead button", () => {
   });
   it("a button that would add nothing is not shown", () => {
     expect(trustButton({ entry: "path:/x", level: "own", queueId: 4 }).enabled).toBe(false);
-    expect(app).toMatch(/\{trust\.enabled \? \(?\s*<(Tip|Button|button)/);
+    expect(app).toMatch(/\{(v\.)?trust\.enabled \? \(?\s*<(Tip|Button|button)/);
   });
 });
 
@@ -221,7 +221,9 @@ describe("8. who, when and how", () => {
     expect(rejectedAtOf(q, [])).toBe(q.lastSeen);
   });
   it("a rejected change of the agents' files says when and by which button", () => {
-    expect(app).toContain("кнопкой «Это не я»");
+    // the sentence is built in src/ux/agents-copy.ts (rejectedDriftText); the page calls it
+    expect(app).toContain("rejectedDriftText(");
+    expect(readFileSync(new URL("../src/ux/agents-copy.ts", import.meta.url), "utf8")).toContain("кнопкой «Это не я»");
     expect(app).toMatch(/принято вами/);
   });
 });

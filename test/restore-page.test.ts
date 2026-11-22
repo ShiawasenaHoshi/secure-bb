@@ -1,9 +1,12 @@
 // The page's card of a critical change (app.tsx): buttons instead of a manual instruction (principle «автоматически по умолчанию, подробности по кнопке»).
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { appFile } from "./support/app-source";
 
 const app = appFile("agents.tsx");
-const card = app.slice(app.indexOf("function CriticalAccept("), app.indexOf("function AgentsSection("));
+// the card of a critical change: its actions, the restore block, «Остановить агентов» and the fold with the manual instruction
+const card = app.slice(app.indexOf("type Crit ="), app.indexOf("type AgentsState"));
+const words = readFileSync(new URL("../src/ux/agents-copy.ts", import.meta.url), "utf8");
 
 describe("the card of a critical change", () => {
   it("has the two buttons and the words of the design", () => {
@@ -27,7 +30,8 @@ describe("the card of a critical change", () => {
   });
 
   it("says plainly when the file cannot be put back automatically, with the guard's reason", () => {
-    expect(card).toContain("Автоматически вернуть этот файл нельзя");
+    expect(card).toContain("noRestoreText(");
+    expect(words).toContain("Автоматически вернуть этот файл нельзя");
     expect(card).toContain("d.restorable.reason");
   });
 
