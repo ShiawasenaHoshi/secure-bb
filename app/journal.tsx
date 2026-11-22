@@ -46,7 +46,7 @@ export function LogCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<ty
   return (
     <div className={card}>
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className={j.ok ? "text-green-600" : "font-semibold text-destructive"}>
+        <p className={j.ok ? "text-foreground" : "font-semibold text-destructive"}>
           {j.ok ? `Цепочка хешей цела: ${j.entries} записей, голова ${j.head ?? "—"}` : `Цепочка НАРУШЕНА (${j.problems.length}), записей ${j.entries}`}
         </p>
         <button className={btn} disabled={act.busy} onClick={() => void act.run(async () => rpc.call("journal.verify"))}>Проверить целостность</button>

@@ -46,7 +46,7 @@ export function PluginRow({ p, ov, rpc, refetch, registered, checks }: { p: Plug
           {p.pin ? `${p.frozenPin ? "закреплена при заморозке" : "пин"}: ${p.pin.version} (${approvedByText(p.pin, now)})` : p.unreviewedBaseline ? "стоял до secure-bb, не проверялся" : "не одобрен"}
         </span>
       </div>
-      {launchProblem(p) && p.pin ? <p className="mt-1 font-semibold text-red-700 dark:text-red-400" role="alert">{launchProblem(p)}</p> : null}
+      {launchProblem(p) && p.pin ? <p className="mt-1 font-semibold text-destructive" role="alert">{launchProblem(p)}</p> : null}
       <p className={muted}>{p.window ? windowLine(p.window, remaining) : "окно закрыто"}</p>
       {!p.window ? <PluginWindowOpen p={p} ov={ov} rpc={rpc} refetch={refetch} /> : null}
       {p.pin ? <ChecksView id={`plugin-${p.id}`} result={checks[p.pin.contentHash]} /> : null}

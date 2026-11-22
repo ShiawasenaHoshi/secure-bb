@@ -15,8 +15,8 @@ import { card, btn, btnPrimary, input, muted, cardBlocked, btnDanger, when, useS
 export const CLASS_LABEL: Record<string, string> = { critical: "критично", instructions: "инструкции", other: "прочее" };
 
 export const CLASS_STYLE: Record<string, string> = {
-  critical: "border-red-600 bg-red-50 text-red-950 dark:border-red-500 dark:bg-red-950/40 dark:text-red-100",
-  instructions: "border-yellow-500/70",
+  critical: "border-destructive bg-destructive/10 text-destructive",
+  instructions: "border-border",
   other: "border-border",
 };
 
@@ -25,7 +25,7 @@ export const alarmText = (x: { kind: string; error: string }): string => (x.kind
 
 export const CHANGE_LABEL: Record<string, string> = { added: "новый файл", changed: "изменён", removed: "удалён" };
 
-export const SEVERITY_STYLE: Record<string, string> = { block: "font-semibold text-red-700 dark:text-red-400", review: "text-yellow-700 dark:text-yellow-400", info: muted };
+export const SEVERITY_STYLE: Record<string, string> = { block: "font-semibold text-destructive", review: "text-foreground", info: muted };
 
 /** The alarms of the watch: always on top of the page, not only in its section. */
 export function AgentsAlarm({ ov, onShow }: { ov: Overview; onShow: () => void }) {
@@ -176,8 +176,8 @@ export function PartsPanel({ d, ov, rpc, refetch, canCode, pk }: { d: AgentDrift
           return (
             <li key={p.id} className="rounded-md border border-border p-2" data-agent-part={p.id}>
               <p className="break-all">{partTitle(p)}</p>
-              {fresh ? <p className="text-xs font-semibold text-red-800 dark:text-red-300">{PART_FRESH_NOTE} {p.danger}</p> : null}
-              {p.restorable && p.backDanger !== null ? <p className="text-xs font-semibold text-red-800 dark:text-red-300">{PART_BACK_FRESH_NOTE} {p.backDanger}</p> : null}
+              {fresh ? <p className="text-xs font-semibold text-destructive">{PART_FRESH_NOTE} {p.danger}</p> : null}
+              {p.restorable && p.backDanger !== null ? <p className="text-xs font-semibold text-destructive">{PART_BACK_FRESH_NOTE} {p.backDanger}</p> : null}
               <div className="mt-1 flex flex-wrap items-center gap-2">
                 {fresh && pk.has ? (
                   <button className={btnDanger} disabled={act.busy || pk.problem !== null} onClick={() => keep(p, "passkey")}>{PART_KEEP}: касанием</button>
@@ -271,8 +271,8 @@ export function CriticalAccept({ d, ov, rpc, refetch, canCode, pk }: { d: AgentD
   );
   const stop = ov.agents?.stop;
   return (
-    <div className="mt-2 rounded-md border border-red-400 p-2 dark:border-red-700" data-agent-critical-accept={d.id}>
-      <p className="font-semibold text-red-800 dark:text-red-300"><Rich text={title} /></p>
+    <div className="mt-2 rounded-md border border-destructive p-2" data-agent-critical-accept={d.id}>
+      <p className="font-semibold text-destructive"><Rich text={title} /></p>
       {d.rejected ? <p className="mt-1 text-xs">Вы отклонили это изменение{d.rejectedAt ? ` (${clockText(d.rejectedAt, Date.now())}, кнопкой «Это не я»)` : ""}: в одобренные настройки оно не попало. Но в самом файле оно всё ещё есть, поэтому тревога и пометка «под подозрением» остаются.</p> : null}
       {restorable ? (
         <div className="mt-2" data-agent-restore={d.id}>
@@ -422,7 +422,7 @@ export function AgentsSection({ ov, rpc, refetch, showDone }: { ov: Overview; rp
         <ul className={`list-disc pl-5 text-xs ${muted}`}>{st.notes!.map((n, i) => <li key={i} className="break-all">{n.text}</li>)}</ul>
       ) : null}
       {firstBaseline ? (
-        <div className={`${card} space-y-2 border-yellow-500/70`}>
+        <div className={`${card} space-y-2 border-border`}>
           <h3 className="font-semibold">Первые одобренные настройки</h3>
           <p>Первый просмотр нашёл {pending} файлов. Если всё это — как должно быть, примите их как есть одним касанием; дальше каждое расхождение будет ждать решения.{criticalCount > 0 ? ` Критичных среди них ${criticalCount}: каждое принимается отдельно, ниже, со своим касанием и своим объяснением, что именно вы разрешаете.` : ""}</p>
           {buttons(plain, "Принять всё как есть")}

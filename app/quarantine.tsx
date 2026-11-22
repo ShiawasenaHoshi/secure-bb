@@ -41,7 +41,7 @@ export function QuarantineRow({ q, ov, rpc, refetch, onTrustPending, onShowCard,
     <div className={red ? cardBlocked : card} id={`sbb-quarantine-${q.id}`}>
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h3 className="font-semibold">{q.pluginId} <span className={muted}>{q.version}</span></h3>
-        <span className={red && !kept ? "font-semibold text-red-700 dark:text-red-400" : muted}>{kept ? "оставлен вами в карантине" : red ? "остановлен" : "ждёт решения"} · {when(q.firstSeen)}</span>
+        <span className={red && !kept ? "font-semibold text-destructive" : muted}>{kept ? "оставлен вами в карантине" : red ? "остановлен" : "ждёт решения"} · {when(q.firstSeen)}</span>
       </div>
       {kept ? <p className="mt-1">Вы решили оставить его здесь: он не запущен и больше не отмечен как нерешённый. <button className={btn} onClick={() => onUnkeep(q)}>Вернуть в «Ждут решения»</button></p> : null}
       <AuthorWhy why={ux?.why} />

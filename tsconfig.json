@@ -17,6 +17,9 @@
     "paths": {
       "acorn": [
         "./guard/vendor/acorn.d.mts"
+      ],
+      "@/*": [
+        "./*"
       ]
     },
     "allowImportingTsExtensions": true
@@ -26,6 +29,9 @@
     "app.tsx",
     "src",
     "test",
-    "guard"
+    "guard",
+    "components",
+    "lib",
+    "hooks"
   ]
 }

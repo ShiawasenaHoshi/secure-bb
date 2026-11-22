@@ -8,6 +8,7 @@ import type { PasskeyAssertion } from "../src/guardlink";
 import { humanError, firstButtonAfter, startTouchNote } from "../src/ux";
 import { createDrafts } from "../src/drafts";
 import { pressTracker } from "../src/stable-view";
+import { ConfirmCancelled } from "./confirm-dialog";
 import { card, input, muted, DoneContext, LOCK_MS } from "./ui";
 
 // What was typed in a code field lives OUTSIDE the components, by the id of the card: a refresh of the data, or a card that is built again, does not take it away.
@@ -62,6 +63,8 @@ export function useCodeAction(refetch: () => void, opts: { pin?: boolean; slot?:
       }
       refetch();
     } catch (e) {
+      // The person closed the confirmation dialog: they changed their mind, nothing went wrong.
+      if (e instanceof ConfirmCancelled) return;
       // The server's words are English and have inner names in them: the person reads a Russian sentence; the original goes to the console for whoever looks.
       const raw = e instanceof Error ? e.message : String(e);
       console.error("[secure-bb]", raw);

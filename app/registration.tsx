@@ -7,7 +7,7 @@ import { T } from "../src/text";
 import { useCodeAction, CodeField } from "./code";
 import { card, btnPrimary, muted, Fold, Msg } from "./ui";
 
-export const dot: Record<string, string> = { ok: "bg-green-500", warn: "bg-yellow-500", bad: "bg-red-500", unknown: "bg-gray-400" };
+export const dot: Record<string, string> = { ok: "bg-foreground", warn: "bg-muted-foreground", bad: "bg-destructive", unknown: "bg-gray-400" };
 
 export function StageCard({ ov }: { ov: Overview }) {
   const a = ov.assessment;
@@ -19,7 +19,7 @@ export function StageCard({ ov }: { ov: Overview }) {
         <span className={muted}>{ov.hookRegistered ? "проверка до загрузки кода" : "режим «после факта»"}</span>
       </div>
       {a.honest.map((h) => (
-        <p key={h} className="mt-2 rounded-md border border-yellow-500/40 bg-yellow-500/10 p-2">
+        <p key={h} className="mt-2 rounded-md border border-border bg-muted p-2">
           {h}
         </p>
       ))}
@@ -136,8 +136,9 @@ export function QrSvg({ matrix }: { matrix: boolean[][] }) {
   );
   return (
     <svg viewBox={`0 0 ${n} ${n}`} className="size-56 max-w-full rounded-md border border-border" role="img" aria-label="QR-код для приложения-аутентификатора" shapeRendering="crispEdges">
-      <rect width={n} height={n} fill="#fff" />
-      <g fill="#000">{cells}</g>
+      {/* A QR code is dark on light in both themes (a scanner reads that polarity only): named colors on purpose, not the theme's. */}
+      <rect width={n} height={n} fill="white" />
+      <g fill="black">{cells}</g>
     </svg>
   );
 }

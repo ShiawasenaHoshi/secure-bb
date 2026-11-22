@@ -1,10 +1,11 @@
-import { useId, useState } from "react";
+import { useId } from "react";
 import type { Overview } from "../src/overview";
 import { T } from "../src/text";
 import type { PasskeyAssertion } from "../src/guardlink";
 import { glossSegments, emphasize, proofHint } from "../src/ux";
-import { useApproval, RoutineCode } from "./approval";
-import { useDraftCode, CodeField, type Rpc, type PasskeyState, usePasskey, type TouchQuery, TouchNote, touchFor } from "./code";
+import { useApproval } from "./approval";
+import { drafts, CodeField, type Rpc, type PasskeyState, usePasskey, type TouchQuery } from "./code";
+import { useAskConfirm } from "./confirm-dialog";
 import { card, muted, when } from "./ui";
 
 export const lsGet = (k: string): string | null => {
@@ -26,58 +27,58 @@ export const lsSet = (k: string, v: string): void => {
 
 export type AnyProof = { code?: string; session?: string; passkey?: PasskeyAssertion };
 
-export interface ProofHook {
-  code: string;
-  setCode: (v: string) => void;
-  pk: PasskeyState;
-  touching: string | null;
-  registered: boolean;
-  /** Can the action start with what is typed now? */
-  ready: (o?: { routine?: boolean; dangerous?: boolean }) => boolean;
-  /** Runs an action with a touch (a key, if there is one and no code typed) or a code (or a session, for a routine action). */
-  run: <T>(query: TouchQuery, call: (proof: AnyProof) => Promise<T>, o?: { routine?: boolean; dangerous?: boolean }) => Promise<T>;
+export interface ProofOpts {
+  routine?: boolean;
+  dangerous?: boolean;
+  /** What the dialog says is being approved («Разрешить chime 0.1.0»). Default: the words of the button that was pressed. */
+  what?: string;
+  /** One more line under it: what gets more dangerous. */
+  detail?: string;
 }
+
+export interface ProofHook {
+  /** The draft of the code the dialog works with (a card has no field of its own any more). */
+  clearDraft: () => void;
+  pk: PasskeyState;
+  registered: boolean;
+  /** Can the action start? A second factor is set up; the code or the touch is asked for by the dialog. */
+  ready: (o?: ProofOpts) => boolean;
+  /**
+   * Runs an action: with the open session when it is a routine one (no question), otherwise through the confirmation dialog
+   * (a touch or a code; its error stays in the dialog). Closing the dialog rejects with ConfirmCancelled, which the action runner ignores.
+   */
+  run: <T>(query: TouchQuery, call: (proof: AnyProof) => Promise<T>, o?: ProofOpts) => Promise<T>;
+}
+
+const pressedLabel = (): string => {
+  const el = typeof document !== "undefined" ? (document.activeElement as HTMLElement | null) : null;
+  const text = el && el.tagName === "BUTTON" ? (el.textContent ?? "").replace(/\s+/g, " ").trim() : "";
+  return text || "Подтвердите действие";
+};
 
 export function useProof(ov: Overview, rpc: Rpc, draftKey?: string): ProofHook {
   const ap = useApproval();
+  const ask = useAskConfirm();
   const pk = usePasskey(ov);
   const ownKey = useId();
-  const [code, setCode] = useDraftCode(draftKey ?? ownKey);
-  const [touching, setTouching] = useState<string | null>(null);
+  const key = draftKey ?? ownKey;
   const registered = ov.totp.state === "locked" || ov.totp.state === "external";
   // An open session covers a routine action: no touch and no code (with a key too). The dangerous kind of an action never uses it.
-  const viaSession = (o: { routine?: boolean; dangerous?: boolean }): boolean => o.routine === true && o.dangerous !== true && ap.session !== null && code.length !== 6;
-  const ready: ProofHook["ready"] = (o = {}) => registered && (viaSession(o) ? true : pk.has ? pk.problem === null || code.length === 6 : o.routine ? ap.ready(code, o.dangerous) : code.length === 6);
+  const viaSession = (o: ProofOpts): boolean => o.routine === true && o.dangerous !== true && ap.session !== null;
+  const ready: ProofHook["ready"] = () => registered;
   const run: ProofHook["run"] = async (query, call, o = {}) => {
-    try {
-      if (viaSession(o)) return await ap.routine(code, (p) => call(p as AnyProof), o.dangerous);
-      if (pk.has && code.length !== 6) {
-        setTouching(null);
-        const t = await touchFor(rpc, query, setTouching);
-        return await call(t ? { passkey: t.passkey } : {});
-      }
-      if (o.routine) return await ap.routine(code, (p) => call(p as AnyProof), o.dangerous);
-      return await call({ code });
-    } finally {
-      setCode("");
-      setTouching(null);
-    }
+    if (viaSession(o)) return await ap.routine("", (p) => call(p as AnyProof), o.dangerous);
+    return (await ask({ what: o.what ?? pressedLabel(), ...(o.detail ? { detail: o.detail } : {}), query, draftKey: key, call: (p) => call(p as AnyProof) })) as Awaited<ReturnType<typeof call>>;
   };
-  return { code, setCode, pk, touching, registered, ready, run };
+  return { clearDraft: () => drafts.clear(key), pk, registered, ready, run };
 }
 
-/** The code field (when codes work), the note about what is being touched, and why a touch is impossible. */
+/** What stands where the code field used to: a session note, or why nothing can be approved yet. The code is asked for by the dialog. */
 export function ProofField({ proof, routine, dangerous }: { proof: ProofHook; routine?: boolean; dangerous?: boolean }) {
   const ap = useApproval();
-  return (
-    <>
-      {ap.session && routine && !dangerous ? <span className={`text-xs ${muted}`}>сессия открыта: {proof.pk.has ? "касание и код" : "код"} не нужен</span> : null}
-      {ap.session && routine && !dangerous ? null : proof.pk.has ? <span className={muted}>касание или код:</span> : null}
-      {ap.session && routine && !dangerous ? null : proof.pk.keyOnly ? null : routine && !proof.pk.has ? <RoutineCode value={proof.code} onChange={proof.setCode} dangerous={dangerous} /> : <CodeField value={proof.code} onChange={proof.setCode} />}
-      {!proof.registered ? <span className={muted}>сначала зарегистрируйте второй фактор</span> : null}
-      {proof.registered && !(ap.session && routine && !dangerous) ? <span className={`basis-full text-xs ${muted}`}>{proofHint({ hasKey: proof.pk.has, keyOnly: proof.pk.keyOnly })}</span> : null}
-    </>
-  );
+  if (!proof.registered) return <span className={muted}>сначала зарегистрируйте второй фактор</span>;
+  if (ap.session && routine && !dangerous) return <span className={`text-xs ${muted}`}>сессия открыта: подтверждение не нужно</span>;
+  return null;
 }
 
 /** Plain words next to a bare code field (outside ProofField). */
@@ -88,7 +89,7 @@ export function CodeHint({ ov }: { ov: Overview }) {
 
 /** What a card says a plugin can do; the word «все» (of all variables) is red. */
 export function Emph({ text }: { text: string }) {
-  return <>{glossSegments(emphasize(text)).map((x, i) => (x.red ? <b key={i} className="text-red-700 dark:text-red-400">{x.text}</b> : x.hint ? <abbr key={i} title={x.hint} className="cursor-help underline decoration-dotted underline-offset-2">{x.text}</abbr> : <span key={i}>{x.text}</span>))}</>;
+  return <>{glossSegments(emphasize(text)).map((x, i) => (x.red ? <b key={i} className="text-destructive">{x.text}</b> : x.hint ? <abbr key={i} title={x.hint} className="cursor-help underline decoration-dotted underline-offset-2">{x.text}</abbr> : <span key={i}>{x.text}</span>))}</>;
 }
 
 /** `a command in backticks` is shown as code; the words around it go through the glossary. */
@@ -96,11 +97,7 @@ export function Rich({ text }: { text: string }) {
   return <>{text.split("`").map((part, i) => (i % 2 === 1 ? <code key={i} className="break-all rounded bg-muted px-1 font-mono text-xs">{part}</code> : <Emph key={i} text={part} />))}</>;
 }
 
-export function ProofNotes({ proof }: { proof: ProofHook }) {
-  return (
-    <>
-      {proof.pk.has && proof.pk.problem ? <p className="mt-1 text-destructive">{proof.pk.problem}</p> : null}
-      <TouchNote text={proof.touching} />
-    </>
-  );
+/** Kept for the cards that still call it: a touch is shown in the dialog now. */
+export function ProofNotes(_: { proof: ProofHook }) {
+  return null;
 }

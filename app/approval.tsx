@@ -126,7 +126,7 @@ export function SessionBar({ ov, rpc, session, open, lock, closed }: { ov: Overv
   return (
     <div className={card} id="sbb-session">
       <h3 className="font-semibold">Сессия подтверждения</h3>
-      {closed ? <p className="mt-1 rounded-md border border-yellow-500/60 bg-yellow-500/10 px-2 py-1" role="status" data-secure-bb-session-closed>{sessionClosedText(closed)}</p> : null}
+      {closed ? <p className="mt-1 rounded-md border border-border bg-muted px-2 py-1" role="status" data-secure-bb-session-closed>{sessionClosedText(closed)}</p> : null}
       <p className={muted}>{st.line}</p>
       {st.foldDetails ? (
         <Fold id="session-details" summary="Подробнее" summaryClassName={`cursor-pointer text-xs ${muted}`}><p className={`mt-1 text-xs ${muted}`}>{st.details}</p></Fold>
