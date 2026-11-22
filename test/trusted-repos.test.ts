@@ -3,7 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Gate } from "../src/gate.js";
 import { MIGRATIONS, Store } from "../src/store.js";
 import { classifyItem } from "../src/taint/classify.js";
-import { isTrustedRepo, normalizePattern } from "../src/taint/repos.js";
+import { githubRepo, identityOf } from "../guard/src/trust.ts";
+import { githubSlug, isTrustedRepo, normalizePattern } from "../src/taint/repos.js";
 import { base32Decode, hotp, stepAt } from "../src/totp.js";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import plugin from "../server.js";
@@ -107,5 +108,24 @@ describe("through the plugin surfaces", () => {
     expect((await harness.behavior.runCli(["status"])).stdout).toContain("repositories that do not taint a thread: 1");
     const ov = (await harness.behavior.callRpc("overview", null)) as { trustedRepos: string[] };
     expect(ov.trustedRepos).toEqual(["me/x"]);
+  });
+});
+
+describe("one reading of a github.com address, for the guard's sources and the tracker's commands", () => {
+  const ADDRESSES = ["https://github.com/Me/My-Plugin.git", "git@github.com:me/my-plugin.git", "ssh://git@github.com/me/my-plugin", "https://github.com/me/my-plugin/tree/main", "https://evil.tld/github.com/me/my-plugin", "https://github.com.evil.tld/me/my-plugin", "https://github.com/me//my-plugin", "git@github.com:me/my-plugin@v1", "https://github.com/me/my-plugin@v1"];
+  it("the tracker's githubSlug IS the guard's githubRepo (no second parser to drift)", () => {
+    for (const a of ADDRESSES) expect(githubSlug(a), a).toBe(githubRepo(a));
+  });
+  it("an @ref is a ref only in a plugin SOURCE; in a shell address it is not a repository, so it is never trusted (the reading that does not weaken)", () => {
+    // the plugin source `git@github.com:o/r@v1` names repository o/r (bb's syntax for a ref)…
+    expect(identityOf("git", "git:git@github.com:me/my-plugin@v1")).toEqual({ kind: "git", id: "github:me/my-plugin" });
+    // …but the same text in a command is not the repository, and a clone of it does not pass as the user's own work
+    expect(githubSlug("git@github.com:me/my-plugin@v1")).toBeNull();
+    expect(cmd("git clone git@github.com:me/my-plugin@v1", MINE)).not.toBeNull();
+    expect(cmd("git clone git@github.com:me/my-plugin.git", MINE)).toBeNull();
+  });
+  it("an empty path segment does not make a repository (a stricter reading than the tracker had)", () => {
+    expect(githubSlug("https://github.com/me//my-plugin")).toBeNull();
+    expect(cmd("git clone https://github.com/me//my-plugin", MINE)).not.toBeNull();
   });
 });

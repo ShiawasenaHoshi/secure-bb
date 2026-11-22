@@ -5,6 +5,7 @@
 // a part by its id (a hash of what the part is), so a part that is not in the current difference is simply not found.
 import { createHash } from "node:crypto";
 import { RISKY_KEYS, analyze, isTightening, maskSecrets } from "./agents-rules.ts";
+import { canonicalJson } from "./canonical-json.ts";
 import { applyPathChange, settingsPathAllowed, type PathAction } from "./restore.ts";
 
 export type PartKind = "key-added" | "key-changed" | "key-removed" | "elem-added" | "elem-removed";
@@ -22,12 +23,6 @@ const MAX_DEPTH = 8;
 
 const isPlain = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const has = (o: Record<string, unknown>, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k);
-/** Canonical JSON for HASHING and comparing: sorted keys, no spaces, the same text for the same data (the id of a part is a hash of it). Not for reading: see `prettyStableJson` in agents-scan.ts. */
-export function canonicalJson(v: unknown): string {
-  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(",")}]`;
-  if (isPlain(v)) return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(v[k])}`).join(",")}}`;
-  return JSON.stringify(v) ?? "null";
-}
 const partId = (p: Omit<JsonPart, "id">): string => createHash("sha256").update(canonicalJson([p.path, p.kind, p.before ?? null, p.after ?? null, p.elem ?? null])).digest("hex").slice(0, 16);
 
 const parse = (t: string): Record<string, unknown> | null => {

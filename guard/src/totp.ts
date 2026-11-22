@@ -1,6 +1,5 @@
 // RFC 6238 TOTP on node:crypto — HMAC-SHA1, 6 digits, 30 s step, window ±1.
-// Same arithmetic as the plugin's src/totp.ts (a test compares them); copied, not imported:
-// the guard is installed on its own, root-owned, and must not read code from the plugin.
+// The one TOTP module: the guard owns it (it is installed on its own, root-owned, and reads nothing from the plugin); the plugin's `src/totp.ts` re-exports it.
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 export const TOTP_STEP_SEC = 30;

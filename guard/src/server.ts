@@ -14,6 +14,7 @@ import { chmodSync, existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
 import net from "node:net";
 import { chownGroup, type ChownFn } from "./chown.ts";
+import { listenLines, probeListener } from "./line-socket.ts";
 import { Guard, GuardError } from "./guard.ts";
 
 export const REQUEST_TIMEOUT_MS = 5000;
@@ -148,15 +149,6 @@ export interface ServerOptions {
   chown?: ChownFn;
 }
 
-/** Asks by connecting (and at once closing): is something already listening there? A stale socket file (a crash) is not. It does touch the socket: not a pure check. */
-function probeListener(path: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const c = net.connect(path);
-    c.once("connect", () => (c.destroy(), resolve(true)));
-    c.once("error", () => resolve(false));
-  });
-}
-
 export async function listen(o: ServerOptions): Promise<net.Server> {
   const dir = dirname(o.socket);
   const fresh = !existsSync(dir);
@@ -169,36 +161,7 @@ export async function listen(o: ServerOptions): Promise<net.Server> {
   } catch {
     /* there was none */
   }
-  let open = 0;
-  const server = net.createServer((conn) => {
-    if (open >= MAX_CONNECTIONS) return void conn.destroy();
-    open++;
-    conn.once("close", () => open--);
-    conn.setTimeout(o.timeoutMs ?? REQUEST_TIMEOUT_MS, () => conn.destroy());
-    let buf = "";
-    // Requests of one connection are answered in order, even when one of them takes time.
-    let chain: Promise<void> = Promise.resolve();
-    conn.setEncoding("utf8");
-    conn.on("data", (chunk: string) => {
-      buf += chunk;
-      let nl: number;
-      while ((nl = buf.indexOf("\n")) >= 0) {
-        const line = buf.slice(0, nl);
-        buf = buf.slice(nl + 1);
-        if (line.trim() !== "")
-          chain = chain.then(async () => {
-            const out = await answer(o.guard, line, o.version);
-            if (!conn.destroyed) conn.write(`${out}\n`);
-          });
-      }
-      if (buf.length > MAX_LINE_BYTES) conn.destroy(); // an endless line is not a request
-    });
-    conn.on("error", () => conn.destroy());
-  });
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(o.socket, resolve);
-  });
+  const server = await listenLines(o.socket, { maxLine: MAX_LINE_BYTES, maxConn: MAX_CONNECTIONS, timeoutMs: o.timeoutMs ?? REQUEST_TIMEOUT_MS, onLine: (line) => answer(o.guard, line, o.version) });
   // Between listen and these two calls the socket has the default mode: nobody but the owner and the same user's group can write to it anyway.
   try {
     if (o.socketGid !== null) chownGroup({ program: "sbb-guard" }, o.socket, o.socketGid, o.chown);
