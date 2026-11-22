@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 // @ts-expect-error jsdom ships no types in this tree
 import { JSDOM } from "jsdom";
-import { anchorOf, emptySnapshot, findFocus, focusIdOf, pressTracker, restoreView, snapshotView, toastPosition } from "../src/stable-view.ts";
+import { makeNote, splitNotes, anchorOf, emptySnapshot, findFocus, focusIdOf, pressTracker, restoreView, snapshotView, toastPosition } from "../src/stable-view.ts";
 
 function page(html: string) {
   const dom = new JSDOM(`<!doctype html><body><div id="root">${html}</div></body>`, { pretendToBeVisual: true });
@@ -110,5 +110,21 @@ describe("the toast by the button", () => {
     expect(tracker.last(5000)).toBeNull();
     expect(anchorOf(doc.body)).toBeNull();
     tracker.stop();
+  });
+});
+
+describe("where a note is shown", () => {
+  const box = { left: 10, top: 20, right: 90, bottom: 50 };
+  it("a note keeps the place of the button it came from (it used to be dropped, and every note went to the top strip)", () => {
+    const n = makeNote(1, "Возвращено: что-то", { kind: "done", anchor: box });
+    expect(n).toEqual({ id: 1, text: "Возвращено: что-то", kind: "done", anchor: box });
+    expect(makeNote(2, "x")).toEqual({ id: 2, text: "x", kind: "done", anchor: null });
+    expect(makeNote(3, "x", { kind: "error", anchor: undefined }).anchor).toBeNull();
+  });
+  it("notes with a place stand by their buttons, the others stay in the top strip", () => {
+    const notes = [makeNote(1, "a", { anchor: box }), makeNote(2, "b"), makeNote(3, "c", { kind: "error", anchor: box })];
+    const { placed, pinned } = splitNotes(notes);
+    expect(placed.map((n) => n.id)).toEqual([1, 3]);
+    expect(pinned.map((n) => n.id)).toEqual([2]);
   });
 });

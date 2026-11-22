@@ -1454,16 +1454,16 @@ export function sdkHeadline(caps: CapLike[], downgrade = false): Risk | null {
   const readsFlow = flowOf("sdk_read");
   const readsKnown = downgrade && readsFlow !== undefined && readsFlow.verdict !== "unknown";
   const danger = lines.some((l) => l.danger) || (lines.some((l) => l.kind === "sdk_read") && sendsOut && !readsKnown);
+  // The network is in the plugin and the level is not lowered: said ONCE, at the end of the line, and not after each right. The purpose follows the verdict at once.
+  let netTold = false;
   const shown = lines.slice(0, 3).map((l) => {
     const f = l.kind === "sdk_read" || l.kind === "sdk_questions" ? flowOf(l.kind) : undefined;
     const why = l.kind === "sdk_read" ? (caps.find((c) => c.kind === "sdk_read")?.purpose ?? []) : [];
     if (!f) return l.text;
-    // The network is in the plugin and the level is not lowered: say what the code shows, and that the network is there
-    const netNote = sendsOut && f.verdict !== "unknown" && f.verdict !== "leaves" && !downgrade;
-    if (netNote && f.verdict === "nowhere") return `${READS_PLAIN[l.kind] ?? l.text} — по коду никуда не отправляет; сеть в плагине есть (для чего — см. подробности)${why.length > 0 ? ` — ${why.join("; ")}` : ""}`;
-    return `${READS_PLAIN[l.kind] ?? l.text}${flowSuffix({ kind: l.kind, detail: [], flow: f, purpose: why }, false)}${netNote ? "; сеть в плагине есть (для чего — см. подробности)" : ""}`;
+    if (sendsOut && f.verdict !== "unknown" && f.verdict !== "leaves" && !downgrade) netTold = true;
+    return `${READS_PLAIN[l.kind] ?? l.text}${flowSuffix({ kind: l.kind, detail: [], flow: f, purpose: why }, false)}`;
   });
-  const text = shown.join("; ") + (lines.length > 3 ? `; и ещё ${lines.length - 3}` : "");
+  const text = shown.join("; ") + (lines.length > 3 ? `; и ещё ${lines.length - 3}` : "") + (netTold ? ". Сеть в плагине есть, с прочитанным по коду не связана." : "");
   return { level: danger ? "danger" : "caution", text: text.charAt(0).toUpperCase() + text.slice(1) };
 }
 export function riskHeadline(caps: CapLike[], reviewRules: string[] = [], opts: { downgrade?: boolean } = {}): Risk {
@@ -1513,6 +1513,34 @@ export function riskHeadline(caps: CapLike[], reviewRules: string[] = [], opts: 
   if (env) return { level: "caution", text: "Может узнавать некоторые сведения о вашем компьютере (имя пользователя, язык)" };
   if (caps.some((c) => !SAFE_KINDS.has(c.kind)) || reviewRules.some((r) => r !== "agent-config")) return { level: "caution", text: "Похоже на оформление, но в коде есть особенности: они перечислены в «Технических подробностях» ниже", look: true };
   return { level: "safe", text: "Безопасно: только оформление — ничего не читает" };
+}
+/** What a card needs of a check result to say the rights: the capabilities and the findings that asked for a look. */
+type FoundLike = (Parameters<typeof capsWithPaths>[0] & object) & { findings?: Array<{ severity: string; rule: string }> };
+/**
+ * The first line of a card for a version, from the check of THAT version: one function for the card and for «Под защитой», so that the two never say different things.
+ * A version the guard has no record of is not judged by its code (see NO_RECORD_HEADLINE).
+ */
+export function cardRisk(q: { kind: string; contentHash: string | null }, found: FoundLike | undefined, downgrade: boolean): Risk {
+  if (hasNoGuardRecord(q)) return { level: "caution", text: NO_RECORD_HEADLINE };
+  return riskHeadline(capsWithPaths(found), (found?.findings ?? []).filter((f) => f.severity === "review").map((f) => f.rule), { downgrade });
+}
+/**
+ * The rights of a plugin in «Под защитой»: for a version that waits, by the check the card shows (`queueChecks`, else the check of its hash); for an approved one,
+ * by the check of the approved version. null only when there is no check at all.
+ */
+export function pluginRightsText(
+  pluginId: string,
+  pin: { contentHash: string } | null,
+  ctx: { queue: Array<{ id: number; pluginId: string; status: string; kind: string; contentHash: string | null }>; queueChecks: Record<number, FoundLike>; checks: Record<string, FoundLike> },
+  downgrade: boolean,
+): string | null {
+  const waiting = ctx.queue.filter((q) => q.pluginId === pluginId && q.status === "held").sort((a, b) => Math.abs(b.id) - Math.abs(a.id));
+  for (const q of waiting) {
+    const found = ctx.queueChecks[q.id] ?? (q.contentHash ? ctx.checks[q.contentHash] : undefined);
+    if (found || hasNoGuardRecord(q)) return cardRisk(q, found, downgrade).text;
+  }
+  const approved = pin ? ctx.checks[pin.contentHash] : undefined;
+  return approved ? cardRisk({ kind: "hook", contentHash: pin!.contentHash }, approved, downgrade).text : null;
 }
 /** The main button of a yellow card: a harmless plugin is simply switched on. */
 export const approveVerb = (risk: Risk): string => (risk.level === "safe" ? "Включить" : "Разрешить");

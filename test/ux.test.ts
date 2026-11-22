@@ -7,7 +7,7 @@ import {
 } from "../src/ux.ts";
 import { MISMATCH_HINT, bypassAllowed, isMismatch, mismatchText, quarantineCount, reasonKind } from "../src/ux.ts";
 import type { AwayEvent, PartLike, StatusInput } from "../src/ux.ts";
-import { STOPPED_EXPLAIN, aiScanEmptyText, windowAvailability, PART_BACK_FRESH_NOTE, resetConfirmText, resetRows, EXCEPTIONS_EMPTY, EXCEPTIONS_HELP, RESET_NOTE, exceptionRows, exceptionsHeadline, FREQ_LIMIT, FREQ_QUIET_MS, FREQ_WINDOW_MS, approvalEventsOf, frequentHint, parseFreqAt, pickFrequent, FREQ_BUTTON, NO_RIGHTS_TEXT, STANDING_LABEL, protectedHeadline, protectedRow, sortProtected, standingOf, PARTS_HEADLINE, PARTS_HELP, PART_FRESH_NOTE, PART_NO_BACK, PART_STALE, drawableParts, humanError, isStalePart, partKeptNote, partNeedsFresh, partTitle } from "../src/ux.ts";
+import { NO_RECORD_HEADLINE, cardRisk, pluginRightsText, STOPPED_EXPLAIN, aiScanEmptyText, windowAvailability, PART_BACK_FRESH_NOTE, resetConfirmText, resetRows, EXCEPTIONS_EMPTY, EXCEPTIONS_HELP, RESET_NOTE, exceptionRows, exceptionsHeadline, FREQ_LIMIT, FREQ_QUIET_MS, FREQ_WINDOW_MS, approvalEventsOf, frequentHint, parseFreqAt, pickFrequent, FREQ_BUTTON, NO_RIGHTS_TEXT, STANDING_LABEL, protectedHeadline, protectedRow, sortProtected, standingOf, PARTS_HEADLINE, PARTS_HELP, PART_FRESH_NOTE, PART_NO_BACK, PART_STALE, drawableParts, humanError, isStalePart, partKeptNote, partNeedsFresh, partTitle } from "../src/ux.ts";
 
 const none: StatusInput = { guardDown: false, red: [], yellow: [], alarms: [] };
 const ref = (anchor: string, tab: "status" | "more" = "status") => ({ anchor, tab, text: anchor });
@@ -596,5 +596,31 @@ describe("the leftover texts of the round-5 table", () => {
   it("the AI scan line says whether it is off or just not run yet", () => {
     expect(aiScanEmptyText(false)).toMatch(/выключен.*Подробно/);
     expect(aiScanEmptyText(true)).toMatch(/ещё не запускался/);
+  });
+});
+
+describe("«Под защитой»: the rights line is the card's own", () => {
+  const found = { capabilities: [{ kind: "network", detail: ["host:api.x.com"] }], findings: [] };
+  const other = { capabilities: [{ kind: "ui", detail: [] }], findings: [] };
+  const held = (id: number, pluginId: string, contentHash: string | null, over: Partial<{ status: string; kind: string }> = {}) => ({ id, pluginId, status: "held", kind: "hook", contentHash, ...over });
+  it("a version that waits: by the check the card shows (queueChecks, else the check of its hash) — the same text as the card", () => {
+    const ctx = { queue: [held(5, "chime", "h5")], queueChecks: { 5: found }, checks: {} };
+    expect(pluginRightsText("chime", null, ctx, false)).toBe(cardRisk({ kind: "hook", contentHash: "h5" }, found, false).text);
+    expect(pluginRightsText("chime", null, ctx, false)).toMatch(/api\.x\.com/);
+    expect(pluginRightsText("chime", null, { queue: [held(5, "chime", "h5")], queueChecks: {}, checks: { h5: found } }, false)).toMatch(/api\.x\.com/);
+  });
+  it("the newest waiting version wins over the approved one; an approved one is by the approved version's check", () => {
+    const ctx = { queue: [held(4, "p", "h4"), held(9, "p", "h9")], queueChecks: { 9: found }, checks: { h4: other, pin: other } };
+    expect(pluginRightsText("p", { contentHash: "pin" }, ctx, false)).toMatch(/api\.x\.com/);
+    expect(pluginRightsText("p", { contentHash: "pin" }, { queue: [], queueChecks: {}, checks: { pin: other } }, false)).toBe(cardRisk({ kind: "hook", contentHash: "pin" }, other, false).text);
+  });
+  it("a waiting version with no check of its own falls back to the approved one; «не определены» only when there is no check at all", () => {
+    expect(pluginRightsText("p", { contentHash: "pin" }, { queue: [held(3, "p", "h3")], queueChecks: {}, checks: { pin: found } }, false)).toMatch(/api\.x\.com/);
+    expect(pluginRightsText("p", null, { queue: [held(3, "p", "h3")], queueChecks: {}, checks: {} }, false)).toBeNull();
+    expect(protectedRow({ id: "p", version: "1", status: "x", source: "path:/a", threadId: null, pin: null, rights: null, waits: true }, 0).rights).toBe(NO_RIGHTS_TEXT);
+  });
+  it("another plugin's entries and decided entries are not used; a version the guard has no record of says so, as its card does", () => {
+    expect(pluginRightsText("p", null, { queue: [held(3, "q", "h3"), held(4, "p", "h4", { status: "approved" })], queueChecks: { 3: found, 4: found }, checks: {} }, false)).toBeNull();
+    expect(pluginRightsText("p", null, { queue: [held(3, "p", null, { kind: "afterfact" })], queueChecks: {}, checks: {} }, false)).toBe(NO_RECORD_HEADLINE);
   });
 });
