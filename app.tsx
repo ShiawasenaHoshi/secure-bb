@@ -28,7 +28,7 @@ import type { TrustMode } from "./src/guardlink";
 import {
   AWAY_KEY, DEFERRED_KEY, glossSegments, skillsSummary, doneMessage, approvedNote, uniqueSentences, humanError, approvedByText, canRestore, rejectedAtOf, rejectedByText, clockText, firstButtonAfter, sessionClosedText, sessionEndReason, slideIdle, type SessionCloseReason, capsWithPaths, redWhere, cardFoldId, cardKey, sessionBlockText, KEPT_KEY, MODE_DESCRIPTIONS, MODE_NAMES, SAVED_NARROWING, startTouchNote, WIZARD_KEY,
   aaguidName, approvalWhy, awayAlarms, awayInfoEvents, awaySince, capabilitySegments, cardColor, deferKey, detailLevel, groupAway, isBlockedEntry, isPasswordManager, pageStatus,
-  MISMATCH_HINT, STOPPED_EXPLAIN, aiScanEmptyText, EXCEPTIONS_EMPTY, EXCEPTIONS_HELP, RESET_NOTE, exceptionRows, exceptionsHeadline, type ExceptionRow, FREQ_BUTTON, FREQ_KEY, FREQ_NOT_NOW, FREQ_OFF_KEY, FREQ_SETTING_LABEL, approvalEventsOf, parseFreqAt, pickFrequent, type FreqHint, agentAlarmText, protectedHeadline, protectedRow, sortProtected, PARTS_HEADLINE, PARTS_HELP, PART_BACK, PART_BACK_FRESH_NOTE, PART_FRESH_NOTE, REVOKE_CODE_NOTE, resetConfirmText, resetRows, PART_KEEP, PART_NO_BACK, drawableParts, isStalePart, partBackNote, partKeptNote, partNeedsFresh, partTitle, alarmCount, bypassAllowed, mismatchText, parseDeferred, redText, wizardNeeded, yellowText, GUARD_DOWN_TEXT,
+  MISMATCH_HINT, cardRisk, pluginRightsText, STOPPED_EXPLAIN, aiScanEmptyText, EXCEPTIONS_EMPTY, EXCEPTIONS_HELP, RESET_NOTE, exceptionRows, exceptionsHeadline, type ExceptionRow, FREQ_BUTTON, FREQ_KEY, FREQ_NOT_NOW, FREQ_OFF_KEY, FREQ_SETTING_LABEL, approvalEventsOf, parseFreqAt, pickFrequent, type FreqHint, agentAlarmText, protectedHeadline, protectedRow, sortProtected, PARTS_HEADLINE, PARTS_HELP, PART_BACK, PART_BACK_FRESH_NOTE, PART_FRESH_NOTE, REVOKE_CODE_NOTE, resetConfirmText, resetRows, PART_KEEP, PART_NO_BACK, drawableParts, isStalePart, partBackNote, partKeptNote, partNeedsFresh, partTitle, alarmCount, bypassAllowed, mismatchText, parseDeferred, redText, wizardNeeded, yellowText, GUARD_DOWN_TEXT,
   actionLabel, emphasize, agentAcceptProblem, agentsSectionTab, awaySeenMark, criticalAcceptTitle, manualRollback, criticalMeanings, decisionOf, deleteConfirmText, deletedNote,
   isCriticalDrift, launchProblem, moreVersionsText, planCards, proofHint, reconcileSelection, sameData, selectableDriftIds, sessionText, setFold,
   toggleId, trustButton, windowAvailability,
@@ -37,7 +37,7 @@ import { isMismatch, riskHeadline, approveVerb, enabledWhat, agentConfigNote, sc
 import { checksSummary, countsLine, DEFER_STUB_RESTORE, DELETE_CONFIRM_BUTTONS, dropUnstamped, hasNoGuardRecord, makeDeferStub, NO_RECORD_FIX, NO_RECORD_HEADLINE, NO_RECORD_LINE, pageCounts, restoreNote, significantFindings, stampMark, withoutMark } from "./src/ux";
 import { attachFlow, capabilityPhrase } from "./src/ux";
 import { createDrafts } from "./src/drafts";
-import { emptySnapshot, pressTracker, restoreView, snapshotView, toastPosition, type Box, type ViewSnapshot } from "./src/stable-view";
+import { emptySnapshot, makeNote, splitNotes, pressTracker, restoreView, snapshotView, toastPosition, type Box, type ViewSnapshot } from "./src/stable-view";
 import { isFoldOpen, openFold, toggleFold } from "./src/fold";
 import type { AwayEvent, CapLike, HeldNow, ProblemRef, TabId } from "./src/ux";
 
@@ -159,7 +159,7 @@ const TOAST_SIZE = { width: 320, height: 44 };
 /** The result of an action, by the button that was pressed (fixed in the window, so the page under it does not move): «Готово: …» goes by itself, an error stays until it is closed. */
 function AnchoredNotes() {
   const { notes, dismiss } = useContext(DoneContext);
-  const placed = notes.filter((n) => n.anchor);
+  const placed = splitNotes(notes).placed;
   if (placed.length === 0) return null;
   const viewport = { width: window.innerWidth, height: window.innerHeight };
   return (
@@ -183,7 +183,7 @@ function AnchoredNotes() {
 function PinnedNotes() {
   const { notes: all, dismiss } = useContext(DoneContext);
   // A note of an action with a known place stands by the button that was pressed (AnchoredNotes); the rest are pinned to the top.
-  const notes = all.filter((n) => !n.anchor);
+  const notes = splitNotes(all).pinned;
   if (notes.length === 0) return null;
   return (
     <div className="pointer-events-none fixed inset-x-0 top-2 z-30 mx-auto w-full max-w-3xl px-4" data-secure-bb-pinned>
@@ -2725,7 +2725,7 @@ function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onKeep, onTrustPen
     proof.run({ kind: "approve", queueId: q.id, acknowledgeBlock }, (p) => rpc.call("queue.approve", { id: q.id, ...p, acknowledgeBlock } as never), { routine: true, dangerous: acknowledgeBlock });
   // A version the guard has no record of (it loaded without the guard's check): nothing here can approve it, and a green «можно включить» would be a lie.
   const noRecord = hasNoGuardRecord(q);
-  const risk = noRecord ? { level: "caution" as const, text: NO_RECORD_HEADLINE } : riskHeadline(caps, (found?.findings ?? []).filter((f) => f.severity === "review").map((f) => f.rule), { downgrade: ov.policy.flowDowngrade });
+  const risk = noRecord ? { level: "caution" as const, text: NO_RECORD_HEADLINE } : cardRisk(q, found, ov.policy.flowDowngrade);
   const allowedWhat = enabledWhat(q.pluginId, q.version);
   const verb = approveVerb(risk);
   const configNote = agentConfigNote(found?.findings ?? []);
@@ -3289,7 +3289,7 @@ function ProtectedSection({ ov, waiting }: { ov: Overview; waiting: ReadonlySet<
   const now = useNow();
   const rows = sortProtected(
     ov.plugins.map((p) => ({
-      ...protectedRow({ id: p.id, version: p.version, status: p.status, statusDetail: p.statusDetail, source: p.source, threadId: p.threadId, pin: p.pin, rights: p.pin && ov.checks[p.pin.contentHash] ? riskHeadline(capsWithPaths(ov.checks[p.pin.contentHash])).text : null, waits: waiting.has(p.id) }, now),
+      ...protectedRow({ id: p.id, version: p.version, status: p.status, statusDetail: p.statusDetail, source: p.source, threadId: p.threadId, pin: p.pin, rights: pluginRightsText(p.id, p.pin, ov, ov.policy.flowDowngrade), waits: waiting.has(p.id) }, now),
     })),
   );
   const head = protectedHeadline(rows, ov.builtinPlugins);
@@ -3352,7 +3352,7 @@ function GatePage() {
   const announce = useCallback((text: string, opts: AnnounceOpts = {}) => {
     const id = ++doneSeq.current;
     const kind = opts.kind ?? "done";
-    setDoneNotes((l) => [...l, { id, text, kind }].slice(-4));
+    setDoneNotes((l) => [...l, makeNote(id, text, { kind, anchor: opts.anchor })].slice(-4));
     if (kind !== "error") window.setTimeout(() => setDoneNotes((l) => l.filter((n) => n.id !== id)), DONE_MS);
     if (opts.slot && kind === "done") {
       const { key, height } = opts.slot;

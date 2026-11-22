@@ -119,3 +119,20 @@ export function pressTracker(doc: Document, now: () => number = Date.now): { las
   doc.addEventListener("keydown", (e) => (e as KeyboardEvent).key === "Enter" && on(e), true);
   return { last: (maxAgeMs) => (box !== null && now() - at <= maxAgeMs ? box : null), stop: () => doc.removeEventListener("pointerdown", on, true) };
 }
+
+// ---- notes: where each one is shown ---------------------------------------------------------------------------------------------
+export interface NoteLike {
+  id: number;
+  text: string;
+  kind: "done" | "info" | "error";
+  /** Where the button that was pressed stood; null: the note has no place and goes to the strip at the top. */
+  anchor: Box | null;
+}
+/** A note as it is kept. The anchor MUST be kept with it (it is what takes the note from the top strip to the button). */
+export function makeNote(id: number, text: string, opts: { kind?: NoteLike["kind"]; anchor?: Box | null } = {}): NoteLike {
+  return { id, text, kind: opts.kind ?? "done", anchor: opts.anchor ?? null };
+}
+/** The notes that stand by a button, and the notes of the top strip. */
+export function splitNotes<T extends { anchor?: Box | null }>(notes: T[]): { placed: T[]; pinned: T[] } {
+  return { placed: notes.filter((n) => n.anchor), pinned: notes.filter((n) => !n.anchor) };
+}

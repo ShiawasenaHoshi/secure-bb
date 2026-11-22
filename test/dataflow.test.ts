@@ -865,11 +865,29 @@ describe("on the card", () => {
   it("«никуда не отправляет» does not lower the level while `flow.downgrade` is off: a read and the network stay red, the text is honest", () => {
     const nowhere: FlowSummary = { source: "threads", detail: [], verdict: "nowhere", sinks: [] };
     const caps = [{ kind: "network", detail: ["host:updates.example"] }, { kind: "sdk_read", detail: [], flow: nowhere }];
-    expect(riskHeadline(caps)).toEqual({ level: "danger", text: "Читает ваши переписки в bb — по коду никуда не отправляет; сеть в плагине есть (для чего — см. подробности)" });
+    expect(riskHeadline(caps)).toEqual({ level: "danger", text: "Читает ваши переписки в bb и никуда не отправляет. Сеть в плагине есть, с прочитанным по коду не связана." });
     // the policy lowers it
     expect(riskHeadline(caps, [], { downgrade: true })).toEqual({ level: "caution", text: "Читает ваши переписки в bb и никуда не отправляет" });
     // without the flow the old rule: a read and the network is red
     expect(riskHeadline([{ kind: "network", detail: ["host:updates.example"] }, { kind: "sdk_read", detail: [] }]).level).toBe("danger");
+  });
+
+  it("the purpose follows «никуда не отправляет» at once, and the network is told ONCE, at the end of the line (not after each right)", () => {
+    const nowhere = (source: "threads" | "questions"): FlowSummary => ({ source, detail: [], verdict: "nowhere", sinks: [] });
+    const caps = [
+      { kind: "network", detail: ["host:updates.example"] },
+      { kind: "sdk_read", detail: [], flow: nowhere("threads"), purpose: ["чтобы сообщить вам, когда агент закончил"] },
+      { kind: "sdk_questions", detail: [], flow: nowhere("questions") },
+      { kind: "sdk_meta", detail: [] },
+    ];
+    const h = riskHeadline(caps);
+    expect(h.text).toBe("Читает ваши переписки в bb и никуда не отправляет — чтобы сообщить вам, когда агент закончил; видит вопросы ваших агентов и никуда не отправляет; знает названия и состояние ваших тредов (когда агенты начинают и заканчивают). Сеть в плагине есть, с прочитанным по коду не связана.");
+    expect(h.text.match(/Сеть в плагине есть/g)).toHaveLength(1);
+    expect(h.text.indexOf("— чтобы сообщить")).toBeLessThan(h.text.indexOf("Сеть в плагине"));
+    // no network: nothing to add
+    expect(riskHeadline(caps.slice(1)).text).not.toMatch(/Сеть в плагине/);
+    // a read whose flow is unknown does not claim anything about the network
+    expect(riskHeadline([{ kind: "network", detail: ["host:x"] }, { kind: "sdk_read", detail: [], flow: { source: "threads", detail: [], verdict: "unknown", sinks: [], why: "x" } }]).text).not.toMatch(/Сеть в плагине/);
   });
 
   it("chime-like with the network (an update check): red as in main, «никуда не отправляет» in the text; with the policy, yellow", async () => {
