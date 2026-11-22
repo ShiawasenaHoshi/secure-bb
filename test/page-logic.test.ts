@@ -58,6 +58,20 @@ describe("the card of a waiting version", () => {
   it("the unsafe directory is a fact of the card", () => {
     expect(reviewView({ q: q({ reason: "каталог доступен на запись другим пользователям" }), found: undefined, ux: undefined, flowDowngrade: false }).unsafeDir).toBe(true);
   });
+  it("a version the guard did not read is told as «not read», with its reason; only real blocks are «ведёт себя как вредоносный»", () => {
+    const ux = { why: null, chain: [], level: "unknown" as const, entry: null, sourceLabel: "github.com/o/chime" };
+    const unread = reviewView({ q: q({ reasonKind: "other", blocks: null, reason: "каталог версии вне каталогов плагинов ядра" } as Partial<QueueRow>), found: found("network"), ux, flowDowngrade: false });
+    expect(unread.red).toBe(true);
+    expect(unread.text.title).toBe("Сторож не смог сам прочитать эту версию");
+    expect(unread.text.line).toContain("Причина: каталог версии вне каталогов плагинов ядра.");
+    expect(`${unread.text.title} ${unread.text.line}`).not.toMatch(/вредонос/);
+    const block = reviewView({ q: q({ reasonKind: "block", blocks: ["decode-eval a.js:1"], reason: "жёсткий флаг: decode-eval a.js:1" } as Partial<QueueRow>), found: found("network"), ux, flowDowngrade: false });
+    expect(block.red).toBe(true);
+    expect(block.text.title).toMatch(/^Остановлено: /);
+    expect(block.text.title).not.toMatch(/не смог сам прочитать/);
+    const clean = reviewView({ q: q({ reasonKind: "unknown-source", blocks: [], reason: "неизвестный источник" } as Partial<QueueRow>), found: found("network"), ux, flowDowngrade: false });
+    expect(clean.red).toBe(false);
+  });
 });
 
 describe("the small lines of the rows", () => {

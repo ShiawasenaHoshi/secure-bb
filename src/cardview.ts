@@ -4,8 +4,8 @@ import type { QueueRow } from "./store";
 import type { CheckResult } from "./checks/types";
 import type { QueueUx } from "./uxview";
 import {
-  actionLabel, agentConfigNote, approveVerb, capabilityPhrase, capsWithPaths, cardColor, cardRisk, flowClause, hasNoGuardRecord, hostsOf, isMismatchEntry, meaningfulCaps, mismatchText, NO_RECORD_HEADLINE, NO_RECORD_LINE, programName,
-  redText, redWhere, riskHeadline, trustButton, uiClickLine, windowAvailability, yellowText, type CapLike, type Risk, type RedText, type TrustButton, type WindowAvail,
+  actionLabel, agentConfigNote, approveVerb, capabilityPhrase, capsWithPaths, cardColor, cardRisk, flowClause, hasNoGuardRecord, hostsOf, isMismatchEntry, isUnreadOnly, meaningfulCaps, mismatchText, NO_RECORD_HEADLINE, NO_RECORD_LINE, programName,
+  redText, redWhere, riskHeadline, trustButton, uiClickLine, unreadText, windowAvailability, yellowText, type CapLike, type Risk, type RedText, type TrustButton, type WindowAvail,
 } from "./ux";
 
 /** The detail of a network right whose address the code does not show (the same word ux.ts uses). */
@@ -244,6 +244,8 @@ function reviewText(i: ReviewInput, red: boolean, caps: CapLike[]): ReviewView["
   const { q, found, ux } = i;
   if (isMismatchEntry(q)) return mismatchText(q.pluginId, q.version);
   if (!red) return yellowText({ pluginId: q.pluginId, version: q.version, level: ux?.level ?? "unknown", sourceLabel: ux?.sourceLabel ?? q.source, reason: q.reason, reasonKind: q.reasonKind, caps });
+  // Red because the guard did not read the version, with no hard flag found by anyone: told as «not read» (the lifting is the same, the words are true).
+  if (isUnreadOnly({ reason: q.reason, reasonKind: q.reasonKind, blocks: q.blocks, findings: found?.findings ?? [] })) return unreadText(q.pluginId, q.version, q.reason);
   const r = redText((found?.findings ?? []).filter((f) => f.severity === "block").map((f) => f.rule));
   const where = redWhere(caps);
   return { title: `Остановлено: ${r.title}`, line: `Плагин «${q.pluginId}» ${q.version}. ${r.line}${where ? ` ${where}` : ""} Плагин не запущен.` };

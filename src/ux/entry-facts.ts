@@ -39,6 +39,13 @@ export const isBlockedEntry = (e: Pick<ReviewEntry, "reason" | "findings" | "rea
   return lift.never || lift.needsAck || e.findings.some((f) => f.severity === "block");
 };
 
+/**
+ * The guard did NOT read this version (`blocks` is null), and no check of ours found a hard flag either: nothing says the plugin is harmful, only that nothing was seen.
+ * The card then says so, not «ведёт себя как вредоносный». Lifting it is the same as for a block (`liftBlock`): a fresh touch and the acknowledgement.
+ */
+export const isUnreadOnly = (e: Pick<ReviewEntry, "reason" | "findings" | "reasonKind" | "blocks">): boolean =>
+  hasFacts(e) && liftOf(e).why === "unread" && !e.findings.some((f) => f.severity === "block");
+
 /** Why the guard held a version (the card's words follow this, not a default): its fact when it has one, else the words of an entry the plugin keeps itself. */
 export type ReasonKind = GuardReasonKind;
 

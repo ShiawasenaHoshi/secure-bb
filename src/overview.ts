@@ -21,7 +21,7 @@ import type { PublishRow, PublishSettings, PublishState } from "./publish/types.
 import type { SkillGuard, SkillsView } from "./skills/guard.js";
 import type { Watchdog, WatchView } from "./watch/watchdog.js";
 import type { ApprovalRow, LogRow, Policy, QueueRow, Store, WindowRow } from "./store.js";
-import { identityOf, levelOf } from "../guard/src/trust.ts";
+import { identityOf, levelOf, sourceKindOf } from "../guard/src/trust.ts";
 import { pluginWindowAvail, suggestSources } from "./ux.js";
 import { queueUx, type QueueUx, type QueueUxDeps } from "./uxview.js";
 
@@ -350,7 +350,7 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
       windowOpen: pluginWindowAvail({
         guard: guarded?.state != null,
         threadId: d.store.latestThreadProposal(p.id)?.threadId ?? null,
-        level: levelOf(identityOf(p.source.startsWith("path:") ? "path" : p.source.startsWith("git:") ? "git" : "", p.source), guarded?.state?.trust?.mySources ?? [], guarded?.state?.trust?.known ?? []).level,
+        level: levelOf(identityOf(sourceKindOf(p.source), p.source, p.rootDir), guarded?.state?.trust?.mySources ?? [], guarded?.state?.trust?.known ?? []).level,
       }),
     };
   });
@@ -427,7 +427,7 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
     sentinel: sentinelView(d),
     alive: d.alive?.view() ?? { lastBeat: null, gaps: [], safeMode: null, safeModeSeen: false, gapsAckedAt: null, coreHolds: false },
     ux,
-    sourceSuggestions: suggestSources(plugins.filter(isThirdParty).map((p) => ({ source: p.source })), (k, src) => identityOf(k, src)?.id ?? null),
+    sourceSuggestions: suggestSources(plugins.filter(isThirdParty).map((p) => ({ source: p.source, rootDir: p.rootDir })), (k, src, dir) => identityOf(k, src, dir)?.id ?? null),
   };
 }
 

@@ -1,5 +1,6 @@
 // What a mode (Simple / Detailed / Strict) changes on the page, and the first-run wizard's words. Display only: the guard keeps the mode.
 import type { TrustMode } from "../guardlink.js";
+import { sourceKindOf } from "../../guard/src/github-address.ts";
 
 export interface DetailLevel {
   /** Technical fields are open when the card is drawn. */
@@ -36,11 +37,11 @@ export function wizardNeeded(i: { hasTrust: boolean; mySources: number; done: bo
 }
 
 /** Suggestions for «мои источники»: git repositories and folders of the installed plugins, from the core's `source`, once each. */
-export function suggestSources(plugins: Array<{ sourceKind?: string; source: string }>, identity: (kind: string, source: string) => string | null): string[] {
+export function suggestSources(plugins: Array<{ sourceKind?: string; source: string; rootDir?: string | null }>, identity: (kind: string, source: string, rootDir?: string | null) => string | null): string[] {
   const out = new Set<string>();
   for (const p of plugins) {
-    const kind = p.sourceKind ?? (p.source.startsWith("git:") ? "git" : p.source.startsWith("path:") ? "path" : "");
-    const id = identity(kind, p.source);
+    const kind = p.sourceKind ?? sourceKindOf(p.source);
+    const id = identity(kind, p.source, p.rootDir);
     if (id) out.add(id);
   }
   return [...out].slice(0, 20);

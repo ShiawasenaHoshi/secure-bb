@@ -5,7 +5,7 @@ import { execFile } from "node:child_process";
 import { accessSync, constants, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { identityOf, levelOf } from "../guard/src/trust.ts";
+import { identityOf, levelOf, sourceKindOf } from "../guard/src/trust.ts";
 import type { Probe } from "./detect.js";
 
 const run = promisify(execFile);
@@ -58,8 +58,7 @@ export function sessionBlockers(plugins: InstalledPluginLite[], o: SessionBlocke
   const out: SessionBlocker[] = [];
   for (const p of plugins) {
     if (!isThirdParty(p) || !isRunning(p)) continue;
-    const kind = p.source.startsWith("path:") ? "path" : p.source.startsWith("git:") ? "git" : "";
-    const foreign = levelOf(identityOf(kind, p.source), o.mySources, []).level !== "own";
+    const foreign = levelOf(identityOf(sourceKindOf(p.source), p.source, p.rootDir), o.mySources, []).level !== "own";
     const ui = o.hasUi(p);
     if (foreign || ui) out.push({ id: p.id, foreign, ui });
   }
