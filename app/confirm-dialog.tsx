@@ -7,7 +7,8 @@ import { Button } from "../components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../components/ui/dialog";
 import { ShieldIcon } from "../components/ui/shield-icon";
 import { InputOTP } from "../components/ui/input-otp";
-import { drafts, usePasskey, touchFor, type Rpc, type TouchQuery } from "./code";
+import { ConfirmCancelled } from "./confirm-error";
+import { drafts, usePasskey, touchFor, type Rpc, type TouchQuery } from "./touch";
 
 /** What the dialog sends: a code or a signed touch. The action itself (`call`) is run by the dialog, so that its error is shown under the field. */
 export type ConfirmProof = { code?: string; passkey?: PasskeyAssertion };
@@ -22,13 +23,6 @@ export interface ConfirmRequest {
   /** The key the code draft lives under (a draft survives a redraw, as before). */
   draftKey: string;
   call: (proof: ConfirmProof) => Promise<unknown>;
-}
-
-/** The person closed the dialog: not an error, nothing is shown. */
-export class ConfirmCancelled extends Error {
-  constructor() {
-    super("confirmation cancelled");
-  }
 }
 
 export type AskConfirm = (req: ConfirmRequest) => Promise<unknown>;

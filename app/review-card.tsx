@@ -8,8 +8,10 @@ import { isMismatchEntry, approveVerb, enabledWhat, agentConfigNote, scopeText, 
 import { Card } from "../components/ui/card";
 import { DELETE_CONFIRM_BUTTONS, hasNoGuardRecord, NO_RECORD_FIX, NO_RECORD_HEADLINE, NO_RECORD_LINE } from "../src/ux";
 import { ChecksView } from "./checks";
-import { useCodeAction, type Rpc } from "./code";
-import { useProof, ProofField, Emph, ProofNotes } from "./confirm";
+import { useCodeAction } from "./code";
+import { type Rpc } from "./touch";
+import { ProofField, Emph, ProofNotes } from "./confirm";
+import { useProof } from "./proof";
 import { ScanResultView, ScanButton } from "./scan";
 import { card, btn, btnPrimary, input, muted, btnDanger, Fold, FoldAccordion, Msg, Tip } from "./ui";
 import { cardLevel, LEVEL_LABEL, permissionList, whyLine, type CardLevel } from "../src/cardview";

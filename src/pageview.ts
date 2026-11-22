@@ -5,11 +5,6 @@ import { awayText, type AwayGroup, type ProblemRef, type Status } from "./ux";
 /** The anchor of the alarm «Второй фактор не настроен»: without a second factor nothing can be approved, so it is the first thing to do, not a calm line. */
 export const SECOND_FACTOR_ANCHOR = "sbb-registration";
 
-/** Every alarm is a real alarm and stays visible; none is turned down to a calm line. (`calm` is kept empty for the callers that ask.) */
-export function splitAlarms(alarms: ProblemRef[]): { critical: ProblemRef[]; calm: ProblemRef[] } {
-  return { critical: alarms, calm: [] };
-}
-
 export type HeaderTone = "ok" | "waiting" | "alarm";
 
 export interface HeaderLine {
@@ -24,7 +19,7 @@ export interface HeaderLine {
 
 /** The one state of the header. Waiting cards never make a red alarm; stopped plugins, a guard that is down, a missing second factor and the other alarms do. */
 export function headerLine(i: { status: { level: Status["level"]; first: ProblemRef | null }; waiting: number; deferred: number; alarms: ProblemRef[] }): HeaderLine {
-  const { critical } = splitAlarms(i.alarms);
+  const critical = i.alarms;
   const first = i.status.first;
   if (i.status.level === "down") return { tone: "alarm", text: "Тревога: защита не отвечает", target: first, action: first ? "Показать" : null };
   if (i.status.level === "stopped") {

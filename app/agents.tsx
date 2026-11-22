@@ -5,8 +5,10 @@ import type { AgentDrift, SettingsPart } from "../src/guardlink";
 import { humanError, clockText, agentAlarmText, PARTS_HEADLINE, PARTS_HELP, PART_BACK, PART_BACK_FRESH_NOTE, PART_FRESH_NOTE, PART_KEEP, PART_NO_BACK, drawableParts, isStalePart, partBackNote, partKeptNote, partNeedsFresh, partTitle, agentAcceptProblem, criticalAcceptTitle, manualRollback, criticalMeanings, isCriticalDrift, reconcileSelection, selectableDriftIds, toggleId } from "../src/ux";
 import { restoreNote } from "../src/ux";
 import { useApproval } from "./approval";
-import { useCodeAction, type Rpc } from "./code";
-import { Rich, useProof } from "./confirm";
+import { useCodeAction } from "./code";
+import { type Rpc } from "./touch";
+import { Rich } from "./confirm";
+import { useProof } from "./proof";
 import { card, btn, btnPrimary, input, muted, cardBlocked, btnDanger, when, useSticky, Fold, Msg } from "./ui";
 
 // Guard mode. The guard reads the agents' files (settings, rules, memory, MCP) and compares them with the baseline a human accepted;

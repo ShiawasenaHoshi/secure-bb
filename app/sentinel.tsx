@@ -4,7 +4,8 @@ import { OUTCOME_LABEL, firedText, verdictText } from "../src/sentinel/view";
 import type { QuestionView } from "../src/sentinel/view";
 import type { FeedRow } from "../src/sentinel/types";
 import { defined } from "../src/rpc-input";
-import { useCodeAction, CodeField, type Rpc } from "./code";
+import { useCodeAction, CodeField } from "./code";
+import { type Rpc } from "./touch";
 import { card, btn, input, muted, when, Fold, Msg } from "./ui";
 
 export function FeedItem({ row, riskThreshold }: { row: FeedRow; riskThreshold: number }) {

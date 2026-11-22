@@ -7,7 +7,7 @@ import { T } from "../src/text";
 import { doneMessage, sameData } from "../src/ux";
 import { splitNotes, toastPosition, type Box } from "../src/stable-view";
 import { isFoldOpen, toggleFold } from "../src/fold";
-import { press } from "./code";
+import { press } from "./press";
 import { buttonVariants } from "../components/ui/button";
 import { Accordion } from "../components/ui/accordion";
 import { cn } from "../lib/utils";

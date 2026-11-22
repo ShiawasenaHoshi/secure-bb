@@ -1,7 +1,9 @@
 import { useState } from "react";
 import type { Overview } from "../src/overview";
-import { useCodeAction, type Rpc } from "./code";
-import { useProof, ProofField, ProofNotes } from "./confirm";
+import { useCodeAction } from "./code";
+import { type Rpc } from "./touch";
+import { ProofField, ProofNotes } from "./confirm";
+import { useProof } from "./proof";
 import { card, btn, btnPrimary, input, muted, Msg } from "./ui";
 
 /** "Approve the selected": the list is fixed on the server and shown with its hash BEFORE the code; one code approves the whole list. */

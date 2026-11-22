@@ -7,7 +7,8 @@ import { cardFoldId, isBlockedEntry, MISMATCH_HINT } from "../src/ux";
 import { isMismatchEntry } from "../src/ux";
 import { useApproval, RoutineCode } from "./approval";
 import { ChecksView } from "./checks";
-import { useCodeAction, usePasskey, TouchNote, touchFor } from "./code";
+import { useCodeAction, TouchNote } from "./code";
+import { usePasskey, touchFor } from "./touch";
 import { ScanResultView, ScanButton } from "./scan";
 import { card, btn, btnPrimary, input, muted, cardBlocked, btnDanger, when, Fold, Msg } from "./ui";
 
