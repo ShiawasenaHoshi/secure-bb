@@ -11,6 +11,8 @@ beforeAll(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   // The dialog asks for the viewport kind; jsdom has no matchMedia.
   window.matchMedia ??= ((query: string) => ({ matches: false, media: query, onchange: null, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}, dispatchEvent: () => false })) as never;
+  // jsdom has no WebAuthn: the dialog offers the key only where it can work.
+  Object.defineProperty(navigator, "credentials", { value: { get: () => Promise.resolve(null) }, configurable: true });
   (globalThis as { ResizeObserver?: unknown }).ResizeObserver ??= class { observe() {} unobserve() {} disconnect() {} };
 });
 
@@ -129,5 +131,42 @@ describe("the confirmation dialog", () => {
     expect(codeField()).toBeNull();
     expect(document.body.textContent).toContain("Приложить палец / ключ");
   });
-});
 
+  const keyGuard = (origin: string, totpOff = false) => ({ connected: true, passkey: { keys: [{ id: "k", label: "Mac", aaguid: "", lastUsedAt: null }], totpOff, origin, enrollmentOpen: false } });
+  const buttonTexts = () => Array.from(document.body.querySelectorAll("button")).map((b) => b.textContent);
+  const open = async (guard: unknown) => {
+    const { slot } = mount({ what: "Разрешить chime 0.1.0", query: { kind: "approve", queueId: 1 }, draftKey: `o${Math.random()}`, call: async () => "done" }, { guard });
+    await act(async () => void (await slot.findByText("go")).click());
+  };
+
+  it("on another origin the code is offered at once, the key is not, and the link leads to the guard's address", async () => {
+    await open(keyGuard("http://localhost:38886"));
+    expect(codeField()).not.toBeNull();
+    expect(buttonTexts()).not.toContain("Приложить палец / ключ");
+    expect(document.body.querySelector("[data-secure-bb-key-note]")?.textContent).toContain("Ключ работает в браузере на http://localhost:38886; здесь — код из приложения.");
+    const link = document.body.querySelector("[data-secure-bb-key-note] a") as HTMLAnchorElement;
+    expect(link.textContent).toBe("Открыть в браузере");
+    expect(link.href).toBe(`http://localhost:38886${window.location.pathname}`);
+    expect(link.rel).toContain("noopener");
+  });
+
+  it("in the bb app the code comes first and the key is secondary, even at the right origin", async () => {
+    const ua = vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 Chrome/140 Electron/44.1 Safari/537");
+    try {
+      await open(keyGuard(window.location.origin));
+      const html = document.body.innerHTML;
+      expect(html.indexOf('autocomplete="one-time-code"')).toBeLessThan(html.indexOf("Приложить палец / ключ"));
+      expect(document.body.querySelector("[data-secure-bb-key-note] a")).not.toBeNull();
+    } finally {
+      ua.mockRestore();
+    }
+  });
+
+  it("with codes off and a foreign origin there is no code and no key: the words and the link only", async () => {
+    await open(keyGuard("http://localhost:38886", true));
+    expect(codeField()).toBeNull();
+    expect(buttonTexts()).not.toContain("Приложить палец / ключ");
+    expect(document.body.textContent).toContain("Коды отключены");
+    expect(document.body.querySelector("[data-secure-bb-key-note] a")).not.toBeNull();
+  });
+});

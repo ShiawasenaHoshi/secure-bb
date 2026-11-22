@@ -46,6 +46,8 @@ export function startTouchNote(description: string, shown: (text: string) => voi
   return () => timers.clear(handle);
 }
 
+export const OPEN_IN_BROWSER = "Открыть в браузере";
+
 export const CODE_HINT = "6 цифр из приложения на телефоне (Google Authenticator и т. п.)";
 
 export const KEY_HINT = "приложите палец";
