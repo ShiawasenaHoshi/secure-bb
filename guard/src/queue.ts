@@ -3,6 +3,7 @@
 import { randomBytes } from "node:crypto";
 import { identityOf, liftBlock, MAX_SOURCES, MODE_RANK, normalizeEntry, TRUST_MODES, type ReasonKind, type Rights, type TrustMode } from "./trust.ts";
 import { GuardError, HOUR_MS, BATCH_TTL_MS, MAX_PENDING_BATCHES, MAX_BATCH_ITEMS, sha256hex, MAX_HOLDS_PER_HOUR, MAX_QUEUE_ROWS, MAX_ANNOTATIONS, MAX_FINDINGS_BYTES, type DecideInput, type ApprovalRow, type QueueRow, type Raw, touchWhy, approvalOf, queueOf, str, pluginIdOf, hashOf, intOf, type Proof, factorDetail, type ImportItem, type NewApproval } from "./guard-types.ts";
+import { cleanReason } from "./learning.ts";
 import { WindowGuard } from "./windows.ts";
 
 export class QueueGuard extends WindowGuard {
@@ -156,7 +157,7 @@ export class QueueGuard extends WindowGuard {
       const a = this.addApproval({ contentHash: q.contentHash, pluginId: q.pluginId, version: q.version, source: q.source, sourceKind: q.sourceKind, rootDir: q.rootDir, gitCommit: null, npmIntegrity: null, via: "touch", windowId: null, rights: q.rights, why: touchWhy(q.note) });
       this.resolveQueue(q.pluginId, q.contentHash, "approved");
       // The record says what exactly was approved: after the fact, this is what the owner reads.
-      this.log("approved.touch", q.pluginId, q.contentHash, { approval: a.id, review: q.id, version: q.version, source: q.source, sourceKind: q.sourceKind, rootDir: q.rootDir, ...(ack ? { acknowledgeBlock: true } : {}), ...factorDetail(factor) });
+      this.log("approved.touch", q.pluginId, q.contentHash, { approval: a.id, review: q.id, version: q.version, source: q.source, sourceKind: q.sourceKind, rootDir: q.rootDir, ...(ack ? { acknowledgeBlock: true } : {}), ...factorDetail(factor), ...this.learning({ queue: q }) });
       return { approval: a };
     });
   }
@@ -178,7 +179,7 @@ export class QueueGuard extends WindowGuard {
       this.resolveQueue(q.pluginId, q.contentHash, "approved");
       const next = cur.includes(entry) ? cur : [...cur, entry].sort();
       this.setMeta("my_sources", JSON.stringify(next));
-      this.log("approved.trust", q.pluginId, q.contentHash, { approval: a.id, review: q.id, version: q.version, source: q.source, sourceKind: q.sourceKind, rootDir: q.rootDir, trustedSource: entry, sourceWasTrusted: cur.includes(entry), ...factorDetail(factor) });
+      this.log("approved.trust", q.pluginId, q.contentHash, { approval: a.id, review: q.id, version: q.version, source: q.source, sourceKind: q.sourceKind, rootDir: q.rootDir, trustedSource: entry, sourceWasTrusted: cur.includes(entry), ...factorDetail(factor), ...this.learning({ queue: q }) });
       return { approval: a, entry, mySources: next };
     });
   }
@@ -272,7 +273,7 @@ export class QueueGuard extends WindowGuard {
         }
         const a = this.addApproval({ contentHash: q.contentHash, pluginId: q.pluginId, version: q.version, source: q.source, sourceKind: q.sourceKind, rootDir: q.rootDir, gitCommit: null, npmIntegrity: null, via: "touch", windowId: null, rights: q.rights, why: touchWhy(q.note) });
         this.resolveQueue(q.pluginId, q.contentHash, "approved");
-        this.log("approved.touch", q.pluginId, q.contentHash, { approval: a.id, review: q.id, version: q.version, source: q.source, sourceKind: q.sourceKind, rootDir: q.rootDir, batch: b.id, ...factorDetail(factor) });
+        this.log("approved.touch", q.pluginId, q.contentHash, { approval: a.id, review: q.id, version: q.version, source: q.source, sourceKind: q.sourceKind, rootDir: q.rootDir, batch: b.id, ...factorDetail(factor), ...this.learning({ queue: q }) });
         results.push({ kind: "queue", id: it.id, label: it.label, ok: true, local: false, note: "одобрено" });
       }
       return { results };
@@ -285,7 +286,7 @@ export class QueueGuard extends WindowGuard {
     return this.tx(() => {
       const stop = (this.db.prepare(`SELECT stop FROM queue WHERE id = ?`).get(q.id) as { stop: number } | undefined)?.stop === 1;
       this.resolveQueue(q.pluginId, q.contentHash, "dismissed");
-      this.log("dismissed", q.pluginId, q.contentHash, { review: q.id, version: q.version, ...(stop ? { stop: true } : {}) });
+      this.log("dismissed", q.pluginId, q.contentHash, { review: q.id, version: q.version, ...(stop ? { stop: true } : {}), ...this.learning({ queue: q }) });
       // A stop means the plugin's hook saw something the window must not wave through (a new capability, a tainted tree).
       // Rejecting it does not lift the stop (see isStopped), and the plugin's window is closed too: tightening, journaled.
       if (stop) for (const w of this.unclosedWindows()) if (w.pluginId === q.pluginId) this.closeWindowInner(w, "dismissed-stop");
@@ -297,6 +298,7 @@ export class QueueGuard extends WindowGuard {
    * be able to keep the owner from revoking). By approval id: every approval of that version goes. By plugin id: all of them, and its windows.
    */
   revoke(raw: Record<string, unknown>): { revoked: number } {
+    const reason = cleanReason(raw.reason);
     return this.tx(() => {
       let rows: ApprovalRow[];
       if (raw.approvalId !== undefined) {
@@ -311,7 +313,7 @@ export class QueueGuard extends WindowGuard {
       }
       for (const a of rows) {
         this.db.prepare(`UPDATE approvals SET revoked_at = ? WHERE id = ?`).run(this.now(), a.id);
-        this.log("revoked", a.pluginId, a.contentHash, { approval: a.id, version: a.version });
+        this.log("revoked", a.pluginId, a.contentHash, { approval: a.id, version: a.version, ...(reason ? { reason } : {}), ...this.seenForApproval(a) });
       }
       return { revoked: rows.length };
     });

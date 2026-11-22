@@ -123,7 +123,7 @@ export function Tip({ tip, children, className }: { tip: ReactNode; children: Re
 }
 
 /** The disclosure of the bb look (Accordion) whose state is kept the way Fold's is: by id, outside the component, so a redraw does not close it. */
-export function FoldAccordion({ id, title, children, defaultOpen = false, className }: { id: string; title: ReactNode; children: ReactNode; defaultOpen?: boolean; className?: string }) {
+export function FoldAccordion({ id, title, children, defaultOpen = false, className, onToggle }: { id: string; title: ReactNode; children: ReactNode; defaultOpen?: boolean; className?: string; onToggle?: (open: boolean) => void }) {
   const [, redraw] = useReducer((n: number) => n + 1, 0);
   return (
     <Accordion
@@ -131,8 +131,9 @@ export function FoldAccordion({ id, title, children, defaultOpen = false, classN
       className={className}
       title={title}
       open={isFoldOpen(id, defaultOpen)}
-      onOpenChange={() => {
+      onOpenChange={(next) => {
         toggleFold(id, defaultOpen);
+        onToggle?.(next);
         redraw();
       }}
     >

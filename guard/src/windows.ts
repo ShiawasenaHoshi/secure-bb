@@ -2,9 +2,10 @@
 // Whether a version passes by a window is decide.ts (`windowRefuses`); here a window only exists, slides and ends.
 import { guardPolicyWidens } from "./policy.ts";
 import { GuardError, MAINTENANCE_DEFAULT_MIN, MAINTENANCE_MAX_MIN, MAX_TROUBLESHOOT_MIN, str, type MaintenanceRow, type Policy, type WindowRow, type Raw, windowOf, pluginIdOf, intOf, type Proof, factorDetail } from "./guard-types.ts";
-import { FactorGuard } from "./factor.ts";
+import { parseRights } from "./trust.ts";
+import { LearningGuard } from "./learning-guard.ts";
 
-export class WindowGuard extends FactorGuard {
+export class WindowGuard extends LearningGuard {
   // ---- windows ------------------------------------------------------------
   protected unclosedWindows(): WindowRow[] {
     return (this.db.prepare(`SELECT * FROM windows WHERE closed_at IS NULL`).all() as Raw[]).map(windowOf);
@@ -73,7 +74,7 @@ export class WindowGuard extends FactorGuard {
         .prepare(`INSERT INTO windows (plugin_id, size_sec, cap_sec, mode, opened_at, expires_at, hard_expires_at, scope, base_rights) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(pluginId, minutes * 60, policy.capMin * 60, policy.mode, now, Math.min(now + minutes * 60_000, hard), hard, raw.scope === "tree" || raw.scope === "thread" ? raw.scope : "all", held?.rights ?? null);
       const w = windowOf(this.db.prepare(`SELECT * FROM windows WHERE id = ?`).get(Number(info.lastInsertRowid)) as Raw);
-      this.log("window.open", pluginId, null, { windowId: w.id, minutes, mode: w.mode, ceilingMin: policy.capMin, ...factorDetail(factor) });
+      this.log("window.open", pluginId, null, { windowId: w.id, minutes, mode: w.mode, ceilingMin: policy.capMin, ...factorDetail(factor), seen: this.learning({ rights: held?.rights ? parseRights(held.rights) : null }).seen });
       return w;
     });
   }

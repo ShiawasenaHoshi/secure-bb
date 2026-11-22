@@ -1,4 +1,4 @@
-// sbb-guard: serve | totp-register | totp-disable | passkey-enroll | passkey-list | passkey-remove | troubleshoot | maintenance | status | journal-verify | import
+// sbb-guard: serve | totp-register | totp-disable | passkey-enroll | passkey-list | passkey-remove | troubleshoot | maintenance | status | journal-verify | export-decisions | import
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import net from "node:net";
@@ -8,6 +8,7 @@ import { resolvePaths, type GuardPaths } from "./config.ts";
 import { openDb, privateDir } from "./db.ts";
 import { Guard, GuardError, SETUP_CHECK_PURPOSE, type ImportItem, type PasskeyRow } from "./guard.ts";
 import { encodeQr } from "./qr.ts";
+import { parseSince } from "./learning.ts";
 import { SocketGroupError } from "./chown.ts";
 import { listen } from "./server.ts";
 import { generateSecret, otpauthUri } from "./totp.ts";
@@ -53,6 +54,7 @@ const USAGE = `sbb-guard ${VERSION} — decision guard for secure-bb
   sbb-guard maintenance begin|end|status [--data DIR] [--reason WORDS] [--minutes N]
   sbb-guard status [--data DIR] [--socket PATH]
   sbb-guard journal-verify [--data DIR]
+  sbb-guard export-decisions [--since 30d|12h|YYYY-MM-DD] [--data DIR] > decisions.jsonl
   sbb-guard import FILE [--data DIR] [--yes] [--digest SHA256]
 
 Agent watch (serve): --agents-home / SBB_GUARD_AGENTS_HOME (default /var/bbagent) is the agents' home; the working directories of threads are found in it
@@ -659,6 +661,34 @@ export async function status(paths: GuardPaths, io: Io, now: () => number = Date
   }
 }
 
+/**
+ * `export-decisions --since 30d`: the owner's file for learning, one JSON line per decision (see "Журнал для обучения" in the README). Console only: no socket op reaches it,
+ * so an agent or a plugin cannot run it. Only the line's fields leave the guard (a fixed list; no code, no conversations); the run itself is a journal record.
+ */
+export function exportDecisions(paths: GuardPaths, io: Io, opts: Opts, now: () => number = Date.now): number {
+  if (!existsSync(paths.db)) {
+    io.err("no database here");
+    return 1;
+  }
+  const { guard, close } = open(paths, now);
+  try {
+    const sinceText = optStr(opts, "since") ?? "30d";
+    const rows = guard.exportDecisions(parseSince(sinceText, now()));
+    for (const r of rows) io.out(JSON.stringify(r));
+    guard.record("decisions.export", null, null, { since: sinceText, count: rows.length });
+    io.err(`${rows.length} decisions exported (since ${sinceText})`);
+    return 0;
+  } catch (err) {
+    if (err instanceof GuardError) {
+      io.err(err.message);
+      return 1;
+    }
+    throw err;
+  } finally {
+    close();
+  }
+}
+
 export function journalVerify(paths: GuardPaths, io: Io, now: () => number = Date.now): number {
   if (!existsSync(paths.db)) {
     io.err("no database here");
@@ -857,6 +887,8 @@ export async function main(argv: string[], io: Io = terminalIo): Promise<number>
         return await status(paths, io);
       case "journal-verify":
         return journalVerify(paths, io);
+      case "export-decisions":
+        return exportDecisions(paths, io, opts);
       case "import":
         if (positionals.length !== 1) {
           io.err("import needs one file");

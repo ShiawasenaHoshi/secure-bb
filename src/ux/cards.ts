@@ -278,3 +278,9 @@ export const NO_RECORD_HEADLINE = "Эту версию нельзя разреш
 export const NO_RECORD_LINE = "Плагин загрузился в обход проверки, поэтому одобрить его по отпечатку нельзя. Исправляется так: удалите эту версию и поставьте плагин заново через «bb secure-bb propose» — тогда защита проверит его и карточка станет обычной.";
 
 export const NO_RECORD_FIX = "Удалить, чтобы поставить заново";
+
+/**
+ * The version of the words and layout of the card, written into the journal beside each decision, so that a change of the texts can be told apart from a change
+ * of the person's habits when the journal is read later. Bump it whenever the card's sentences, buttons or order change in a way a person could notice.
+ */
+export const CARD_TEXTS_VERSION = 1;

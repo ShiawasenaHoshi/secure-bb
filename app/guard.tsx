@@ -7,6 +7,7 @@ import type { PasskeyAssertion } from "../src/guardlink";
 import { MODE_DESCRIPTIONS, MODE_NAMES, SAVED_NARROWING, aaguidName, isPasswordManager } from "../src/ux";
 import { useCodeAction, CodeField, TouchNote } from "./code";
 import { type Rpc, usePasskey, touchFor } from "./touch";
+import { DecisionMark } from "./decision-mark";
 import { card, btn, btnPrimary, input, muted, when, Fold, Msg } from "./ui";
 
 export function GuardAlarm({ ov }: { ov: Overview }) {
@@ -136,6 +137,7 @@ export function GuardJournal({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnTy
           {g.recent.map((r) => (
             <li key={r.id} className="break-all">
               #{r.id} {when(r.ts)} {r.kind}{r.pluginId ? ` ${r.pluginId}` : ""}{whyOf(r.detail) ? ` — ${whyOf(r.detail)}` : ""}{r.detail ? ` ${JSON.stringify(r.detail).slice(0, 200)}` : ""}
+              <DecisionMark r={r} recent={g.recent} rpc={rpc} refetch={refetch} />
             </li>
           ))}
         </ul>

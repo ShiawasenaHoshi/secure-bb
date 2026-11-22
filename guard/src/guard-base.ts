@@ -1,5 +1,5 @@
 // The guard's plumbing: the database handle, the clock, the journal (`log`, `tx`), the policy and trust-mode reads, and the state every other layer shares.
-// The Guard class is built as a chain of layers (base → agents-plan → actions → factor → windows → queue → decide → agents-watch → agents-apply → guard.ts), one file each;
+// The Guard class is built as a chain of layers (base → agents-plan → actions → factor → learning-guard → windows → queue → decide → agents-watch → agents-apply → guard.ts), one file each;
 // a layer calls only the layers below it, so the imports run one way. The public API is the one `Guard` always had.
 import { dirname } from "node:path";
 import type { DatabaseSync } from "node:sqlite";

@@ -93,12 +93,23 @@ export function queueRpc(c: RpcCtx) {
       changed();
       return { ok: true as const };
     }),
-    "approval.revoke": wrap(async ({ approvalId }) => {
+    // The journal for learning. Both are advisory and only exist at the guard: without one they do nothing.
+    "card.view": wrap(async ({ id, ...report }) => {
+      if (guardLink && id > 0) await guardLink.view(id, report);
+      return { ok: true as const };
+    }),
+    "decision.mark": wrap(async ({ record, mark, reason }) => {
+      const link = needGuard();
+      await link.mark(record, mark, reason);
+      changed();
+      return { ok: true as const };
+    }),
+    "approval.revoke": wrap(async ({ approvalId, reason }) => {
       let a: { pluginId: string };
       if (guardLink) {
         const found = (await guardLink.state()).approvals.find((x) => x.id === approvalId);
         if (!found) throw new GateError("not_found", "no such active approval");
-        await guardLink.revoke({ approvalId });
+        await guardLink.revoke({ approvalId, ...(reason ? { reason } : {}) });
         store.log("revoked", found.pluginId, found.contentHash, { version: found.version, at: "guard" });
         a = found;
       } else a = gate.revoke(approvalId);

@@ -10,7 +10,7 @@
 // by anything in this file. A touch is either a TOTP code or a passkey signature over a challenge the guard issued for exactly
 // that action (see "Passkeys" below); passkeys are registered only through the console (`sbb-guard passkey-enroll`).
 //
-// This file is the front: `Guard` is the class everyone knows, built from layers (guard-base.ts → agents-plan.ts → guard-actions.ts → factor.ts → windows.ts → queue.ts → decide.ts → agents-watch.ts
+// This file is the front: `Guard` is the class everyone knows, built from layers (guard-base.ts → agents-plan.ts → guard-actions.ts → factor.ts → learning-guard.ts → windows.ts → queue.ts → decide.ts → agents-watch.ts
 // → agents-apply.ts), each below the next and calling only what is below it. What it adds itself is `state()`, the one view that reads every layer.
 
 import { readHead } from "./journal.ts";

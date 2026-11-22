@@ -94,7 +94,22 @@ export const rpcContract = defineRpcContract({
     output: s.json<{ ok: true }>(),
   },
   "window.close": { input: s.object({ windowId: id }), output: s.json<{ ok: true }>() },
-  "approval.revoke": { input: s.object({ approvalId: id }), output: s.json<{ ok: true }>() },
+  "approval.revoke": { input: s.object({ approvalId: id, reason: s.optional(s.string({ max: 200 })) }), output: s.json<{ ok: true }>() },
+  // The journal for learning (guard mode). `card.view`: the page says it showed a card, opened «Подробнее» or pressed «Решить позже», and what the card showed.
+  // `decision.mark`: the owner's one-click note on a decision afterwards. Neither decides anything and neither needs a code.
+  "card.view": {
+    input: s.object({
+      id: queueId,
+      event: s.oneOf(["shown", "details", "later"] as const),
+      level: s.optional(s.string({ max: 24 })),
+      findings: s.optional(s.array(s.object({ rule: s.string({ max: 64 }), file: s.optional(s.string({ max: 200 })), line: s.optional(s.integer({ min: 1, max: 9_999_999 })) }), { max: 40 })),
+      ai: s.optional(s.array(s.object({ model: s.string({ max: 64 }), status: s.string({ max: 16 }) }), { max: 8 })),
+      textsVersion: s.optional(s.integer({ min: 0, max: 999_999 })),
+      detailsOpen: s.optional(s.boolean()),
+    }),
+    output: s.json<{ ok: true }>(),
+  },
+  "decision.mark": { input: s.object({ record: id, mark: s.oneOf(["false_alarm", "was_dangerous", "unknown"] as const), reason: s.optional(s.string({ max: 200 })) }), output: s.json<{ ok: true }>() },
   // Agent watch (guard mode): a scan on request (the guard serves one at most every 10 s), and accepting differences into the baseline: a touch for exactly these ids.
   "agents.scan": { input: s.nullValue(), output: s.json<AgentsView>() },
   "agents.reject": { input: s.object({ ids: s.array(id, { max: 2000 }) }), output: s.json<{ ok: true; rejected: number; note: string }>() },

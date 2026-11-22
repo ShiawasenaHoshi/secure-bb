@@ -196,6 +196,15 @@ export const MIGRATIONS: string[] = [
      ended_at INTEGER,
      reason TEXT NOT NULL,
      ended_how TEXT)`,
+  // The journal for learning: what the page said it showed on a card and when. Advisory (the page can lie in it); the guard's clock times the decision.
+  // `report`: JSON of what the card showed (level, findings by rule/file/line, the AI's verdicts by model, the version of the texts), cleaned before it is stored.
+  `CREATE TABLE card_views (
+     queue_id INTEGER PRIMARY KEY,
+     shown_at INTEGER NOT NULL,
+     details_at INTEGER,
+     details_open INTEGER NOT NULL DEFAULT 0,
+     later_n INTEGER NOT NULL DEFAULT 0,
+     report TEXT)`,
 ];
 
 export function openDb(path: string): DatabaseSync {
