@@ -2,6 +2,7 @@
 import { approvedByText } from "./decisions.js";
 import { friendlySource } from "./modes.js";
 import type { TabId } from "./status.js";
+import { clockText } from "./words.js";
 
 export interface DriftLike {
   id: number;
@@ -272,3 +273,19 @@ export const resetConfirmText = (rows: ExceptionRow[]): string => `Точно? �
 export const REVOKE_CODE_NOTE = "Отзыв ослабит агента (оставленный запрет вернётся к разрешённому): нужен свежий код или касание.";
 
 export const RESET_NOTE = "Закрывает все окна, отзывает одобрения и оставленные изменения агентов, очищает «мои источники». Это ужесточение, касание не нужно, кроме оставленных запретов: их отзыв ослабил бы агента, они остаются и отзываются по одному, с кодом. Плагины, у которых отозвано одобрение, перестанут загружаться, пока вы не решите заново. Режим не меняется.";
+
+/** What «Вернуть как было» writes back, by the kind of the file's restore. */
+export function restoreActionText(action: string): string {
+  if (action === "delete") return "Этого файла в одобренных настройках не было — он будет удалён.";
+  if (action === "json") return "В общем файле настроек агента будут возвращены только списки MCP-серверов, как вы их одобряли; всё остальное в файле останется как есть.";
+  return "Файл будет записан в том виде, в каком вы его одобряли.";
+}
+
+/** The line under a difference the person rejected («Это не я»). */
+export function rejectedDriftText(rejectedAt: number | null | undefined, now: number): string {
+  const when = rejectedAt ? ` (${clockText(rejectedAt, now)}, кнопкой «Это не я»)` : "";
+  return `Вы отклонили это изменение${when}: в одобренные настройки оно не попало. Но в самом файле оно всё ещё есть, поэтому тревога и пометка «под подозрением» остаются.`;
+}
+
+/** The line when the file cannot be put back by the helper, with the guard's reason when it gave one. */
+export const noRestoreText = (reason: string | null): string => `Автоматически вернуть этот файл нельзя${reason ? `: ${reason}` : ""}`;

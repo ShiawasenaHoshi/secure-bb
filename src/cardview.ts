@@ -1,6 +1,12 @@
 // What the card of a waiting version shows, as data (the page only draws it): the level, the one line of «why», the rights as rows. No new judgement
 // here: the words and the verdicts come from ux.ts (riskHeadline, capabilityPhrase, flowClause, …); this file only arranges them.
-import { capabilityPhrase, flowClause, hostsOf, programName, riskHeadline, uiClickLine, type CapLike, type Risk } from "./ux";
+import type { QueueRow } from "./store";
+import type { CheckResult } from "./checks/types";
+import type { QueueUx } from "./uxview";
+import {
+  actionLabel, agentConfigNote, approveVerb, capabilityPhrase, capsWithPaths, cardColor, cardRisk, flowClause, hasNoGuardRecord, hostsOf, isMismatchEntry, isUnreadOnly, meaningfulCaps, mismatchText, NO_RECORD_HEADLINE, NO_RECORD_LINE, programName,
+  redText, redWhere, riskHeadline, trustButton, uiClickLine, unreadText, windowAvailability, yellowText, type CapLike, type Risk, type RedText, type TrustButton, type WindowAvail,
+} from "./ux";
 
 /** The detail of a network right whose address the code does not show (the same word ux.ts uses). */
 const UNRESOLVED_HOST_TOKEN = "unresolved-host";
@@ -165,4 +171,148 @@ export function whyLine(i: { authorWhy: string | null | undefined; caps: CapLike
   // The reason: the first sentence of the card's text (what is it that waits), without «Он сможет …» and the tail.
   const first = i.reasonLine.split(/(?<=[.!?])\s+/)[0] ?? i.reasonLine;
   return { text: first, byAuthor: false };
+}
+
+// ---- the extended queue card («Журнал»): what it shows, as data -----------------------------------------------------------------
+/** The facts the extended card is drawn from. `blocked` is the page's verdict on the entry (`isBlockedEntry`, which asks the guard's rule). */
+export interface QueueFacts {
+  held: boolean;
+  blocked: boolean;
+  /** The directory can be changed by someone other than the server's user: no code approves it; fix the directory, then it is looked at again. */
+  unsafeDir: boolean;
+}
+
+export const UNSAFE_DIR_PREFIX = "каталог доступен на запись другим";
+
+export function queueFacts(q: { status: string; reason: string | null }, blocked: boolean): QueueFacts {
+  return { held: q.status === "held", blocked, unsafeDir: q.reason?.startsWith(UNSAFE_DIR_PREFIX) ?? false };
+}
+
+/** The word at the top right of the card. */
+export function queueStatusWord(status: string, blocked: boolean): string {
+  if (status === "held") return blocked ? "заблокировано" : "держится";
+  if (status === "approved") return "одобрено";
+  return status === "stale" ? "устарело" : "отклонено";
+}
+
+/** Where the version came from, in one line, with what is special about the entry. */
+export function queueSourceLine(q: { sourceKind: string; source: string; threadId: string | null; kind: string; contentHash: string | null }): string {
+  const parts = [`${q.sourceKind}: ${q.source}`];
+  if (q.threadId) parts.push(`из чата ${q.threadId}`);
+  if (q.kind === "afterfact") parts.push("выключен после загрузки (его код уже выполнялся)");
+  if (q.kind === "proposal" && !q.contentHash) parts.push("предложен агентом, окно было закрыто");
+  return parts.join(" · ");
+}
+
+/** The one-line summary of the proposal's id: a local proposal has a negative id inside; the person reads "предложение 4", not "#-4". */
+export const queueLabel = (id: number): string => (id < 0 ? `предложение ${-id}` : `#${id}`);
+
+// ---- the card of a waiting version: what it shows, as data -----------------------------------------------------------------------
+export interface ReviewView {
+  red: boolean;
+  level: CardLevel;
+  risk: Risk;
+  /** A version the guard has no record of (it loaded without the guard's check): nothing here can approve it, and a green «можно включить» would be a lie. */
+  noRecord: boolean;
+  mismatch: boolean;
+  unsafeDir: boolean;
+  /** The title and the sentence of the red / mismatch / yellow text. */
+  text: RedText | { title: string; line: string };
+  caps: CapLike[];
+  rights: PermissionList;
+  why: { text: string; byAuthor: boolean };
+  configNote: string | null;
+  /** «Разрешить chime 0.1.0». */
+  approveWhat: string;
+  /** What the line that takes the card's place says (after «Готово: »). */
+  allowedWhat: string;
+  win: WindowAvail;
+  trust: TrustButton;
+  /** «Разрешить» is offered: the card is neither red nor without a record at the guard. */
+  canApprove: boolean;
+}
+
+export interface ReviewInput {
+  q: QueueRow;
+  found: CheckResult | undefined;
+  ux: QueueUx | undefined;
+  flowDowngrade: boolean;
+}
+
+/** The words of the card for a version that is held: red (a hard flag, or files that did not match), or yellow (a new right, an unknown source). */
+function reviewText(i: ReviewInput, red: boolean, caps: CapLike[]): ReviewView["text"] {
+  const { q, found, ux } = i;
+  if (isMismatchEntry(q)) return mismatchText(q.pluginId, q.version);
+  if (!red) return yellowText({ pluginId: q.pluginId, version: q.version, level: ux?.level ?? "unknown", sourceLabel: ux?.sourceLabel ?? q.source, reason: q.reason, reasonKind: q.reasonKind, caps });
+  // Red because the guard did not read the version, with no hard flag found by anyone: told as «not read» (the lifting is the same, the words are true).
+  if (isUnreadOnly({ reason: q.reason, reasonKind: q.reasonKind, blocks: q.blocks, findings: found?.findings ?? [] })) return unreadText(q.pluginId, q.version, q.reason);
+  const r = redText((found?.findings ?? []).filter((f) => f.severity === "block").map((f) => f.rule));
+  const where = redWhere(caps);
+  return { title: `Остановлено: ${r.title}`, line: `Плагин «${q.pluginId}» ${q.version}. ${r.line}${where ? ` ${where}` : ""} Плагин не запущен.` };
+}
+
+export function reviewView(i: ReviewInput): ReviewView {
+  const { q, found, ux } = i;
+  const caps = capsWithPaths(found);
+  const red = cardColor({ reason: q.reason, reasonKind: q.reasonKind, blocks: q.blocks, findings: found?.findings ?? [] }) === "red";
+  const noRecord = hasNoGuardRecord(q);
+  const risk: Risk = noRecord ? { level: "caution", text: NO_RECORD_HEADLINE } : cardRisk(q, found, i.flowDowngrade);
+  const text = reviewText(i, red, caps);
+  const level = ux?.level ?? "unknown";
+  return {
+    red,
+    level: cardLevel({ red, risk }),
+    risk,
+    noRecord,
+    mismatch: isMismatchEntry(q),
+    unsafeDir: q.reason?.startsWith(UNSAFE_DIR_PREFIX) ?? false,
+    text,
+    caps,
+    rights: permissionList(red ? caps : meaningfulCaps(caps), i.flowDowngrade),
+    why: whyLine({ authorWhy: ux?.why, caps, reasonLine: noRecord ? NO_RECORD_LINE : text.line }),
+    configNote: agentConfigNote(found?.findings ?? []),
+    approveWhat: actionLabel(approveVerb(risk), q.pluginId, q.version),
+    allowedWhat: `${q.pluginId} ${q.version} разрешён и включён`,
+    win: windowAvailability({ threadId: q.threadId, queueId: q.id, sourceKind: q.sourceKind, level }),
+    trust: trustButton({ entry: ux?.entry ?? null, level, queueId: q.id }),
+    canApprove: !(red || noRecord),
+  };
+}
+
+// ---- the row of a third-party plugin («Журнал») ----------------------------------------------------------------------------------
+/** What the row says of the approved version: pinned (or frozen with a window), who confirmed it and how, or that it was never looked at. */
+export function pluginPinText(p: { pin: { version: string } | null; frozenPin: boolean; unreviewedBaseline: boolean }, approvedBy: string | null): string {
+  if (p.pin) return `${p.frozenPin ? "закреплена при заморозке" : "пин"}: ${p.pin.version} (${approvedBy})`;
+  return p.unreviewedBaseline ? "стоял до secure-bb, не проверялся" : "не одобрен";
+}
+
+/** The scan of the pinned version says whether it is the pinned one. */
+export const scanCurrentWord = (scan: { current: boolean } | undefined): string | undefined => (scan ? (scan.current ? "это закреплённая версия" : "не закреплённая версия") : undefined);
+
+// ---- the row of a skill («Журнал») -----------------------------------------------------------------------------------------------
+/** The findings worth a line (information is not), at most twelve. */
+export const skillFindingsShown = <F extends { severity: string }>(findings: F[]): F[] => findings.filter((f) => f.severity !== "info").slice(0, 12);
+
+/** What the scripts of a skill can do, in one line; null when nothing. */
+export function skillCapsLine(caps: Array<{ kind: string; detail: string[] }>): string | null {
+  if (caps.length === 0) return null;
+  return `Возможности скриптов: ${caps.map((c) => `${c.kind}${c.detail.length ? ` (${c.detail.slice(0, 3).join(", ")})` : ""}`).join("; ")}`;
+}
+
+// ---- the result of the AI scan next to a version ---------------------------------------------------------------------------------
+interface ScanLike {
+  status: string;
+  startedAt: number;
+  finishedAt: number | null;
+  note?: string | null;
+  models: Array<{ status: string; label: string }>;
+}
+
+/** The head of the scan's line: running, clean (when, by which models), a suspicion, or unavailable with the reason. `when` writes a time. */
+export function scanHeadText(scan: ScanLike, when: (ms: number) => string): string {
+  const at = when(scan.finishedAt ?? scan.startedAt);
+  if (scan.status === "running") return "идёт…";
+  if (scan.status === "clean") return `чисто (${at}, ${scan.models.filter((m) => m.status !== "unavailable").map((m) => m.label).join(", ")})`;
+  if (scan.status === "suspect") return `ПОДОЗРЕНИЕ (${at})`;
+  return `недоступен${scan.note ? `: ${scan.note}` : ""}`;
 }

@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { ReactNode } from "react";
 import type { Overview } from "../src/overview";
 import type { AgentDrift, SettingsPart } from "../src/guardlink";
-import { humanError, clockText, agentAlarmText, PARTS_HEADLINE, PARTS_HELP, PART_BACK, PART_BACK_FRESH_NOTE, PART_FRESH_NOTE, PART_KEEP, PART_NO_BACK, drawableParts, isStalePart, partBackNote, partKeptNote, partNeedsFresh, partTitle, agentAcceptProblem, criticalAcceptTitle, manualRollback, criticalMeanings, isCriticalDrift, reconcileSelection, selectableDriftIds, toggleId } from "../src/ux";
+import { humanError, clockText, noRestoreText, rejectedDriftText, restoreActionText, agentAlarmText, PARTS_HEADLINE, PARTS_HELP, PART_BACK, PART_BACK_FRESH_NOTE, PART_FRESH_NOTE, PART_KEEP, PART_NO_BACK, drawableParts, isStalePart, partBackNote, partKeptNote, partNeedsFresh, partTitle, agentAcceptProblem, criticalAcceptTitle, manualRollback, criticalMeanings, isCriticalDrift, reconcileSelection, selectableDriftIds, toggleId } from "../src/ux";
 import { restoreNote } from "../src/ux";
 import { useApproval } from "./approval";
 import { useCodeAction } from "./code";
@@ -172,13 +172,13 @@ export function PartsPanel({ d, ov, rpc, refetch }: { d: AgentDrift; ov: Overvie
   );
 }
 
-/** One critical difference: what accepting it lets the agent do, and its own fresh touch (a session does not cover it, and neither does a pack). */
-export function CriticalAccept({ d, ov, rpc, refetch }: { d: AgentDrift; ov: Overview; rpc: Rpc; refetch: () => void }) {
+type Crit = { d: AgentDrift; ov: Overview; rpc: Rpc; refetch: () => void };
+
+/** The actions of one critical difference; each takes its own fresh touch (a session does not cover them). */
+function useCriticalActions({ d, ov, rpc, refetch }: Crit) {
   const proof = useProof(ov, rpc, `drift:${d.id}`);
-  const ap = useApproval();
   const act = useCodeAction(refetch);
   const title = criticalAcceptTitle(d.reasons);
-  const restorable = d.restorable?.ok === true ? d.restorable : null;
   // «Вернуть как было»: the guard writes its own approved copy back through its helper; the touch is for exactly this difference.
   const restore = () =>
     void act.run(async () => proof.run({ kind: "agents.restore", ids: [d.id] }, (p) => rpc.call("agents.restore", { id: d.id, ...p } as never), { what: `Вернуть как было: ${d.rel}`, detail: "Файл будет записан в том виде, в каком вы его одобряли." }), "Готово: настройки агента возвращены, тревога снята");
@@ -189,44 +189,66 @@ export function CriticalAccept({ d, ov, rpc, refetch }: { d: AgentDrift; ov: Ove
       const r = await rpc.call("agents.reject", { ids: [d.id] });
       return { note: r.note };
     }, `отклонено изменение в ${d.rel}: тревога остаётся, пока файл не исправят`);
-  const acceptControls = (
+  return { proof, act, title, restore, accept, reject };
+}
+type CritCtl = ReturnType<typeof useCriticalActions>;
+
+function RestoreBlock({ d, c }: { d: AgentDrift; c: CritCtl }) {
+  const ap = useApproval();
+  const restorable = d.restorable?.ok === true ? d.restorable : null;
+  if (!restorable) return <p className="mt-2 text-xs" data-agent-no-restore={d.id}>{noRestoreText(d.restorable && !d.restorable.ok ? d.restorable.reason : null)}</p>;
+  const fresh = restoreNote(ap.session !== null);
+  return (
+    <div className="mt-2" data-agent-restore={d.id}>
+      <p>Агент работает с этим изменением прямо сейчас. {restoreActionText(restorable.action)} После этого защита сама перечитает файл и снимет тревогу.</p>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <button className={btnPrimary} disabled={c.act.busy || !c.proof.ready()} onClick={c.restore}>Вернуть как было</button>
+      </div>
+      {fresh ? <p className="mt-1 text-xs font-semibold" data-agent-restore-fresh={d.id}>{fresh}</p> : null}
+    </div>
+  );
+}
+
+function LateAccept({ c }: { c: CritCtl }) {
+  return (
     <>
       <div className="mt-2 flex flex-wrap items-center gap-2">
-        <button className={btnDanger} disabled={act.busy || !proof.ready()} onClick={accept}>Принять только это</button>
+        <button className={btnDanger} disabled={c.act.busy || !c.proof.ready()} onClick={c.accept}>Принять только это</button>
       </div>
-      <p className={`mt-1 text-xs ${muted}`}>Нужен свежий {proof.pk.has ? "код или касание" : "код"} именно на это изменение: сессия и «выбрать все» его не принимают.</p>
+      <p className={`mt-1 text-xs ${muted}`}>Нужен свежий {c.proof.pk.has ? "код или касание" : "код"} именно на это изменение: сессия и «выбрать все» его не принимают.</p>
     </>
   );
-  const stop = ov.agents?.stop;
+}
+
+function MoreFold({ d, c }: { d: AgentDrift; c: CritCtl }) {
+  return (
+    <Fold id={`drift-${d.id}-more`} className="mt-2" summaryClassName={`cursor-pointer text-xs ${muted}`} summary="Подробнее">
+      <p className="mt-1 text-xs">Вручную: {manualRollback(d.path, d.reasons)}</p>
+      {d.rejected ? null : (
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <button className={btn} disabled={c.act.busy} onClick={c.reject} title="Ничего не принимается и не удаляется: изменение помечается как чужое, тревога остаётся, пока файл не исправят. Код не нужен.">Это не я — отклонить</button>
+          <span className={`text-xs ${muted}`}>Отклонить — без кода: оно не станет «нормой», тревога останется, файл не изменится.</span>
+        </div>
+      )}
+      <Fold id={`drift-${d.id}-late-accept`} className="mt-2" summaryClassName={`cursor-pointer text-xs ${muted}`} summary="Это всё-таки вы? Принять изменение как есть">
+        <LateAccept c={c} />
+      </Fold>
+    </Fold>
+  );
+}
+
+/** One critical difference: what accepting it lets the agent do, and its own fresh touch (a session does not cover it, and neither does a pack). */
+export function CriticalAccept(p: Crit) {
+  const { d, ov, rpc, refetch } = p;
+  const c = useCriticalActions(p);
   return (
     <div className="mt-2 rounded-md border border-destructive p-2" data-agent-critical-accept={d.id}>
-      <p className="font-semibold text-destructive"><Rich text={title} /></p>
-      {d.rejected ? <p className="mt-1 text-xs">Вы отклонили это изменение{d.rejectedAt ? ` (${clockText(d.rejectedAt, Date.now())}, кнопкой «Это не я»)` : ""}: в одобренные настройки оно не попало. Но в самом файле оно всё ещё есть, поэтому тревога и пометка «под подозрением» остаются.</p> : null}
-      {restorable ? (
-        <div className="mt-2" data-agent-restore={d.id}>
-          <p>Агент работает с этим изменением прямо сейчас. {restorable.action === "delete" ? "Этого файла в одобренных настройках не было — он будет удалён." : restorable.action === "json" ? "В общем файле настроек агента будут возвращены только списки MCP-серверов, как вы их одобряли; всё остальное в файле останется как есть." : "Файл будет записан в том виде, в каком вы его одобряли."} После этого защита сама перечитает файл и снимет тревогу.</p>
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            <button className={btnPrimary} disabled={act.busy || !proof.ready()} onClick={restore}>Вернуть как было</button>
-          </div>
-          {restoreNote(ap.session !== null) ? <p className="mt-1 text-xs font-semibold" data-agent-restore-fresh={d.id}>{restoreNote(ap.session !== null)}</p> : null}
-        </div>
-      ) : (
-        <p className="mt-2 text-xs" data-agent-no-restore={d.id}>Автоматически вернуть этот файл нельзя{d.restorable && !d.restorable.ok ? `: ${d.restorable.reason}` : ""}</p>
-      )}
-      <StopAgents rpc={rpc} refetch={refetch} stop={stop} />
-      <Fold id={`drift-${d.id}-more`} className="mt-2" summaryClassName={`cursor-pointer text-xs ${muted}`} summary="Подробнее">
-        <p className="mt-1 text-xs">Вручную: {manualRollback(d.path, d.reasons)}</p>
-        {d.rejected ? null : (
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            <button className={btn} disabled={act.busy} onClick={reject} title="Ничего не принимается и не удаляется: изменение помечается как чужое, тревога остаётся, пока файл не исправят. Код не нужен.">Это не я — отклонить</button>
-            <span className={`text-xs ${muted}`}>Отклонить — без кода: оно не станет «нормой», тревога останется, файл не изменится.</span>
-          </div>
-        )}
-        <Fold id={`drift-${d.id}-late-accept`} className="mt-2" summaryClassName={`cursor-pointer text-xs ${muted}`} summary="Это всё-таки вы? Принять изменение как есть">
-          {acceptControls}
-        </Fold>
-      </Fold>
-      <Msg error={act.error} ok={act.ok} reserve />
+      <p className="font-semibold text-destructive"><Rich text={c.title} /></p>
+      {d.rejected ? <p className="mt-1 text-xs">{rejectedDriftText(d.rejectedAt, Date.now())}</p> : null}
+      <RestoreBlock d={d} c={c} />
+      <StopAgents rpc={rpc} refetch={refetch} stop={ov.agents?.stop} />
+      <MoreFold d={d} c={c} />
+      <Msg error={c.act.error} ok={c.act.ok} reserve />
     </div>
   );
 }
@@ -254,23 +276,16 @@ export function StopAgents({ rpc, refetch, stop }: { rpc: Rpc; refetch: () => vo
   );
 }
 
-export function AgentsSection({ ov, rpc, refetch, showDone }: { ov: Overview; rpc: Rpc; refetch: () => void; showDone: boolean }) {
-  const ag = ov.agents;
+type AgentsState = NonNullable<NonNullable<Overview["agents"]>["state"]>;
+
+/** The selection and the one «accept» for a set of plain differences (a critical one is accepted alone, in its own block). */
+function useAcceptSet({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; refetch: () => void }, drifts: AgentDrift[]) {
   const [pickedIds, setPickedIds] = useSticky<number[]>("agents-picked", []);
   const act = useCodeAction(refetch);
   const proof = useProof(ov, rpc, "agents-accept");
-  if (!ag) return <div className={`${card} ${muted}`}>Наблюдатель работает внутри сторожа решений; здесь его нет (режим сторожа выключен).</div>;
-  const st = ag.state;
-  if (!st) return <div className={card}><Msg error={ag.error ?? "сторож не ответил"} /></div>;
-  if (!st.enabled) return <div className={`${card} ${muted}`}>Сторож запущен без наблюдателя (нет каталога агентов в его настройках).</div>;
-  const drifts = st.drifts ?? [];
-  const pending = st.initial?.pending ?? 0;
-  const firstBaseline = pending > 0 && pending === drifts.length && (st.baselineFiles ?? 0) === 0;
   // The selection keeps what is still there and is not critical; a refresh itself neither adds nor removes anything.
   const chosen = reconcileSelection(pickedIds, drifts);
   const toggle = (id: number, on: boolean) => setPickedIds((p) => toggleId(reconcileSelection(p, drifts), id, on));
-  const criticalCount = drifts.filter(isCriticalDrift).length;
-  const plain = selectableDriftIds(drifts);
   const accept = (ids: number[]) =>
     void act.run(async () => {
       const problem = agentAcceptProblem(ids, drifts);
@@ -279,74 +294,141 @@ export function AgentsSection({ ov, rpc, refetch, showDone }: { ov: Overview; rp
       setPickedIds([]);
       return r;
     }, ids.length === 1 ? "принято одно изменение" : `приняты изменения: ${ids.length}`);
-  const buttons = (ids: number[], label: string) =>
-    ids.length === 0 ? null : (
-      <div className="flex flex-wrap items-center gap-2">
-        <button className={btnPrimary} disabled={act.busy || !proof.ready()} onClick={() => accept(ids)}>{label}</button>
-      </div>
-    );
+  return { act, proof, chosen, toggle, accept, setPickedIds };
+}
+type AcceptSet = ReturnType<typeof useAcceptSet>;
+
+function AcceptButtons({ ids, label, set }: { ids: number[]; label: string; set: AcceptSet }) {
+  if (ids.length === 0) return null;
   return (
-    <div className="space-y-3">
-      <div className={`${card} space-y-1`}>
-        <p>
-          Защита следит за настройками, правилами и памятью агентов и сравнивает их с теми, что вы одобрили. Просмотрено файлов: {st.scannedFiles ?? 0}
-          {st.lastScanAt ? `, последний просмотр ${when(st.lastScanAt)}` : ""}.
-        </p>
-        <Fold id="agents-more" summaryClassName={`cursor-pointer text-xs ${muted}`} summary="Подробнее">
-          <p className={`mt-1 text-xs ${muted}`}>
-            Одобренных файлов: {st.baselineFiles ?? 0}; каталогов-корней: {st.roots ?? 0}. Рабочие каталоги чатов защита находит сама; каталоги проектов в домашней папке в v1 не просматриваются. Критичное изменение закрывает временное доверие и помечает чат «под подозрением»; в его карточке есть кнопки «Вернуть как было» и «Остановить агентов».
-          </p>
-        </Fold>
-        <div className="flex flex-wrap items-center gap-2">
-          <button className={btn} disabled={act.busy} onClick={() => void act.run(async () => { await rpc.call("agents.scan", null); })}>Просмотреть сейчас</button>
-          <span className={`text-xs ${muted}`}>не чаще раза в 10 с</span>
-        </div>
-      </div>
-      {ag.error ? <Msg error={`Защита не ответила на последний запрос: ${humanError(ag.error)}`} /> : null}
-      {(st.alarms ?? []).length > 0 ? (
-        <div className={cardBlocked} role="alert">
-          <p className="font-semibold">Файлы агентов не читаются ({st.alarms!.length})</p>
-          <ul className="mt-1 list-disc pl-5 text-xs">{st.alarms!.map((x) => <li key={x.path} className="break-all">{x.path} — {alarmText(x)}</li>)}</ul>
-          <p className="mt-1 text-xs">Либо ACL чтения для пользователя сторожа снят или права сломаны, либо агент подсунул ссылку или подменил файл (сторож по ссылкам за пределы наблюдаемого не ходит и ничего оттуда не читает) (установщик выдаёт его, `--undo` снимает). Без него наблюдатель слепой.</p>
-        </div>
-      ) : null}
-      {(st.notes ?? []).length > 0 ? (
-        <ul className={`list-disc pl-5 text-xs ${muted}`}>{st.notes!.map((n, i) => <li key={i} className="break-all">{n.text}</li>)}</ul>
-      ) : null}
-      {firstBaseline ? (
-        <div className={`${card} space-y-2 border-border`}>
-          <h3 className="font-semibold">Первые одобренные настройки</h3>
-          <p>Первый просмотр нашёл {pending} файлов. Если всё это — как должно быть, примите их как есть одним касанием; дальше каждое расхождение будет ждать решения.{criticalCount > 0 ? ` Критичных среди них ${criticalCount}: каждое принимается отдельно, ниже, со своим касанием и своим объяснением, что именно вы разрешаете.` : ""}</p>
-          {buttons(plain, "Принять всё как есть")}
-        </div>
-      ) : null}
-      {drifts.length === 0 ? <div className={`${card} ${muted}`}>Расхождений с одобренными настройками нет.</div> : null}
-      {drifts.map((d) => (
-        <DriftCard key={d.id} d={d} picked={chosen.includes(d.id)} onPick={(on) => toggle(d.id, on)} threads={ag.threads[d.root] ?? []} marked={(ag.threads[d.root] ?? []).some((t) => ag.marked[t]?.includes(d.id))} accept={<>{drawableParts(d.parts).length > 0 ? <PartsPanel d={d} ov={ov} rpc={rpc} refetch={refetch} /> : null}{isCriticalDrift(d) ? <CriticalAccept d={d} ov={ov} rpc={rpc} refetch={refetch} /> : null}</>} />
-      ))}
-      {plain.length > 0 && !firstBaseline ? (
-        <div className={`${card} space-y-2`}>
-          <div className="flex flex-wrap items-center gap-2">
-            <button className={btn} onClick={() => setPickedIds(plain)}>Выбрать все ({plain.length}){criticalCount > 0 ? ", кроме критичных" : ""}</button>
-            <button className={btn} onClick={() => setPickedIds([])}>Снять выбор</button>
-            <span className={muted}>выбрано: {chosen.length}{(st.openTotal ?? 0) > drifts.length ? ` (показаны первые ${drifts.length} из ${st.openTotal})` : ""}</span>
-          </div>
-          {buttons(chosen, "Принять выбранные")}
-          <p className={`text-xs ${muted}`}>Критичные изменения ({criticalCount}) в «выбрать все» не входят: у каждого свой блок с кнопкой выше. «Оставить» — ничего не нажимать: расхождение видно, пока его не примут или пока файл не вернут как был.</p>
-        </div>
-      ) : null}
-      <Msg error={act.error} ok={act.ok} reserve />
-      {(st.recent ?? []).length > 0 ? (
-        <Fold id="agents-recent" summaryClassName={`cursor-pointer ${muted}`} summary={`Недавно закрытые (${st.recent!.length})`}>
-          <ul className="mt-1 space-y-1 text-xs">
-            {st.recent!.map((d) => (
-              <li key={d.id} className="break-all">
-                <span className="font-mono">{d.rel}</span> · {CLASS_LABEL[d.class] ?? d.class} · {d.status === "accepted" ? "принято вами" : d.status === "reverted" ? "файл вернули как был" : "заменено более новым изменением"}{d.resolvedAt ? ` ${clockText(d.resolvedAt, Date.now())}` : ""}
-              </li>
-            ))}
-          </ul>
-        </Fold>
-      ) : null}
+    <div className="flex flex-wrap items-center gap-2">
+      <button className={btnPrimary} disabled={set.act.busy || !set.proof.ready()} onClick={() => set.accept(ids)}>{label}</button>
     </div>
   );
+}
+
+function ScanBox({ st, rpc, set }: { st: AgentsState; rpc: Rpc; set: AcceptSet }) {
+  return (
+    <div className={`${card} space-y-1`}>
+      <p>
+        Защита следит за настройками, правилами и памятью агентов и сравнивает их с теми, что вы одобрили. Просмотрено файлов: {st.scannedFiles ?? 0}
+        {st.lastScanAt ? `, последний просмотр ${when(st.lastScanAt)}` : ""}.
+      </p>
+      <Fold id="agents-more" summaryClassName={`cursor-pointer text-xs ${muted}`} summary="Подробнее">
+        <p className={`mt-1 text-xs ${muted}`}>
+          Одобренных файлов: {st.baselineFiles ?? 0}; каталогов-корней: {st.roots ?? 0}. Рабочие каталоги чатов защита находит сама; каталоги проектов в домашней папке в v1 не просматриваются. Критичное изменение закрывает временное доверие и помечает чат «под подозрением»; в его карточке есть кнопки «Вернуть как было» и «Остановить агентов».
+        </p>
+      </Fold>
+      <div className="flex flex-wrap items-center gap-2">
+        <button className={btn} disabled={set.act.busy} onClick={() => void set.act.run(async () => { await rpc.call("agents.scan", null); })}>Просмотреть сейчас</button>
+        <span className={`text-xs ${muted}`}>не чаще раза в 10 с</span>
+      </div>
+    </div>
+  );
+}
+
+function UnreadableFiles({ st }: { st: AgentsState }) {
+  const alarms = st.alarms ?? [];
+  if (alarms.length === 0) return null;
+  return (
+    <div className={cardBlocked} role="alert">
+      <p className="font-semibold">Файлы агентов не читаются ({alarms.length})</p>
+      <ul className="mt-1 list-disc pl-5 text-xs">{alarms.map((x) => <li key={x.path} className="break-all">{x.path} — {alarmText(x)}</li>)}</ul>
+      <p className="mt-1 text-xs">Либо ACL чтения для пользователя сторожа снят или права сломаны, либо агент подсунул ссылку или подменил файл (сторож по ссылкам за пределы наблюдаемого не ходит и ничего оттуда не читает) (установщик выдаёт его, `--undo` снимает). Без него наблюдатель слепой.</p>
+    </div>
+  );
+}
+
+function FirstBaseline({ pending, criticalCount, plain, set }: { pending: number; criticalCount: number; plain: number[]; set: AcceptSet }) {
+  return (
+    <div className={`${card} space-y-2 border-border`}>
+      <h3 className="font-semibold">Первые одобренные настройки</h3>
+      <p>Первый просмотр нашёл {pending} файлов. Если всё это — как должно быть, примите их как есть одним касанием; дальше каждое расхождение будет ждать решения.{criticalCount > 0 ? ` Критичных среди них ${criticalCount}: каждое принимается отдельно, ниже, со своим касанием и своим объяснением, что именно вы разрешаете.` : ""}</p>
+      <AcceptButtons ids={plain} label="Принять всё как есть" set={set} />
+    </div>
+  );
+}
+
+function SelectAll({ st, drifts, plain, criticalCount, set }: { st: AgentsState; drifts: AgentDrift[]; plain: number[]; criticalCount: number; set: AcceptSet }) {
+  const more = (st.openTotal ?? 0) > drifts.length ? ` (показаны первые ${drifts.length} из ${st.openTotal})` : "";
+  return (
+    <div className={`${card} space-y-2`}>
+      <div className="flex flex-wrap items-center gap-2">
+        <button className={btn} onClick={() => set.setPickedIds(plain)}>Выбрать все ({plain.length}){criticalCount > 0 ? ", кроме критичных" : ""}</button>
+        <button className={btn} onClick={() => set.setPickedIds([])}>Снять выбор</button>
+        <span className={muted}>выбрано: {set.chosen.length}{more}</span>
+      </div>
+      <AcceptButtons ids={set.chosen} label="Принять выбранные" set={set} />
+      <p className={`text-xs ${muted}`}>Критичные изменения ({criticalCount}) в «выбрать все» не входят: у каждого свой блок с кнопкой выше. «Оставить» — ничего не нажимать: расхождение видно, пока его не примут или пока файл не вернут как был.</p>
+    </div>
+  );
+}
+
+const closedWord = (status: string): string => (status === "accepted" ? "принято вами" : status === "reverted" ? "файл вернули как был" : "заменено более новым изменением");
+
+function RecentlyClosed({ st }: { st: AgentsState }) {
+  const recent = st.recent ?? [];
+  if (recent.length === 0) return null;
+  return (
+    <Fold id="agents-recent" summaryClassName={`cursor-pointer ${muted}`} summary={`Недавно закрытые (${recent.length})`}>
+      <ul className="mt-1 space-y-1 text-xs">
+        {recent.map((d) => (
+          <li key={d.id} className="break-all">
+            <span className="font-mono">{d.rel}</span> · {CLASS_LABEL[d.class] ?? d.class} · {closedWord(d.status)}{d.resolvedAt ? ` ${clockText(d.resolvedAt, Date.now())}` : ""}
+          </li>
+        ))}
+      </ul>
+    </Fold>
+  );
+}
+
+function DriftList({ ov, rpc, refetch, drifts, set }: { ov: Overview; rpc: Rpc; refetch: () => void; drifts: AgentDrift[]; set: AcceptSet }) {
+  const ag = ov.agents!;
+  return (
+    <>
+      {drifts.length === 0 ? <div className={`${card} ${muted}`}>Расхождений с одобренными настройками нет.</div> : null}
+      {drifts.map((d) => {
+        const threads = ag.threads[d.root] ?? [];
+        const accept = (
+          <>
+            {drawableParts(d.parts).length > 0 ? <PartsPanel d={d} ov={ov} rpc={rpc} refetch={refetch} /> : null}
+            {isCriticalDrift(d) ? <CriticalAccept d={d} ov={ov} rpc={rpc} refetch={refetch} /> : null}
+          </>
+        );
+        return <DriftCard key={d.id} d={d} picked={set.chosen.includes(d.id)} onPick={(on) => set.toggle(d.id, on)} threads={threads} marked={threads.some((t) => ag.marked[t]?.includes(d.id))} accept={accept} />;
+      })}
+    </>
+  );
+}
+
+function AgentsBody({ ov, rpc, refetch, st }: { ov: Overview; rpc: Rpc; refetch: () => void; st: AgentsState }) {
+  const drifts = st.drifts ?? [];
+  const set = useAcceptSet({ ov, rpc, refetch }, drifts);
+  const pending = st.initial?.pending ?? 0;
+  const firstBaseline = pending > 0 && pending === drifts.length && (st.baselineFiles ?? 0) === 0;
+  const criticalCount = drifts.filter(isCriticalDrift).length;
+  const plain = selectableDriftIds(drifts);
+  const notes = st.notes ?? [];
+  return (
+    <div className="space-y-3">
+      <ScanBox st={st} rpc={rpc} set={set} />
+      {ov.agents!.error ? <Msg error={`Защита не ответила на последний запрос: ${humanError(ov.agents!.error)}`} /> : null}
+      <UnreadableFiles st={st} />
+      {notes.length > 0 ? <ul className={`list-disc pl-5 text-xs ${muted}`}>{notes.map((n, i) => <li key={i} className="break-all">{n.text}</li>)}</ul> : null}
+      {firstBaseline ? <FirstBaseline pending={pending} criticalCount={criticalCount} plain={plain} set={set} /> : null}
+      <DriftList ov={ov} rpc={rpc} refetch={refetch} drifts={drifts} set={set} />
+      {plain.length > 0 && !firstBaseline ? <SelectAll st={st} drifts={drifts} plain={plain} criticalCount={criticalCount} set={set} /> : null}
+      <Msg error={set.act.error} ok={set.act.ok} reserve />
+      <RecentlyClosed st={st} />
+    </div>
+  );
+}
+
+export function AgentsSection({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; refetch: () => void; showDone: boolean }) {
+  const ag = ov.agents;
+  if (!ag) return <div className={`${card} ${muted}`}>Наблюдатель работает внутри сторожа решений; здесь его нет (режим сторожа выключен).</div>;
+  const st = ag.state;
+  if (!st) return <div className={card}><Msg error={ag.error ?? "сторож не ответил"} /></div>;
+  if (!st.enabled) return <div className={`${card} ${muted}`}>Сторож запущен без наблюдателя (нет каталога агентов в его настройках).</div>;
+  return <AgentsBody ov={ov} rpc={rpc} refetch={refetch} st={st} />;
 }

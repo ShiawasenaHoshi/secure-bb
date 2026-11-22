@@ -7,7 +7,7 @@ import { muted, when, useOverview, FoldAccordion } from "./ui";
 import { Button } from "../components/ui/button";
 import { Card } from "../components/ui/card";
 import { quietAwayGroups } from "../src/pageview";
-import { gapsBySeverity } from "./windows";
+import { gapsBySeverity } from "../src/pageview";
 
 /** The journal records of both journals as the summary reads them. */
 export function awayEventsOf(ov: Overview): AwayEvent[] {

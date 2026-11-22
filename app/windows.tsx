@@ -2,7 +2,7 @@ import { useRpc } from "@get-bb/plugin-sdk/app";
 import type { SecureBbRpc } from "../server";
 import type { Overview, WindowView } from "../src/overview";
 import type { ConfigWindowView } from "../src/watch/watchdog";
-import { gapAlarmText, unackedGaps, type GapContext } from "../src/ux";
+import { gapsBySeverity } from "../src/pageview";
 import { useApproval } from "./approval";
 import { useCodeAction } from "./code";
 import { card, btn, muted, minutes, when, useOverview, useNow, Msg } from "./ui";
@@ -67,19 +67,6 @@ export function JournalAlarm({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnTy
       <Msg error={act.error} />
     </div>
   );
-}
-
-/** What a gap says, built from the facts of its mode (`gapAlarmText`). */
-export function gapContext(ov: Overview): GapContext {
-  return { guardModeNow: ov.guard !== undefined, coreHoldsNow: ov.alive.coreHolds, configWatch: ov.watch.baselineAt !== null };
-}
-
-/** The gaps shown as a red alarm: all that opened something, and every one in a mode without a guard. A calm one is a line in «Пока вас не было». */
-export function gapsBySeverity(ov: Overview): { critical: Array<{ gap: Overview["alive"]["gaps"][number]; text: ReturnType<typeof gapAlarmText> }>; calm: Array<{ gap: Overview["alive"]["gaps"][number]; text: ReturnType<typeof gapAlarmText> }> } {
-  const ctx = gapContext(ov);
-  const all = ov.alive.gaps.map((gap) => ({ gap, text: gapAlarmText(gap, ctx) }));
-  const calm = unackedGaps(all.filter((g) => g.text.severity === "calm").map((g) => ({ ...g, at: g.gap.at })), ov.alive.gapsAckedAt);
-  return { critical: all.filter((g) => g.text.severity === "critical"), calm };
 }
 
 /** Threat model X3: the gate was off for a while (when it opened something), or bb's safe-mode is (or was) on. Shown on the page and in the strip, for a week. */
