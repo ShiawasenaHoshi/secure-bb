@@ -50,6 +50,16 @@ export function QuestionEditor({ q, rpc, refetch }: { q: QuestionView; rpc: Rpc;
   );
 }
 
+/** What the sentinel wrote about the cards it looked at: events, read-only. */
+export function SentinelFeed({ ov }: { ov: Overview }) {
+  const v = ov.sentinel;
+  return (
+    <div className={card}>
+      {v.feed.length === 0 ? <p className={muted}>Пока пусто.</p> : <ul className="space-y-2">{v.feed.map((r) => <FeedItem key={r.id} row={r} riskThreshold={v.settings.riskThreshold} />)}</ul>}
+    </div>
+  );
+}
+
 export function SentinelSection({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; refetch: () => void }) {
   const v = ov.sentinel;
   const [code, setCode] = useState("");
@@ -82,10 +92,6 @@ export function SentinelSection({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; 
           Решатель: {v.solver}{v.keyConfigured ? " · ключ задан" : " · ключ не задан (BB_SECURE_BB_JEV_KEY_FILE): карточки будут записаны как «не оценено»"} · таймаут {Math.round(v.settings.timeoutMs / 1000)} с · не больше {v.settings.maxPerMinute} запросов в минуту
         </p>
         <Msg error={act.error} ok={act.ok} />
-      </div>
-      <div className={card}>
-        <h3 className="font-semibold">Лента дозора ({v.feed.length})</h3>
-        {v.feed.length === 0 ? <p className={muted}>Пока пусто.</p> : <ul className="mt-2 space-y-2">{v.feed.map((r) => <FeedItem key={r.id} row={r} riskThreshold={v.settings.riskThreshold} />)}</ul>}
       </div>
       <Fold id="sentinel-questions" className={card} summaryClassName="cursor-pointer font-semibold" summary={`Вопросы и пороги (${v.questions.length})`}>
         <div className="mt-2 space-y-2">{v.questions.map((q) => <QuestionEditor key={q.id} q={q} rpc={rpc} refetch={refetch} />)}</div>

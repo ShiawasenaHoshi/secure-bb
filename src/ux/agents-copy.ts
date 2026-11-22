@@ -136,9 +136,9 @@ export function manualRollback(path: string, reasons: string[]): string {
   return `Откройте файл ${path} и: ${what}. Через минуту защита перечитает файл; когда всё вернётся к одобренным настройкам, тревога уйдёт сама.`;
 }
 
-/** Where the card of the agents' differences is shown: on the «Обзор» tab while something critical or an alarm waits there, else in «Журнал». */
+/** Where the card of the agents' differences is shown: on the «Обзор» tab while something critical or an alarm waits there, else in «Настройки» (the section changes what the guard accepts, so it is not an event list). */
 export function agentsSectionTab(i: { critical: number; alarms: number }): TabId {
-  return i.critical > 0 || i.alarms > 0 ? "status" : "more";
+  return i.critical > 0 || i.alarms > 0 ? "status" : "settings";
 }
 
 /** Under «Вернуть как было»: a session does not cover it (it changes the agent's files), and the card says so. */

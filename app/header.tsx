@@ -25,7 +25,7 @@ export function TroubleshootBar({ until }: { until: number }) {
   );
 }
 
-const MARK: Record<HeaderLine["tone"], "none" | "check" | "alert"> = { ok: "check", waiting: "none", alarm: "alert" };
+export const MARK: Record<HeaderLine["tone"], "none" | "check" | "alert"> = { ok: "check", waiting: "none", alarm: "alert" };
 
 /**
  * The one line at the top: a shield and one sentence on the same line, one main button to the place where the action is. The session of confirmation is at its

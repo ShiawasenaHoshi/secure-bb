@@ -3,7 +3,7 @@
 import type { Overview } from "./overview";
 import type { QueueRow } from "./store";
 import type { SkillQueueView } from "./skills/guard";
-import { agentsSectionTab, alarmCount, awayText, cardColor, GUARD_DOWN_TEXT, STOPPED_EXPLAIN, gapView, pageCounts, plural, pageStatus, unackedGaps, type AwayGroup, type CardPlan, type GapContext, type GapView, type PageCounts, type PluginCard, type ProblemRef, type Status, type TabId } from "./ux";
+import { agentsSectionTab, alarmCount, awayText, cardColor, GUARD_DOWN_TEXT, STOPPED_EXPLAIN, gapView, pageCounts, planCards, plural, pageStatus, unackedGaps, type AwayGroup, type CardPlan, type Decisions, type GapContext, type GapView, type PageCounts, type PluginCard, type ProblemRef, type Status, type TabId } from "./ux";
 
 /** The anchor of the alarm «Второй фактор не настроен»: without a second factor nothing can be approved, so it is the first thing to do, not a calm line. */
 export const SECOND_FACTOR_ANCHOR = "sbb-registration";
@@ -119,7 +119,7 @@ export function overlayView(ov: Overview, collapsedKey: string | null): OverlayV
 export function agentsFacts(ov: Overview): { critical: number; alarms: number; tab: TabId } {
   const critical = (ov.agents?.state?.drifts ?? []).filter((d) => d.class === "critical" && !d.initial).length;
   const alarms = (ov.agents?.state?.alarms ?? []).length;
-  // While something critical or an alarm waits, the section is on «Обзор» (the banner leads to it); otherwise it stays in «Журнал».
+  // While something critical or an alarm waits, the section is on «Обзор» (the banner leads to it); otherwise it stays in «Настройки».
   return { critical, alarms, tab: agentsSectionTab({ critical, alarms }) };
 }
 
@@ -135,8 +135,8 @@ export function pageAlarms(ov: Overview, registered: boolean): ProblemRef[] {
   if (gaps.length > 0 || ov.alive.safeMode === true) alarms.push({ anchor: "sbb-alarms", tab: "status", text: gaps.every((g) => g.text.mode === "guard") ? "Плагин secure-bb не работал" : "Гейт не всегда работал" });
   if (ov.guard?.connected && ov.guard.journal && !ov.guard.journal.valid) alarms.push({ anchor: "sbb-guard-alarm", tab: "status", text: "Журнал сторожа нарушен" });
   if (ov.agents && (agents.alarms > 0 || agents.critical > 0)) alarms.push({ anchor: "sbb-agents", tab: agents.tab, text: agentsAlarmText(agents.critical, agents.alarms), weight: agents.critical + agents.alarms });
-  if (ov.watch.drifts.some((d) => d.status === "open" || d.status === "rollback-failed")) alarms.push({ anchor: "sbb-watch", tab: "more", text: "Настройки bb изменились" });
-  if (!registered) alarms.push({ anchor: SECOND_FACTOR_ANCHOR, tab: "more", text: "Второй фактор не настроен" });
+  if (ov.watch.drifts.some((d) => d.status === "open" || d.status === "rollback-failed")) alarms.push({ anchor: "sbb-watch", tab: "settings", text: "Настройки bb изменились" });
+  if (!registered) alarms.push({ anchor: SECOND_FACTOR_ANCHOR, tab: "settings", text: "Второй фактор не настроен" });
   if ((ov.guard?.troubleshootUntil ?? 0) > ov.now) alarms.push({ anchor: "sbb-guard-alarm", tab: "status", text: "Включён режим отладки сторожа: он пропускает всё" });
   return alarms;
 }
@@ -178,4 +178,27 @@ export function summarize(ov: Overview, plan: CardPlan<QueueRow>, registered: bo
   const header = headerLine({ status, waiting: counts.waiting, deferred: counts.deferred, alarms });
   const headerMore = guardDown ? GUARD_DOWN_TEXT : status.level === "stopped" ? STOPPED_EXPLAIN : null;
   return { alarms, status, counts, header, headerMore, guardDown, agents: agentsFacts(ov) };
+}
+
+/** Whether a second factor is set up: without it nothing can be approved, so the page and the icon both ask here. */
+export const registeredOf = (ov: Overview): boolean => ov.totp.state === "locked" || ov.totp.state === "external";
+
+/** The summary of the page for a person's marks (what they put aside or kept): what the page draws from its own plan, and what the icon needs without the page. */
+export const summaryOf = (ov: Overview, decisions: Decisions): PageSummary => summarize(ov, planCards(heldOf(ov), decisions), registeredOf(ov));
+
+/** What the sidebar says about the protection: the header's sentence (the same one), and a badge only when something needs the person. */
+export interface IconView {
+  tone: HeaderTone;
+  /** The tooltip: the header's sentence, once. */
+  text: string;
+  /** None when all is well; «warning» for what waits (with the number of cards when there are any), «critical» for an alarm (a dot). */
+  badge: { count?: number; tone: "warning" | "critical"; label: string } | null;
+}
+
+export function iconView(summary: PageSummary): IconView {
+  const { tone, text } = summary.header;
+  if (tone === "ok") return { tone, text, badge: null };
+  if (tone === "alarm") return { tone, text, badge: { tone: "critical", label: text } };
+  const waiting = summary.counts.waiting;
+  return { tone, text, badge: { tone: "warning", ...(waiting > 0 ? { count: waiting } : {}), label: text } };
 }

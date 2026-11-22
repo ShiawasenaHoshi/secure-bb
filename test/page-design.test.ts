@@ -54,7 +54,7 @@ describe("the header says one thing", () => {
   });
   it("no second factor is the state of the header, and the first thing to do — before the other alarms; no alarm is turned down to a calm line", () => {
     const other: ProblemRef = { anchor: "sbb-guard-alarm", tab: "status", text: "Журнал сторожа нарушен" };
-    const noFactor: ProblemRef = { anchor: SECOND_FACTOR_ANCHOR, tab: "more", text: "Второй фактор не настроен" };
+    const noFactor: ProblemRef = { anchor: SECOND_FACTOR_ANCHOR, tab: "settings", text: "Второй фактор не настроен" };
     const h = headerLine({ status: { level: "attention", first: other }, waiting: 2, deferred: 0, alarms: [other, noFactor] });
     expect(h).toEqual({ tone: "alarm", text: "Настройте второй фактор: без него ничего нельзя подтвердить", target: noFactor, action: "Настроить" });
     expect(headerLine({ status: { level: "attention", first: noFactor }, waiting: 0, deferred: 0, alarms: [noFactor] }).tone).toBe("alarm");

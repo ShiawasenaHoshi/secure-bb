@@ -98,7 +98,7 @@ describe("the page, drawn", () => {
     }
     // 4. tabs
     const tabs = Array.from(document.body.querySelectorAll('[role="tab"]')).map((t) => t.textContent);
-    expect(tabs.map((t) => t?.replace(/\d+$/, ""))).toEqual(["Обзор", "Карантин", "Доверие и исключения", "Журнал"]);
+    expect(tabs.map((t) => t?.replace(/\d+$/, ""))).toEqual(["Обзор", "Карантин", "Доверие и исключения", "Журнал", "Настройки"]);
   });
 
   it("«Разрешить» opens the confirmation dialog for that version instead of asking for a code on the card", async () => {

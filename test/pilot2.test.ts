@@ -94,7 +94,7 @@ describe("4. «Всё в порядке» hides the information lines, never the
     const alarms = [
       { anchor: "sbb-agents", tab: "status" as const, text: "Настройки агентов: критичных изменений — 2" },
       { anchor: "sbb-alarms", tab: "status" as const, text: "Журнал решений нарушен" },
-      { anchor: "sbb-watch", tab: "more" as const, text: "Настройки bb изменились" },
+      { anchor: "sbb-watch", tab: "settings" as const, text: "Настройки bb изменились" },
     ];
     const block = awayAlarms(alarms)!;
     expect(block.title).toBe("3 тревоги системы");

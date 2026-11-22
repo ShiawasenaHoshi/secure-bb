@@ -2,7 +2,7 @@
 // person made (put aside, kept, seen, switched off), and the jump of «Показать». The page draws; these keep the state. Conveniences of the page, not security facts.
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { QueueRow } from "../src/store";
-import { AWAY_KEY, DEFERRED_KEY, FREQ_KEY, FREQ_OFF_KEY, KEPT_KEY, WIZARD_KEY, deferKey, dropUnstamped, makeDeferStub, makeStub, parseDeferred, parseFreqAt, stampMark, withoutMark, type Stub } from "../src/ux";
+import { AWAY_KEY, DEFERRED_KEY, FREQ_KEY, FREQ_OFF_KEY, KEPT_KEY, TAB_KEY, WIZARD_KEY, deferKey, dropUnstamped, makeDeferStub, makeStub, parseDeferred, parseFreqAt, parseTab, stampMark, withoutMark, type Decisions, type Stub, type TabId } from "../src/ux";
 import { emptySnapshot, makeNote, restoreView, snapshotView, type ViewSnapshot } from "../src/stable-view";
 import { lsGet, lsSet } from "./confirm";
 import { DONE_MS, type AnnounceOpts, type Note } from "./ui";
@@ -78,11 +78,20 @@ export function useNotes() {
 const store = (key: string, list: string[]) => lsSet(key, JSON.stringify(list.slice(-500)));
 const newestFirstMark = (list: string[], k: string): string[] => [...withoutMark(list, k), stampMark(k, Date.now())];
 
+/** The marks of «Решить позже» and «Оставить в карантине» as this browser holds them now. Marks of an older page, with no time on them, are dropped. */
+export const readDecisions = (): Decisions => ({ deferred: dropUnstamped(parseDeferred(lsGet(DEFERRED_KEY))), kept: dropUnstamped(parseDeferred(lsGet(KEPT_KEY))) });
+
+/** The tab the page was left on: remembered in this browser; one that is no longer a tab opens «Обзор». */
+export function useSavedTab(first: TabId | null): [TabId, (t: TabId) => void] {
+  const [tab, setTab] = useState<TabId>(() => first ?? parseTab(lsGet(TAB_KEY)));
+  return [tab, (t) => { lsSet(TAB_KEY, t); setTab(t); }];
+}
+
 /** The marks the person made, kept in this browser. A mark carries the time it was made: one older than the entry belongs to an earlier data set and does not count. */
 export function useMarks(notes: Pick<ReturnType<typeof useNotes>, "setStubs" | "settle">) {
   // Marks of an older page, with no time on them, cannot be told from such ones: they are dropped once.
-  const [deferredKeys, setDeferredKeys] = useState<string[]>(() => dropUnstamped(parseDeferred(lsGet(DEFERRED_KEY))));
-  const [keptKeys, setKeptKeys] = useState<string[]>(() => dropUnstamped(parseDeferred(lsGet(KEPT_KEY))));
+  const [deferredKeys, setDeferredKeys] = useState<string[]>(() => readDecisions().deferred);
+  const [keptKeys, setKeptKeys] = useState<string[]>(() => readDecisions().kept);
   const [seenAt, setSeenAt] = useState<string | null>(() => lsGet(AWAY_KEY));
   // «Вы часто одобряете…»: when the hint was last used or put away, and whether the person switched it off.
   const [freqAt, setFreqAt] = useState<number | null>(() => parseFreqAt(lsGet(FREQ_KEY)));
