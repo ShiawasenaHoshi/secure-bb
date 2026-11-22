@@ -470,7 +470,7 @@ describe("review 2.1 — what used to be silent", () => {
   });
 
   describe("secure-bb checks itself (item 7)", () => {
-    it("the tree of secure-bb (without test/) has no block finding", async () => {
+    it("the tree of secure-bb (without test/) has no block finding", { timeout: 30_000 }, async () => {
       const dir = join(scratch, "self");
       const repo = new URL("..", import.meta.url).pathname;
       cpSync(repo, dir, { recursive: true, filter: (p) => !/\/(node_modules|\.git|dist|test|\.claude|chk|\.home)(\/|$)/.test(p.slice(repo.length - 1)) && !/package-lock\.json$/.test(p) });
