@@ -50,7 +50,7 @@ export interface QueueUxDeps {
 }
 
 export async function queueUx(d: QueueUxDeps, q: { rootDir: string | null; source: string; sourceKind: string; threadId: string | null }, trust: GuardTrust | null): Promise<QueueUx> {
-  const ident = identityOf(q.sourceKind, q.source);
+  const ident = identityOf(q.sourceKind, q.source, q.rootDir);
   const { level } = levelOf(ident, trust?.mySources ?? [], trust?.known ?? []);
   let chain: ThreadRef[] = [];
   if (q.threadId) {

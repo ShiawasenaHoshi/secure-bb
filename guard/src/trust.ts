@@ -11,7 +11,7 @@ import type { CheckResult, Finding } from "./checks/index.ts";
 import { flowTokens } from "./checks/flow.ts";
 
 export type Level = "own" | "known" | "unknown";
-import { githubRepo, OWNER, REPO } from "./github-address.ts";
+import { githubRepoOfGitSource, gitSubdirectoryOf, OWNER, REPO } from "./github-address.ts";
 import type { TrustMode } from "./lift.ts";
 export type { TrustMode };
 export const TRUST_MODES: readonly TrustMode[] = ["simple", "detailed", "strict"];
@@ -23,7 +23,7 @@ export const MAX_SOURCES = 100;
 // ---- sources ------------------------------------------------------------------------------------------------------------
 
 /**
- * An entry of the list: `github:owner/name`, `github:owner/*` or `path:/absolute/dir`. Returns the normalized form, or null.
+ * An entry of the list: `github:owner/name`, `github:owner/name#subdirectory` (one plugin of a monorepo), `github:owner/*` or `path:/absolute/dir`. Returns the normalized form, or null.
  * A path entry is a directory: it covers itself and everything below it (never `..`, never relative, never the root itself).
  */
 export function normalizeEntry(input: unknown): string | null {
@@ -32,11 +32,18 @@ export function normalizeEntry(input: unknown): string | null {
   // eslint-disable-next-line no-control-regex
   if (t === "" || t.length > 1024 || /[\u0000-\u001f\u007f]/.test(t)) return null;
   if (/^path:/i.test(t)) return normalizePath(t.slice(5));
-  const gh = t.replace(/^github:/i, "").replace(/^https?:\/\/github\.com\//i, "").replace(/\.git$/i, "").replace(/\/$/, "").toLowerCase();
+  const stripped = t.replace(/^github:/i, "").replace(/^https?:\/\/github\.com\//i, "");
+  // `github:owner/name#plugins/x`: one plugin of a monorepo (the subdirectory keeps its case; it is the directory's name).
+  const hash = stripped.indexOf("#");
+  const sub = hash < 0 ? null : stripped.slice(hash + 1);
+  const gh = (hash < 0 ? stripped : stripped.slice(0, hash)).replace(/\.git$/i, "").replace(/\/$/, "").toLowerCase();
   const m = /^([^/]+)\/([^/]+)$/.exec(gh);
   if (!m || !OWNER.test(m[1]!)) return null;
-  if (m[2] === "*") return `github:${m[1]}/*`;
-  return REPO.test(m[2]!) && m[2] !== "." && m[2] !== ".." ? `github:${m[1]}/${m[2]}` : null;
+  if (m[2] === "*") return sub === null ? `github:${m[1]}/*` : null;
+  if (!(REPO.test(m[2]!) && m[2] !== "." && m[2] !== "..")) return null;
+  if (sub === null) return `github:${m[1]}/${m[2]}`;
+  const segs = sub.replace(/^\.\//, "").replace(/\/$/, "").split("/");
+  return segs.every((x) => /^[A-Za-z0-9._@+-]+$/.test(x) && x !== "." && x !== "..") ? `github:${m[1]}/${m[2]}#${segs.join("/")}` : null;
 }
 function normalizePath(p: string): string | null {
   if (!p.startsWith("/") || p.split("/").includes("..")) return null;
@@ -51,19 +58,26 @@ export interface SourceIdentity {
 }
 
 // `githubRepo` (the ONE reading of a github.com address) is in `github-address.ts`, a leaf the page can use; re-exported here for the guard.
-export { githubRepo } from "./github-address.ts";
+export { githubRepo, sourceKindOf } from "./github-address.ts";
 
-/** What the core's `source` says it is. Null: not a source the lists can name (npm, a marketplace over https, anything odd). */
-export function identityOf(sourceKind: string, source: string): SourceIdentity | null {
+/**
+ * What the core's `source` says it is. Null: not a source the lists can name (npm, another host, anything odd).
+ * A git plugin is `github:owner/name` for the root of a repository and `github:owner/name#subdirectory` for a plugin inside one: the subdirectory is part of who
+ * it is, so another plugin of the same repository is not «the same source» and does not become «mine» unasked. The core sends the subdirectory only in the
+ * directory it loads from (`rootDir`), so for git it is needed: without it (or when it is not where the core files THAT repository) the source is not named.
+ */
+export function identityOf(sourceKind: string, source: string, rootDir?: string | null): SourceIdentity | null {
   if (sourceKind === "path") {
     if (!source.startsWith("path:")) return null;
     const n = normalizePath(source.slice(5));
     return n === null ? null : { kind: "path", id: n };
   }
   if (sourceKind === "git") {
-    if (!source.startsWith("git:")) return null;
-    const repo = githubRepo(source.slice(4).replace(/#.*$/, "").replace(/\s.*$/, ""), { allowRef: true });
-    return repo === null ? null : { kind: "git", id: `github:${repo}` };
+    const repo = githubRepoOfGitSource(source);
+    if (repo === null) return null;
+    const where = gitSubdirectoryOf(repo, rootDir);
+    if (where === null) return null;
+    return { kind: "git", id: `github:${repo}${where.subdirectory === null ? "" : `#${where.subdirectory}`}` };
   }
   return null;
 }

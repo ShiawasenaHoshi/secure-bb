@@ -368,5 +368,5 @@ export interface ImportItem {
 
 
 /** The approval to insert: the guard fills in the source id; the rights come from its own checks. */
-export type NewApproval = Omit<ApprovalRow, "id" | "approvedAt" | "revokedAt" | "sourceId" | "rights" | "why"> & { rights?: Rights | null; why?: string | null };
+export type NewApproval = Omit<ApprovalRow, "id" | "approvedAt" | "revokedAt" | "sourceId" | "rights" | "why"> & { rights?: Rights | null; why?: string | null; /** Where the version is loaded from: a git source is named by it too (`identityOf`). */ rootDir?: string | null };
 

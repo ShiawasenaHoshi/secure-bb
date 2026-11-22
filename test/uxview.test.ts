@@ -48,7 +48,12 @@ describe("secureBb.why", () => {
 
 describe("where from, and how far the source is trusted", () => {
   const trust = { mode: "simple" as const, mySources: ["github:me/*"], known: ["github:getbb/plugins"], pluginsRoots: 1 };
-  const q = (over: Partial<{ source: string; sourceKind: string; threadId: string | null }> = {}) => ({ rootDir: null, source: "git:https://github.com/me/p.git@main", sourceKind: "git", threadId: null, ...over });
+  /** The directory the core loads a git plugin from, for the repository its source names. */
+  const dirOf = (source: string): string | null => {
+    const m = /github\.com\/([^/@]+\/[^/@]+?)(?:\.git)?(?:@|$)/.exec(source);
+    return m ? `/d/plugins/cache/git/github.com/${m[1]}/${"a".repeat(40)}` : null;
+  };
+  const q = (over: Partial<{ source: string; sourceKind: string; threadId: string | null }> = {}) => ({ rootDir: dirOf(over.source ?? "git:https://github.com/me/p.git@main"), source: "git:https://github.com/me/p.git@main", sourceKind: "git", threadId: null, ...over });
   it("own, known and unknown sources", async () => {
     expect((await queueUx({}, q(), trust)).level).toBe("own");
     expect((await queueUx({}, q({ source: "git:https://github.com/getbb/plugins" }), trust)).level).toBe("known");

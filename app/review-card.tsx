@@ -3,7 +3,7 @@ import { useBbNavigate } from "@get-bb/plugin-sdk/app";
 import type { Overview } from "../src/overview";
 import type { QueueRow } from "../src/store";
 import type { QueueUx } from "../src/uxview";
-import { approvedNote, uniqueSentences, capsWithPaths, redWhere, cardFoldId, cardKey, capabilitySegments, cardColor, detailLevel, MISMATCH_HINT, cardRisk, FREQ_BUTTON, FREQ_NOT_NOW, type FreqHint, bypassAllowed, mismatchText, redText, yellowText, actionLabel, deleteConfirmText, deletedNote, trustButton, windowAvailability } from "../src/ux";
+import { approvedNote, uniqueSentences, capsWithPaths, redWhere, cardFoldId, cardKey, capabilitySegments, cardColor, isUnreadOnly, unreadText, detailLevel, MISMATCH_HINT, cardRisk, FREQ_BUTTON, FREQ_NOT_NOW, type FreqHint, bypassAllowed, mismatchText, redText, yellowText, actionLabel, deleteConfirmText, deletedNote, trustButton, windowAvailability } from "../src/ux";
 import { isMismatchEntry, approveVerb, enabledWhat, agentConfigNote, scopeText, meaningfulCaps } from "../src/ux";
 import { Card } from "../components/ui/card";
 import { DELETE_CONFIRM_BUTTONS, hasNoGuardRecord, NO_RECORD_FIX, NO_RECORD_HEADLINE, NO_RECORD_LINE } from "../src/ux";
@@ -126,6 +126,8 @@ export function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onKeep, onT
   const red = color === "red";
   const text = isMismatchEntry(q)
     ? mismatchText(q.pluginId, q.version)
+    : red && isUnreadOnly({ reason: q.reason, reasonKind: q.reasonKind, blocks: q.blocks, findings: found?.findings ?? [] })
+    ? unreadText(q.pluginId, q.version, q.reason)
     : red
     ? (() => {
         const r = redText((found?.findings ?? []).filter((f) => f.severity === "block").map((f) => f.rule));
