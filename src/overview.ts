@@ -422,7 +422,7 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
     tainted: d.taintedThreads?.() ?? [],
     trustedRepos: d.store.trustedRepos(),
     sentinel: sentinelView(d),
-    alive: d.alive?.view() ?? { lastBeat: null, gaps: [], safeMode: null, safeModeSeen: false },
+    alive: d.alive?.view() ?? { lastBeat: null, gaps: [], safeMode: null, safeModeSeen: false, gapsAckedAt: null, coreHolds: false },
     ux,
     sourceSuggestions: suggestSources(plugins.filter(isThirdParty).map((p) => ({ source: p.source })), (k, src) => identityOf(k, src)?.id ?? null),
   };

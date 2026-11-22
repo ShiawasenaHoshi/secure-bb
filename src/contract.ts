@@ -24,6 +24,8 @@ const batchKind = s.oneOf(["queue", "skill", "drift"] as const);
 export const rpcContract = defineRpcContract({
   overview: { input: s.nullValue(), output: s.json<Overview>() },
   "journal.verify": { input: s.nullValue(), output: s.json<JournalReport>() },
+  // «Понятно» on the calm line about a stop of the plugin (guard mode, nothing opened): sets aside only such lines; a red alarm is not hidden by it.
+  "alive.ack": { input: s.nullValue(), output: s.json<{ ok: true }>() },
   "guard.verify": { input: s.nullValue(), output: s.json<GuardJournalReport | { error: string }>() },
   // Guard mode: the test touch of `sbb-guard setup` («Проверить касание»). Changes nothing: the guard writes "touch setup-check" into its journal, the console sees it.
   "setup-check": { input: s.object({ ...factor }), output: s.json<{ ok: true }>() },

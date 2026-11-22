@@ -28,7 +28,7 @@ import type { TrustMode } from "./src/guardlink";
 import {
   AWAY_KEY, DEFERRED_KEY, glossSegments, skillsSummary, doneMessage, approvedNote, uniqueSentences, humanError, approvedByText, canRestore, rejectedAtOf, rejectedByText, clockText, firstButtonAfter, sessionClosedText, sessionEndReason, slideIdle, type SessionCloseReason, capsWithPaths, redWhere, cardFoldId, cardKey, sessionBlockText, KEPT_KEY, MODE_DESCRIPTIONS, MODE_NAMES, SAVED_NARROWING, startTouchNote, WIZARD_KEY,
   aaguidName, approvalWhy, awayAlarms, awayInfoEvents, awaySince, capabilitySegments, cardColor, deferKey, detailLevel, groupAway, isBlockedEntry, isPasswordManager, pageStatus,
-  MISMATCH_HINT, cardRisk, pluginRightsText, STOPPED_EXPLAIN, aiScanEmptyText, EXCEPTIONS_EMPTY, EXCEPTIONS_HELP, RESET_NOTE, exceptionRows, exceptionsHeadline, type ExceptionRow, FREQ_BUTTON, FREQ_KEY, FREQ_NOT_NOW, FREQ_OFF_KEY, FREQ_SETTING_LABEL, approvalEventsOf, parseFreqAt, pickFrequent, type FreqHint, agentAlarmText, protectedHeadline, protectedRow, sortProtected, PARTS_HEADLINE, PARTS_HELP, PART_BACK, PART_BACK_FRESH_NOTE, PART_FRESH_NOTE, REVOKE_CODE_NOTE, resetConfirmText, resetRows, PART_KEEP, PART_NO_BACK, drawableParts, isStalePart, partBackNote, partKeptNote, partNeedsFresh, partTitle, alarmCount, bypassAllowed, mismatchText, parseDeferred, redText, wizardNeeded, yellowText, GUARD_DOWN_TEXT,
+  MISMATCH_HINT, cardRisk, pluginRightsText, STOPPED_EXPLAIN, aiScanEmptyText, EXCEPTIONS_EMPTY, EXCEPTIONS_HELP, RESET_NOTE, exceptionRows, exceptionsHeadline, type ExceptionRow, FREQ_BUTTON, FREQ_KEY, FREQ_NOT_NOW, FREQ_OFF_KEY, FREQ_SETTING_LABEL, approvalEventsOf, parseFreqAt, pickFrequent, type FreqHint, agentAlarmText, gapAlarmText, unackedGaps, type GapContext, protectedHeadline, protectedRow, sortProtected, PARTS_HEADLINE, PARTS_HELP, PART_BACK, PART_BACK_FRESH_NOTE, PART_FRESH_NOTE, REVOKE_CODE_NOTE, resetConfirmText, resetRows, PART_KEEP, PART_NO_BACK, drawableParts, isStalePart, partBackNote, partKeptNote, partNeedsFresh, partTitle, alarmCount, bypassAllowed, mismatchText, parseDeferred, redText, wizardNeeded, yellowText, GUARD_DOWN_TEXT,
   actionLabel, emphasize, agentAcceptProblem, agentsSectionTab, awaySeenMark, criticalAcceptTitle, manualRollback, criticalMeanings, decisionOf, deleteConfirmText, deletedNote,
   isCriticalDrift, launchProblem, moreVersionsText, planCards, proofHint, reconcileSelection, sameData, selectableDriftIds, sessionText, setFold,
   toggleId, trustButton, windowAvailability,
@@ -888,20 +888,39 @@ function JournalAlarm({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<type
   );
 }
 
-/** Threat model X3: the gate was off for a while, or bb's safe-mode is (or was) on. Shown on the page and in the strip, for a week. */
+/** What a gap says, built from the facts of its mode (`gapAlarmText`). */
+function gapContext(ov: Overview): GapContext {
+  return { guardModeNow: ov.guard !== undefined, coreHoldsNow: ov.alive.coreHolds, configWatch: ov.watch.baselineAt !== null };
+}
+/** The gaps shown as a red alarm: all that opened something, and every one in a mode without a guard. A calm one is a line in «Пока вас не было». */
+export function gapsBySeverity(ov: Overview): { critical: Array<{ gap: Overview["alive"]["gaps"][number]; text: ReturnType<typeof gapAlarmText> }>; calm: Array<{ gap: Overview["alive"]["gaps"][number]; text: ReturnType<typeof gapAlarmText> }> } {
+  const ctx = gapContext(ov);
+  const all = ov.alive.gaps.map((gap) => ({ gap, text: gapAlarmText(gap, ctx) }));
+  const calm = unackedGaps(all.filter((g) => g.text.severity === "calm").map((g) => ({ ...g, at: g.gap.at })), ov.alive.gapsAckedAt);
+  return { critical: all.filter((g) => g.text.severity === "critical"), calm };
+}
+
+/** Threat model X3: the gate was off for a while (when it opened something), or bb's safe-mode is (or was) on. Shown on the page and in the strip, for a week. */
 function AliveAlarm({ ov }: { ov: Overview }) {
   const a = ov.alive;
-  if (a.gaps.length === 0 && a.safeMode !== true && !a.safeModeSeen) return null;
+  const { critical } = gapsBySeverity(ov);
+  if (critical.length === 0 && a.safeMode !== true && !a.safeModeSeen) return null;
   const at = (t: number) => new Date(t).toLocaleString();
+  const guardOnly = critical.length > 0 && critical.every((g) => g.text.mode === "guard");
   return (
     <div className="rounded-md border-2 border-destructive bg-destructive/10 p-2 text-destructive" role="alert" data-secure-bb-alarm>
-      <p className="font-semibold">ТРЕВОГА: гейт не всегда работал</p>
+      <p className="font-semibold">{critical.length > 0 ? (guardOnly ? "ТРЕВОГА: плагин secure-bb не работал, часть защиты была закрыта" : "ТРЕВОГА: гейт не всегда работал") : "ТРЕВОГА: safe-mode bb"}</p>
       <ul className="mt-1 list-disc pl-5 text-xs">
-        {a.gaps.map((g, i) => <li key={i}>Гейт не работал с {at(g.from)} по {at(g.to)} ({Math.round(g.ms / 60_000)} мин){g.stopped ? ": его остановили (выключили)" : ": процесс остановился без предупреждения"}{g.safeMode ? "; safe-mode bb был включён" : ""}.</li>)}
+        {critical.map(({ gap: g, text }, i) => (
+          <li key={i}>
+            {text.headline} ({at(g.from)} — {at(g.to)}){g.safeMode ? "; safe-mode bb был включён" : ""}.
+            {text.works ? <> {text.works}</> : null} {text.notWorking}
+          </li>
+        ))}
         {a.safeMode === true ? <li>safe-mode bb включён сейчас: сторонние плагины не работают.</li> : null}
         {a.safeMode !== true && a.safeModeSeen ? <li>За последнюю неделю safe-mode bb включался (см. журнал).</li> : null}
       </ul>
-      <p className="mt-1 text-xs">Пока гейта нет, ничего не удерживается и не проверяется; за это время могли поменять настройки и вернуть их. Проверьте конфигурацию и плагины вручную.</p>
+      {critical.length > 0 ? <p className="mt-1 text-xs">Проверьте {guardOnly ? "перечисленное" : "конфигурацию и плагины"} вручную.</p> : null}
     </div>
   );
 }
@@ -909,7 +928,7 @@ function AliveAlarm({ ov }: { ov: Overview }) {
 /** Always-on-screen strip: open windows are never hidden. */
 function WindowOverlay() {
   const { rpc, data, refetch } = useOverview();
-  if (!data || (data.windows.length === 0 && data.watch.windows.length === 0 && data.journal.ok && data.alive.gaps.length === 0 && data.alive.safeMode !== true)) return null;
+  if (!data || (data.windows.length === 0 && data.watch.windows.length === 0 && data.journal.ok && gapsBySeverity(data).critical.length === 0 && data.alive.safeMode !== true)) return null;
   return (
     <div className="pointer-events-auto fixed bottom-3 left-3 z-50 max-w-[min(32rem,calc(100vw-1.5rem))] space-y-2 rounded-lg border border-border bg-card p-2 shadow-lg" data-secure-bb-banner>
       <JournalAlarm ov={data} rpc={rpc} refetch={refetch} />
@@ -2909,6 +2928,7 @@ function SkillsLine({ ov, onOpen }: { ov: Overview; onOpen: () => void }) {
 /** «Пока вас не было»: what the journals say happened since the last «Всё в порядке», grouped by plugin and thread. */
 function AwayCard({ ov, since, onSeen, onReview, canReview, kept, alarms, onShowAlarm }: { ov: Overview; since: number; onSeen: (mark: number) => void; onReview: () => void; canReview: boolean; kept: Set<number>; alarms: ProblemRef[]; onShowAlarm: (p: ProblemRef) => void }) {
   const nav = useBbNavigate();
+  const { rpc, refetch } = useOverview();
   const guardMode = ov.guard?.connected === true;
   const events = awayEventsOf(ov);
   const heldNow: Record<string, HeldNow> = {};
@@ -2921,10 +2941,19 @@ function AwayCard({ ov, since, onSeen, onReview, canReview, kept, alarms, onShow
   }
   const groups = groupAway(awayInfoEvents(events, guardMode), since, guardMode, heldNow);
   const alarmBlock = awayAlarms(alarms);
-  if (groups.length === 0 && !alarmBlock) return null;
+  const calm = gapsBySeverity(ov).calm;
+  if (groups.length === 0 && !alarmBlock && calm.length === 0) return null;
   return (
     <div className={card} data-secure-bb-away>
       <h2 className="text-base font-semibold">Пока вас не было</h2>
+      {calm.length > 0 ? (
+        <div className={`mt-2 rounded-md border border-border p-2 text-xs ${muted}`} data-secure-bb-gap-calm>
+          {calm.map(({ gap: g, text }) => (
+            <p key={g.at}>{text.headline}. {text.works} {text.notWorking}</p>
+          ))}
+          <button type="button" className={`${btn} mt-1`} onClick={() => void rpc.call("alive.ack", null).then(refetch)}>Понятно</button>
+        </div>
+      ) : null}
       {alarmBlock ? (
         <div className="mt-2 rounded-md border border-red-400 p-2 text-red-700 dark:border-red-700 dark:text-red-400" data-secure-bb-away-alarms>
           <p className="font-semibold">{alarmBlock.title}: они остаются, пока вы не разберёте их на месте</p>
@@ -3450,7 +3479,7 @@ function GatePage() {
   const yellows = planned.filter((c) => cardColorOf(c) === "yellow");
   const alarms: ProblemRef[] = [];
   if (!ov.journal.ok) alarms.push({ anchor: "sbb-alarms", tab: "status", text: "Журнал решений нарушен" });
-  if (ov.alive.gaps.length > 0 || ov.alive.safeMode === true) alarms.push({ anchor: "sbb-alarms", tab: "status", text: "Гейт не всегда работал" });
+  if (gapsBySeverity(ov).critical.length > 0 || ov.alive.safeMode === true) alarms.push({ anchor: "sbb-alarms", tab: "status", text: gapsBySeverity(ov).critical.every((g) => g.text.mode === "guard") ? "Плагин secure-bb не работал" : "Гейт не всегда работал" });
   if (ov.guard?.connected && ov.guard.journal && !ov.guard.journal.valid) alarms.push({ anchor: "sbb-guard-alarm", tab: "status", text: "Журнал сторожа нарушен" });
   const agentsCritical = (ov.agents?.state?.drifts ?? []).filter((d) => d.class === "critical" && !d.initial).length;
   const agentsAlarms = (ov.agents?.state?.alarms ?? []).length;
