@@ -150,6 +150,26 @@ export function grown(base: Rights, now: Rights): { tokens: string[]; review: st
 
 export const hardFlags = (r: CheckResult): Finding[] => r.findings.filter((f) => f.severity === "block");
 
+/** What an open window says about a version's rights (`windowAllows`). */
+export interface WindowVerdict {
+  /** The window lets the version in as far as its rights go: no new right and nothing for review. */
+  allowed: boolean;
+  /** Tokens the version has and the baseline lacks (`grown`): a new capability. */
+  newTokens: string[];
+  /** Rules of the findings that need a look. ANY of them holds the version in a window, not only a new one: a window waves through what was already seen, not what needs eyes. */
+  reviews: string[];
+}
+/**
+ * THE rule of what an open window lets in, by rights. The guard calls it (`windowRefuses`) and so does the plugin's hook without a guard (`decideUnsafe`); the hook
+ * in guard mode adds only what the guard cannot see (the thread, a damaged snapshot, a polluted tree, the AI scan's flag) and does not compare rights at all.
+ * `baseline`: the rights of the last approved version, and of the version the window was opened from; each caller names its own, the comparison is this.
+ */
+export function windowAllows(baseline: Rights, rights: Rights): WindowVerdict {
+  const newTokens = grown(baseline, rights).tokens;
+  const reviews = rights.review;
+  return { allowed: newTokens.length === 0 && reviews.length === 0, newTokens, reviews };
+}
+
 /** `rule file:line` of the first few findings, for a line in a queue entry. */
 export function brief(items: string[], max = 4): string {
   return items.slice(0, max).join(", ") + (items.length > max ? ` и ещё ${items.length - max}` : "");

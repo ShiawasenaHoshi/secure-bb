@@ -8,7 +8,7 @@ import { formatReport, runChecks as guardRunChecks } from "../guard/src/checks/i
 import { flowTokens, type FlowSummary } from "../guard/src/checks/flow.ts";
 import { grown, rightsOf } from "../guard/src/trust.ts";
 import { runChecks, type CheckResult } from "../src/checks/index.js";
-import { capabilityTokens } from "../src/decision.js";
+import { capabilityTokens } from "../guard/src/trust.js";
 import { capabilityPhrase, capsWithPaths, flowClause, riskHeadline, yellowText } from "../src/ux.js";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "sbb-flow-")));

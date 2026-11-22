@@ -7,7 +7,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { runChecks as guardRunChecks } from "../guard/src/checks/index.ts";
 import { grown, rightsOf } from "../guard/src/trust.ts";
 import { runChecks, type CheckResult } from "../src/checks/index.js";
-import { capabilityTokens, newTokens } from "../src/decision.js";
+import { capabilityTokens } from "../guard/src/trust.js";
 import { classifySdkChain } from "../src/checks/sdk-rights.js";
 import { capabilityPhrase, capsWithPaths, riskHeadline } from "../src/ux.js";
 
@@ -156,8 +156,8 @@ describe("the guard counts the same rights (one checks module)", () => {
   it("a new right in a new version is a new capability: a window holds it", async () => {
     const old = await fixture("theme-only");
     const now = await fixture("sdk-threads-read-spawn");
-    expect(newTokens(now, capabilityTokens(old))).toEqual(expect.arrayContaining(["sdk_agents", "sdk_agents:threads.spawn", "sdk_read"]));
-    expect(newTokens(old, capabilityTokens(now))).toEqual([]);
+    expect(grown({ tokens: capabilityTokens(old), review: [] }, rightsOf(now)).tokens).toEqual(expect.arrayContaining(["sdk_agents", "sdk_agents:threads.spawn", "sdk_read"]));
+    expect(grown({ tokens: capabilityTokens(now), review: [] }, rightsOf(old)).tokens).toEqual([]);
   });
   it("the guard's own comparison with the approved ancestor (a trusted source passes only with the same rights) sees them as new", async () => {
     const old = await fixture("theme-only");

@@ -59,6 +59,7 @@ import {
   type ReasonKind,
   type Rights,
   type TrustMode,
+  windowAllows,
 } from "./trust.ts";
 import { scan as scanAgents, type FileKind, type Limits, type ScanResult } from "./agents-scan.ts";
 import { JSON_FILE, applyPathChange, watchedRel, type JsonKey } from "./restore.ts";
@@ -857,7 +858,7 @@ export class Guard {
   /**
    * An open window lets a version in only if the same stands as when the plugin runs. The pulse decides ONE thing: the thread scope (only the plugin knows
    * the threads), so a window bound to a thread pauses without it. Whoever reaches the socket can fake a pulse, so everything the guard can read itself it
-   * checks always: the version was read and its hash matched, no hard flag, no right beyond the last approved version and the one the window was opened from.
+   * checks always: the version was read and its hash matched, no hard flag, no right beyond the last approved version and the one the window was opened from, nothing for review (`windowAllows`).
    * No base to compare with: held. Null: the window may let it in.
    */
   private windowRefuses(w: WindowRow, req: DecideInput, ev: Evaluation | null): { note: string; stop: boolean; kind: ReasonKind } | null {
@@ -868,9 +869,9 @@ export class Guard {
     if (ev.blocks.length > 0) return { note: `жёсткий флаг: ${brief(ev.blocks)}`, stop: true, kind: "block" };
     const base = this.windowBase(w, req);
     if (base === null) return { note: "окно: нет одобренной версии или версии, с которой открыто окно, для сравнения прав", stop: false, kind: "first" };
-    const g = grown(base, ev.rights);
-    if (g.tokens.length > 0) return { note: `новое право: ${brief(g.tokens)}`, stop: true, kind: "growth" };
-    if (g.review.length > 0) return { note: `новое замечание проверок: ${brief(g.review)}`, stop: true, kind: "growth" };
+    const v = windowAllows(base, ev.rights);
+    if (v.newTokens.length > 0) return { note: `новое право: ${brief(v.newTokens)}`, stop: true, kind: "growth" };
+    if (v.reviews.length > 0) return { note: `проверки требуют ревью: ${brief(v.reviews)}`, stop: true, kind: "growth" };
     return null;
   }
   /** What the window may carry without being asked: the last approved version of the plugin (same source first) together with the version it was opened from. */
