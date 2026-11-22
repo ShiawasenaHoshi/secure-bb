@@ -24,7 +24,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "build": "bb plugin build",
-    "lint:deps": "depcruise --config .dependency-cruiser.cjs --output-type err ."
+    "lint:deps": "depcruise --config .dependency-cruiser.cjs --output-type err . && depcruise --config .dependency-cruiser.browser.cjs --output-type err app.tsx"
   },
   "devDependencies": {
     "@get-bb/plugin-sdk": "0.6.149",
