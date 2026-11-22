@@ -25,7 +25,7 @@ import {
   type Unobserved,
   type WindowScope,
 } from "./model.js";
-import { GateError } from "../gate.js";
+import { GateError } from "../errors.js";
 import type { Store } from "../store.js";
 
 export interface WatchActions {

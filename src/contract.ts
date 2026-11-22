@@ -1,10 +1,11 @@
 // RPC contract shared by server.ts and app.tsx (the app imports only its type).
 import { defineRpcContract } from "@get-bb/plugin-sdk";
 import type { AgentsView } from "./agents.js";
-import type { BatchPrepared, BatchResult } from "./batch.js";
+import type { BatchPrepared, BatchResult } from "./batch-types.js";
 import type { GuardJournalReport, GuardChallenge, TrustMode } from "./guardlink.js";
 import type { JournalReport } from "./journal.js";
 import type { Overview } from "./overview.js";
+import { RPC_AUTH, type RpcAuth } from "./approval.js";
 import * as s from "./schema.js";
 
 const code = s.string({ min: 1, max: 16 });
@@ -173,3 +174,9 @@ export const rpcContract = defineRpcContract({
     output: s.json<{ ok: true }>(),
   },
 });
+
+// The table of what an RPC needs (approval.ts) and this contract list the same RPCs: a missing or an extra row is a compile error here (approval.ts cannot import
+// this file: the table is a leaf, and the contract looks at it).
+const everyRpcHasARow: Record<keyof typeof rpcContract, RpcAuth> = RPC_AUTH;
+const everyRowHasAnRpc: Record<keyof typeof RPC_AUTH, unknown> = rpcContract;
+void [everyRpcHasARow, everyRowHasAnRpc];

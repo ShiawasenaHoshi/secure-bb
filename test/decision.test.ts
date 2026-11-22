@@ -5,9 +5,10 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { CheckResult } from "../src/checks/index.js";
-import { Gate, GateError, type HookCtx } from "../src/gate.js";
+import { Gate, type HookCtx } from "../src/gate.js";
+import { GateError } from "../src/errors.js";
 import { MIGRATIONS, Store } from "../src/store.js";
-import { base32Decode, hotp, stepAt } from "../src/totp.js";
+import { base32Decode, hotp, stepAt } from "../guard/src/totp.ts";
 import { hashTree } from "../src/tree.js";
 import { CLEAN, NETWORKED, withCaps, withFindings } from "./support/checks.js";
 

@@ -1,14 +1,13 @@
-import { readFileSync, statSync, writeFileSync, copyFileSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import net from "node:net";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { journalVerify, main, parseExport, EXPORT_FORMAT, importCmd, status, totpRegister, serve, type Io } from "../../guard/src/cli.ts";
 import { listen } from "../../guard/src/server.ts";
 import { openDb } from "../../guard/src/db.ts";
 import { Guard } from "../../guard/src/guard.ts";
-import { encodeQr as pluginQr } from "../../src/qr.ts";
-import { hotp as pluginHotp, base32Decode as pluginDecode, otpauthUri as pluginOtpauthUri } from "../../src/totp.ts";
 import { encodeQr as guardQr } from "../../guard/src/qr.ts";
 import { base32Decode, hotp, otpauthUri, stepAt } from "../../guard/src/totp.ts";
 import { Clock, decideReq, startGuard, type TestGuard } from "./support.ts";
@@ -677,16 +676,12 @@ describe("serve / status", () => {
   });
 });
 
-describe("agrees with the plugin's own primitives", () => {
-  it("the plugin's totp.ts and qr.ts are the guard's own functions (no copy that could drift); only the issuer of the plugin's own code differs", () => {
-    expect(pluginHotp).toBe(hotp);
-    expect(pluginDecode).toBe(base32Decode);
-    expect(pluginQr).toBe(guardQr);
-    const secret = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
-    expect(pluginOtpauthUri(secret)).toContain("issuer=secure-bb");
-    expect(pluginOtpauthUri(secret)).not.toContain("secure-bb-guard");
-    expect(otpauthUri(secret)).toContain("issuer=secure-bb-guard");
-    expect(pluginOtpauthUri(secret, "x")).toBe(otpauthUri(secret, "x"));
+describe("the plugin has no second copy of the guard's primitives", () => {
+  it("TOTP and the QR encoder live only in guard/src (the plugin imports them from there; its issuer is named at the call)", () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    for (const f of ["qr.ts", "totp.ts"]) expect(existsSync(join(here, "..", "..", "src", f)), `src/${f}`).toBe(false);
+    expect(otpauthUri("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP")).toContain("issuer=secure-bb-guard");
+    expect(otpauthUri("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP", "secure-bb")).toMatch(/issuer=secure-bb$/);
   });
 
   it("has no dependencies and imports only node:* and its own files", () => {

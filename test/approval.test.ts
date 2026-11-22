@@ -10,7 +10,7 @@ import plugin from "../server.js";
 import { RPC_AUTH, SessionProof, authTableMarkdown, groupOf, hashToken, setHash, type RpcGroup } from "../src/approval.js";
 import { rpcContract } from "../src/contract.js";
 import { Gate } from "../src/gate.js";
-import { base32Decode, hotp, stepAt } from "../src/totp.js";
+import { base32Decode, hotp, stepAt } from "../guard/src/totp.ts";
 
 const MIN = 60_000;
 

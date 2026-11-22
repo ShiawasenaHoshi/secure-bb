@@ -4,7 +4,8 @@
 import { posix, sep } from "node:path";
 import { analyze, parseSource, type FileFacts, type Site } from "./ast.ts";
 import { excerptOf, isCodeFile, isUrlSpec, packageDirOf, scanTree, type SourceFile } from "./files.ts";
-import { analyzeFlows, type FlowFile, type SourceKind } from "./flow.ts";
+import { analyzeFlows, type FlowFile } from "./flow.ts";
+import type { SourceKind } from "./flow-types.ts";
 import { entryPoints, fileCandidates, pluginDirOf, resolveSpecifier, type GraphContext } from "./reach.ts";
 import { inventoryPackages, verifyInstalledPackages, type Integrity, type IntegrityEnv } from "../deps/integrity.ts";
 import { collectDependencies, nameFindings } from "../deps/collect.ts";

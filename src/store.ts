@@ -1,6 +1,6 @@
 // secure-bb's own SQLite. Policy lives here (never in plugin settings: anyone
 // can change settings through the API without authentication).
-import type BetterSqlite3 from "better-sqlite3";
+import type { Db } from "./db-types.js";
 import type { CheckResult } from "./checks/types.js";
 import type { FullPolicy } from "../guard/src/policy.ts";
 import { appendRecord, lastHead, sealLegacy, verifyChain, type JournalAnchor, type JournalReport } from "./journal.js";
@@ -11,7 +11,6 @@ import { DEFAULT_PUBLISH, type PublishRow, type PublishSettings, type PublishSta
 import { DEFAULT_AI, type AiSettings, type ScanResult, type ScanRow, type ScanStatus, type ScanTrigger } from "./scan/types.js";
 import type { Category, ConfigWindowRow, Drift, DriftKind, DriftStatus, SnapshotRow, WindowScope } from "./watch/model.js";
 
-export type Db = BetterSqlite3.Database;
 
 export interface StoredCheck {
   ts: number;

@@ -8,7 +8,7 @@ import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Gate } from "../../src/gate.js";
 import { DEFAULT_POLICY, MIGRATIONS, Store } from "../../src/store.js";
-import { base32Decode, hotp, stepAt } from "../../src/totp.js";
+import { base32Decode, hotp, stepAt } from "../../guard/src/totp.ts";
 import { DEFAULT_POLICY as GUARD_DEFAULT } from "../../guard/src/guard.ts";
 import { POLICY_FIELDS, guardPolicyWidens, localPolicyWidens, windowScopeWidens, type FullPolicy } from "../../guard/src/policy.ts";
 import { bootPlugin, startGuard, startGuardOnDate, type TestGuard } from "./support.ts";

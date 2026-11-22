@@ -7,7 +7,7 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { runChecks, type CheckResult } from "../src/checks/index.js";
 import { Gate, type HookCtx } from "../src/gate.js";
 import { MIGRATIONS, Store } from "../src/store.js";
-import { base32Decode, hotp, stepAt } from "../src/totp.js";
+import { base32Decode, hotp, stepAt } from "../guard/src/totp.ts";
 import { hashTree } from "../src/tree.js";
 import { bbWatchSource } from "../src/watch/bb-source.js";
 import { NotApplicableError } from "../src/watch/collect.js";
