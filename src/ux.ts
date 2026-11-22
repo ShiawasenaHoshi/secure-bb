@@ -1840,6 +1840,125 @@ export function agentAlarmText(e: CriticalEffects = CRITICAL_EFFECTS): AgentAlar
   return { blocked: blocked.length > 0 ? `${cap(blocked.join("; "))}.` : "Ничего не заблокировано: это только сигнал.", works: `${cap(works.join("; "))}.` };
 }
 
+// ---- «гейт не всегда работал»: what a stopped plugin really leaves open ------------------------------------------------------------
+/**
+ * What happens while the secure-bb PLUGIN is not running and the guard daemon (sbb-guard) is. Each flag is a fact about the code;
+ * test/guard/plugin-down-effects.test.ts measures the first five against a real guard, so the alarm text cannot stay as it is when they change.
+ * The rest is by construction (what lives in the plugin: the page, the codes' form, the config watch, the hook's extra checks) and the test pins them too.
+ */
+export interface PluginDownEffects {
+  /** The core asks the guard, not the plugin: a version nobody approved is held. */
+  guardHoldsUnknown: boolean;
+  /** Versions approved before keep loading. */
+  guardApprovedStillRun: boolean;
+  /** The guard reads the agents' files by itself and closes the windows on a critical change. */
+  guardWatchesAgents: boolean;
+  /** An open window keeps its time (the guard expires it). */
+  guardExpiresWindows: boolean;
+  /** An open window lets a version in WITHOUT what the plugin's hook adds: hard signs, a new capability, the thread scope, pollution. */
+  windowPassesUnchecked: boolean;
+  /** The page, the form for codes and touches, `bb secure-bb propose` and the config watch (account, instructions, skills, env, built-in plugins) are the plugin's own. */
+  pageAndConfigWatchAreThePlugins: boolean;
+}
+export const PLUGIN_DOWN_EFFECTS: PluginDownEffects = {
+  guardHoldsUnknown: true,
+  guardApprovedStillRun: true,
+  guardWatchesAgents: true,
+  guardExpiresWindows: true,
+  windowPassesUnchecked: true,
+  pageAndConfigWatchAreThePlugins: true,
+};
+export interface GapLike {
+  from: number;
+  to: number;
+  ms: number;
+  stopped?: boolean;
+  safeMode?: boolean | null;
+  mode?: "guard" | "hook";
+  cause?: "server" | "unknown";
+  coreHolds?: boolean;
+  windowPasses?: number | null;
+  errorText?: string | null;
+}
+export interface GapContext {
+  /** How the plugin runs now: used for a record written before the record carried its own mode. */
+  guardModeNow: boolean;
+  coreHoldsNow: boolean;
+  /** The config watch has an accepted first snapshot (nothing is watched without one). */
+  configWatch: boolean;
+  /** What the host said about why the plugin was down, when something can say it (a status or an error text). Overrides the guess in the record. */
+  reason?: { kind: "disabled" } | { kind: "error"; text?: string | null };
+}
+export interface GapText {
+  /** `critical`: a red alarm that stays; `calm`: a line in «Пока вас не было» with «Понятно». */
+  severity: "critical" | "calm";
+  mode: "guard" | "hook";
+  headline: string;
+  /** What kept working (guard mode only). */
+  works: string;
+  /** What did not work. */
+  notWorking: string;
+  /** What the downtime really opened, by name; empty for a calm line. */
+  opens: string[];
+}
+const minutesOf = (ms: number): string => `${Math.max(1, Math.round(ms / 60_000))} мин`;
+/** Why it was down, in words; null when it cannot be told (then the text does not say «выключили»). */
+export function gapCauseText(gap: Pick<GapLike, "cause">, reason?: GapContext["reason"]): string | null {
+  if (reason?.kind === "disabled") return "плагин был выключен";
+  if (reason?.kind === "error") return reason.text ? `ошибка запуска плагина: ${reason.text}` : "ошибка запуска плагина";
+  if (gap.cause === "server") return "сервер bb был остановлен";
+  return null;
+}
+export function gapAlarmText(gap: GapLike, ctx: GapContext, e: PluginDownEffects = PLUGIN_DOWN_EFFECTS): GapText {
+  const mode = gap.mode ?? (ctx.guardModeNow ? "guard" : "hook");
+  const cause = gapCauseText(gap, ctx.reason);
+  const because = cause ? ` (${cause})` : "";
+  const dur = minutesOf(gap.ms);
+  if (mode !== "guard") {
+    const coreHolds = gap.coreHolds ?? ctx.coreHoldsNow;
+    return {
+      severity: "critical",
+      mode,
+      headline: `Гейт не работал ${dur}${because}`,
+      works: "",
+      notWorking: coreHolds
+        ? "Ядро bb не загружало новые плагины и версии (ждали гейт), но ничего не проверялось и не одобрялось; настройки bb и агентов не отслеживались, за это время их могли поменять и вернуть."
+        : "Пока гейта нет, ничего не удерживается и не проверяется; за это время могли поменять настройки и вернуть их.",
+      opens: ["всё"],
+    };
+  }
+  const works: string[] = [];
+  if (e.guardHoldsUnknown) works.push("версии плагинов удерживались и проверялись сторожем");
+  if (e.guardApprovedStillRun) works.push("одобренные версии работали");
+  if (e.guardWatchesAgents) works.push("настройки агентов отслеживались");
+  const notWorking: string[] = [];
+  const opens: string[] = [];
+  if (e.pageAndConfigWatchAreThePlugins) notWorking.push("страница, коды и касания (одобрить версию и открыть окно было нельзя), команда `bb secure-bb propose`");
+  if (e.pageAndConfigWatchAreThePlugins && ctx.configWatch) {
+    const t = "наблюдение за настройками bb (аккаунт, инструкции, скиллы, окружение, встроенные плагины): что изменили и вернули за это время, не видно";
+    notWorking.push(t);
+    opens.push(t);
+  }
+  if (e.windowPassesUnchecked && gap.windowPasses !== 0) {
+    const t =
+      typeof gap.windowPasses === "number"
+        ? `${gap.windowPasses} ${plural(gap.windowPasses, "версия прошла", "версии прошли", "версий прошли")} по окну доверия без проверок плагина (жёсткие признаки, новая возможность, охват по тредам)`
+        : "если было открыто окно доверия, версии шли по нему без проверок плагина (жёсткие признаки, новая возможность, охват по тредам); сколько их было, узнать не удалось";
+    notWorking.push(t);
+    opens.push(t);
+  }
+  return {
+    severity: opens.length > 0 ? "critical" : "calm",
+    mode,
+    headline: `Страница защиты не работала ${dur}${because}`,
+    works: `Сторож в это время работал: ${works.join(", ")}.`,
+    notWorking: `Не работало: ${notWorking.join("; ")}.`,
+    opens,
+  };
+}
+/** The gaps that are still to be shown: not set aside with «Понятно». */
+export const unackedGaps = <G extends { at: number }>(gaps: G[], ackedAt: number | null): G[] => gaps.filter((g) => ackedAt === null || g.at > ackedAt);
+
 // ---- «Под защитой»: every installed plugin ------------------------------------------------------------------------------------------
 export type Standing = "works" | "waits" | "quarantine";
 export const STANDING_LABEL: Record<Standing, string> = { works: "работает", waits: "ждёт вашего решения", quarantine: "в карантине" };

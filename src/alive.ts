@@ -15,6 +15,7 @@ export const ALARM_KEEP_MS = 7 * 24 * 3_600_000;
 const META_ALIVE = "alive_at";
 const META_STOP = "alive_stop";
 const META_SAFE = "alive_safe_mode";
+const META_GAP_ACK = "alive_gap_ack";
 
 export interface GapAlarm {
   from: number;
@@ -24,6 +25,16 @@ export interface GapAlarm {
   stopped: boolean;
   safeMode: boolean | null;
   at: number;
+  /** What was known at the start that found the gap. Records written before these fields existed lack them. */
+  mode?: "guard" | "hook";
+  /** Why it was down, as far as the plugin can tell at the next start: the server restarted, or it cannot be told. */
+  cause?: "server" | "unknown";
+  /** The core holds every unvetted plugin while the gate plugin is down (BB_PLUGIN_ACTIVATION_GUARDS names secure-bb). */
+  coreHolds?: boolean;
+  /** Guard mode: versions the guard let through by an open window during the gap (no plugin checks stood behind them); null when the guard could not be asked. */
+  windowPasses?: number | null;
+  /** The text the core gave for the failure, when the plugin could learn it. Not learnable at a start today; kept so the text can use it. */
+  errorText?: string | null;
 }
 export interface AliveView {
   /** Last mark of life, or null on the very first run. */
@@ -33,6 +44,10 @@ export interface AliveView {
   safeMode: boolean | null;
   /** The safe-mode was on at the last start, or switched on while the gate ran. */
   safeModeSeen: boolean;
+  /** The newest gap was set aside with «Понятно». */
+  gapsAckedAt: number | null;
+  /** The core holds the unvetted plugins while the gate plugin is down (now, from the environment). */
+  coreHolds: boolean;
 }
 
 export interface AliveDeps {
@@ -41,7 +56,20 @@ export interface AliveDeps {
   /** bb's safe-mode: true / false, null when it cannot be read. Must not throw. */
   safeMode: () => Promise<boolean | null>;
   log?: (message: string) => void;
+  /** The plugin runs next to a guard (BB_PLUGIN_ACTIVATION_GUARD_SOCKET). */
+  guardMode?: boolean;
+  /** BB_PLUGIN_ACTIVATION_GUARDS names secure-bb. */
+  coreHolds?: boolean;
+  /** When the bb server process started (ms), if known: a gap that ends right after it is the server being stopped. */
+  serverStartedAt?: () => number | null;
+  /** Guard mode: how many versions the guard let in by a window between the two times. Null: could not be asked. Must not throw. */
+  windowPasses?: (from: number, to: number) => Promise<number | null>;
 }
+
+/** The plugin starts with the server or soon after it; a gap that ends within this of the server's start is a stopped server. */
+export const SERVER_START_SLACK_MS = 2 * 60_000;
+export const gapCause = (from: number, to: number, serverStartedAt: number | null): "server" | "unknown" =>
+  serverStartedAt !== null && serverStartedAt >= from && to - serverStartedAt <= SERVER_START_SLACK_MS ? "server" : "unknown";
 
 export class Alive {
   private safeModeNow: boolean | null = null;
@@ -61,7 +89,8 @@ export class Alive {
 
     let alarm: GapAlarm | null = null;
     if (prev !== null && Number.isFinite(prev) && now - prev > GAP_THRESHOLD_MS) {
-      alarm = { from: prev, to: now, ms: now - prev, stopped, safeMode, at: now };
+      const passes = this.d.guardMode ? await this.d.windowPasses?.(prev, now).catch(() => null) ?? null : null;
+      alarm = { from: prev, to: now, ms: now - prev, stopped, safeMode, at: now, mode: this.d.guardMode ? "guard" : "hook", cause: gapCause(prev, now, this.d.serverStartedAt?.() ?? null), coreHolds: this.d.coreHolds === true, windowPasses: passes, errorText: null };
       store.log("gate.gap", null, null, { ...alarm });
       this.d.log?.(`secure-bb was not running from ${new Date(prev).toISOString()} to ${new Date(now).toISOString()}${stopped ? " (stopped in an orderly way)" : ""}${safeMode ? "; bb safe-mode is ON" : ""}`);
     }
@@ -99,6 +128,13 @@ export class Alive {
     const since = now - ALARM_KEEP_MS;
     const gaps = store.listLogKinds(["gate.gap"], since, 5).map((r) => r.detail as unknown as GapAlarm);
     const safeModeSeen = store.listLogKinds(["safe-mode.on"], since, 1).length > 0;
-    return { lastBeat: beat === null ? null : Number(beat), gaps, safeMode: this.safeModeNow, safeModeSeen };
+    const ack = store.getMeta(META_GAP_ACK);
+    return { lastBeat: beat === null ? null : Number(beat), gaps, safeMode: this.safeModeNow, safeModeSeen, gapsAckedAt: ack === null ? null : Number(ack), coreHolds: this.d.coreHolds === true };
+  }
+
+  /** «Понятно»: the gaps up to now are set aside (the journal keeps them). */
+  ackGaps(): void {
+    this.d.store.setMeta(META_GAP_ACK, String(this.d.now()));
+    this.d.store.log("gate.gap.ack", null, null, {});
   }
 }

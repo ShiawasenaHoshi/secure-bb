@@ -54,6 +54,7 @@ const EXPECTED: Record<string, RpcGroup> = {
   // free
   overview: "free",
   "journal.verify": "free",
+  "alive.ack": "free",
   "guard.verify": "free",
   "passkey.challenge": "free",
   "passkey.register": "free",

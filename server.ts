@@ -414,7 +414,23 @@ export default async function plugin(bb: BbPluginApi) {
   };
   journal(true);
   // The mark of life (threat model X3): written every tick; a gap at start, or bb's safe-mode, is an alarm on the page and a journal record.
-  const alive = new Alive({ store, now, safeMode: () => watchSource.safeMode().catch(() => null), log: (m) => bb.log.error(m) });
+  const alive = new Alive({
+    store,
+    now,
+    safeMode: () => watchSource.safeMode().catch(() => null),
+    log: (m) => bb.log.error(m),
+    guardMode: guardLink !== null,
+    coreHolds: (process.env.BB_PLUGIN_ACTIVATION_GUARDS ?? "").split(",").some((g) => g.trim() === "secure-bb"),
+    serverStartedAt: () => Date.now() - process.uptime() * 1000,
+    // What the guard let through by a window while this plugin (and its hook's extra checks) was not there: the guard's journal says it.
+    windowPasses: async (from, to) => {
+      const st = await guardLink?.state().catch(() => null);
+      // The guard's state carries the newest 200 records: if they do not reach back to the start of the gap, the count is unknown.
+      const recent = st?.journal.recent ?? [];
+      if (!st || (recent.length >= 200 && Math.min(...recent.map((r) => r.ts)) > from)) return null;
+      return st ? recent.filter((r) => r.kind === "approved.window" && r.ts >= from && r.ts <= to).length : null;
+    },
+  });
   if ((await alive.start()) !== null) changed();
   const overview = () =>
     buildOverview({ guard: guardLink ?? undefined, ...(agents ? { agents: () => agents.refresh(false) } : {}), alive, sentinel, scanner: aiScanner, publisher, store, gate, now, hookRegistered, listPlugins, probe, descendants: threads.descendants, threadsUx: { ancestors: threads.ancestors, threadTitle }, watch, skills: skillGuard, journal: () => journal(), taintedThreads: () => store.taintedThreads(20) });
@@ -741,6 +757,11 @@ export default async function plugin(bb: BbPluginApi) {
       const r = journal(true);
       changed();
       return r;
+    },
+    "alive.ack": () => {
+      alive.ackGaps();
+      changed();
+      return { ok: true as const };
     },
     "guard.verify": async () => {
       if (!guardLink) return { error: "not in guard mode" };
