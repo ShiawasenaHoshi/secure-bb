@@ -51,8 +51,11 @@ export function useCodeAction(refetch: () => void, opts: { pin?: boolean; slot?:
     setOk(null);
     try {
       const res = (await fn()) as { note?: string } | undefined;
+      // A card that leaves a line of its own («Готово: …») says the result there: a second plate with the same news is not shown.
+      const leavesLine = done !== undefined && opts.slot !== undefined;
       if (res?.note) {
-        if (opts.pin) announce(res.note, { kind: "info", anchor });
+        if (leavesLine) undefined;
+        else if (opts.pin) announce(res.note, { kind: "info", anchor });
         else setOk(res.note);
       }
       if (done) {

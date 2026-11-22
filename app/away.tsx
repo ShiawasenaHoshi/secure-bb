@@ -38,7 +38,7 @@ export function SkillsLine({ ov, onOpen }: { ov: Overview; onOpen: () => void })
  * «Пока вас не было»: what the journals say happened since the last «Всё в порядке» and needs NO decision: what passed by itself, what was rejected
  * or deleted, what the system did. What waits for the person is not repeated here (the cards are on the page). One folded line, «Подробнее» opens it.
  */
-export function AwayCard({ ov, since, onSeen, kept, calmAlarms, onShowAlarm }: { ov: Overview; since: number; onSeen: (mark: number) => void; kept: Set<number>; calmAlarms: ProblemRef[]; onShowAlarm: (p: ProblemRef) => void }) {
+export function AwayCard({ ov, since, onSeen, kept }: { ov: Overview; since: number; onSeen: (mark: number) => void; kept: Set<number> }) {
   const nav = useBbNavigate();
   const { rpc, refetch } = useOverview();
   const guardMode = ov.guard?.connected === true;
@@ -52,10 +52,10 @@ export function AwayCard({ ov, since, onSeen, kept, calmAlarms, onShowAlarm }: {
   }
   const groups = quietAwayGroups(groupAway(awayInfoEvents(events, guardMode), since, guardMode, heldNow));
   const calm = gapsBySeverity(ov).calm;
-  if (groups.length === 0 && calmAlarms.length === 0 && calm.length === 0) return null;
+  if (groups.length === 0 && calm.length === 0) return null;
   const lines = groups.slice(0, 12);
-  const brief = [...lines.slice(0, 2).map((g) => g.text), ...calmAlarms.slice(0, 1).map((a) => a.text)].join("; ");
-  const more = lines.length + calmAlarms.length + calm.length > 2;
+  const brief = [...lines.slice(0, 2).map((g) => g.text)].join("; ");
+  const more = lines.length + calm.length > 2;
   return (
     <div data-secure-bb-away>
       <FoldAccordion
@@ -75,15 +75,6 @@ export function AwayCard({ ov, since, onSeen, kept, calmAlarms, onShowAlarm }: {
             ))}
             <Button size="sm" variant="outline" onClick={() => void rpc.call("alive.ack", null).then(refetch)}>Понятно</Button>
           </div>
-        ) : null}
-        {calmAlarms.length > 0 ? (
-          <ul className="mb-2 space-y-1" data-secure-bb-away-alarms>
-            {calmAlarms.map((a, i) => (
-              <li key={`${a.anchor}-${i}`}>
-                {a.text} · <button type="button" className="underline hover:no-underline" onClick={() => onShowAlarm(a)}>Показать</button>
-              </li>
-            ))}
-          </ul>
         ) : null}
         <ul className="space-y-1">
           {lines.map((g) => (

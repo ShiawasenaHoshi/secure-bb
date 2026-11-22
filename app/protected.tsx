@@ -1,4 +1,5 @@
 import type { Overview } from "../src/overview";
+import { truthfulApproval } from "../src/factor";
 import { pluginRightsText, protectedHeadline, protectedRow, sortProtected } from "../src/ux";
 import { Badge } from "../components/ui/badge";
 import { Card } from "../components/ui/card";
@@ -11,11 +12,11 @@ const STANDING_BADGE = { works: "secondary", waits: "outline", quarantine: "outl
  * «Под защитой»: every installed plugin, not only the ones that wait. One row each: the name, the status, where it came from, its rights in a line, the version
  * and when it was approved. bb's own plugins are one line at the bottom. No plugins: an empty state.
  */
-export function ProtectedSection({ ov, waiting }: { ov: Overview; waiting: ReadonlySet<string> }) {
+export function ProtectedSection({ ov, waiting, onShowCard }: { ov: Overview; waiting: ReadonlySet<string>; onShowCard: (pluginId: string) => void }) {
   const now = useNow();
   const rows = sortProtected(
     ov.plugins.map((p) => ({
-      ...protectedRow({ id: p.id, version: p.version, status: p.status, statusDetail: p.statusDetail, source: p.source, threadId: p.threadId, pin: p.pin, rights: pluginRightsText(p.id, p.pin, ov, ov.policy.flowDowngrade), waits: waiting.has(p.id) }, now),
+      ...protectedRow({ id: p.id, version: p.version, status: p.status, statusDetail: p.statusDetail, source: p.source, threadId: p.threadId, pin: p.pin ? truthfulApproval(p.pin, { guardMode: ov.guard?.connected === true, recent: ov.guard?.recent ?? [] }) : null, rights: pluginRightsText(p.id, p.pin, ov, ov.policy.flowDowngrade), waits: waiting.has(p.id) }, now),
     })),
   );
   const head = protectedHeadline(rows, ov.builtinPlugins);
@@ -32,9 +33,16 @@ export function ProtectedSection({ ov, waiting }: { ov: Overview; waiting: Reado
                 <span className="min-w-0 break-all font-medium">{r.id} <span className={`text-xs font-normal ${muted}`}>{r.version}</span></span>
                 <Badge variant={STANDING_BADGE[r.standing]}>{r.standingLabel}</Badge>
               </div>
-              <p className={`break-all text-xs ${muted}`}>{r.from}</p>
-              <p>{r.rights}</p>
-              <p className={`text-xs ${muted}`}>{r.approved}</p>
+              {r.standing === "waits" ? (
+                // The card above says everything (the source, the rights); here it is one line with the way to it.
+                <p className={`text-xs ${muted}`}>ждёт решения · <button type="button" className="underline hover:no-underline" onClick={() => onShowCard(r.id)}>к карточке</button></p>
+              ) : (
+                <>
+                  <p className={`break-all text-xs ${muted}`}>{r.from}</p>
+                  <p>{r.rights}</p>
+                  <p className={`text-xs ${muted}`}>{r.approved}</p>
+                </>
+              )}
             </div>
           ))}
         </Card>

@@ -5,7 +5,7 @@ import type { PasskeyAssertion } from "../src/guardlink";
 import { humanError, proofHint } from "../src/ux";
 import { Button } from "../components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../components/ui/dialog";
-import { Icon } from "../components/ui/icon";
+import { ShieldIcon } from "../components/ui/shield-icon";
 import { InputOTP } from "../components/ui/input-otp";
 import { drafts, usePasskey, touchFor, type Rpc, type TouchQuery } from "./code";
 
@@ -134,7 +134,7 @@ export function ConfirmPanel({ ov, rpc, req, onDone, onCancel, parts }: PanelPro
     <>
       <DialogHeader>
         <Title className="flex items-center gap-2">
-          <Icon name="Shield" aria-hidden="true" className="size-5 shrink-0" />
+          <ShieldIcon />
           <span data-secure-bb-confirm-what>{req.what}</span>
         </Title>
         <Description>{req.detail ?? "Это действие требует подтверждения."}</Description>

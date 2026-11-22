@@ -7,6 +7,7 @@ import { useCodeAction, CodeField, type Rpc } from "./code";
 import { useProof } from "./confirm";
 import { muted, when, useNow, Msg, Tip } from "./ui";
 import { Button } from "../components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "../components/ui/dialog";
 
 // The session token lives ONLY in this component's memory (state): not localStorage, not a cookie, not the URL. Reloading the page
 // forgets it, and so does leaving it. The server keeps only a hash. Routine actions use it instead of a code; dangerous ones never do.
@@ -113,6 +114,7 @@ export function SessionBar({ ov, rpc, session, open, lock, closed }: { ov: Overv
   const now = useNow();
   const proof = useProof(ov, rpc, "session");
   const act = useCodeAction(() => undefined);
+  const [whyOpen, setWhyOpen] = useState(false);
   if (!proof.registered) return null;
   if (session) {
     const left = Math.max(0, Math.ceil((Math.min(session.idleUntil, session.hardUntil) - now) / 60_000));
@@ -131,31 +133,42 @@ export function SessionBar({ ov, rpc, session, open, lock, closed }: { ov: Overv
   const st = sessionText(ov.guard?.trust?.mode ?? null, ov.guard !== undefined);
   const blocked = ov.guard && proof.pk.has ? false : ov.totp.blockedUntil > 0;
   const blockReason = blockers.length > 0 ? sessionBlockText(ov.sessionBlockers) : blocked ? `Слишком много неверных кодов: коды заблокированы до ${when(ov.totp.blockedUntil)}.` : null;
+  const closedNote = closed ? sessionClosedText(closed) : null;
   const detail = [st.line, st.details].filter(Boolean).join(" ");
   const openWith = (hour: boolean) =>
     void act.run(async () => {
       await proof.run({ kind: "session.open", ...(hour ? { hour: true } : {}) }, (p) => open(p as { code?: string; passkey?: PasskeyAssertion }, hour), { what: hour ? "Открыть сессию подтверждения на 1 час" : "Открыть сессию подтверждения на 15 минут", detail });
     });
+  // One short state in the header; the reason is in the hint and, by «почему?», in a dialog: a long sentence would break the header.
+  const why = [blockReason, closedNote].filter(Boolean).join(" ");
   return (
-    <div className="flex flex-col items-end gap-1 text-sm" id="sbb-session" data-secure-bb-session="closed">
-      <div className="flex flex-wrap items-center justify-end gap-x-2">
-        <span className={muted}>Сессия: закрыта</span>
-        <span aria-hidden className={muted}>·</span>
-        {blockReason ? (
+    <div className="flex flex-wrap items-center justify-end gap-x-2 text-sm" id="sbb-session" data-secure-bb-session={blockReason ? "unavailable" : "closed"}>
+      {blockReason ? (
+        <>
           <Tip tip={blockReason}>
-            <Button size="sm" variant="ghost" disabled>Открыть</Button>
+            <span className={muted} data-secure-bb-session-block>Сессия: недоступна</span>
           </Tip>
-        ) : (
-          <>
-            <Button size="sm" variant="ghost" disabled={act.busy} onClick={() => openWith(false)}>Открыть</Button>
-            <Tip tip="Один час подряд, без продления. Дольше потолка политики сессия не живёт.">
-              <Button size="sm" variant="ghost" disabled={act.busy} onClick={() => openWith(true)}>на 1 час</Button>
-            </Tip>
-          </>
-        )}
-      </div>
-      {blockReason ? <p className={`max-w-xs text-right text-xs ${muted}`} data-secure-bb-session-block>{blockReason}</p> : null}
-      {closed ? <p className={`max-w-xs text-right text-xs ${muted}`} role="status" data-secure-bb-session-closed>{sessionClosedText(closed)}</p> : null}
+        </>
+      ) : (
+        <>
+          <span className={muted}>Сессия: закрыта</span>
+          <span aria-hidden className={muted}>·</span>
+          <Button size="sm" variant="ghost" disabled={act.busy} onClick={() => openWith(false)}>Открыть</Button>
+          <Tip tip="Один час подряд, без продления. Дольше потолка политики сессия не живёт.">
+            <Button size="sm" variant="ghost" disabled={act.busy} onClick={() => openWith(true)}>на 1 час</Button>
+          </Tip>
+        </>
+      )}
+      {why ? <Button size="sm" variant="link" className="px-1" onClick={() => setWhyOpen(true)} data-secure-bb-session-closed={closedNote ? "" : undefined}>почему?</Button> : null}
+      <Dialog open={whyOpen} onOpenChange={setWhyOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Сессия подтверждения</DialogTitle>
+            <DialogDescription>{why || st.line}</DialogDescription>
+          </DialogHeader>
+          <p className={`text-sm ${muted}`}>{detail}</p>
+        </DialogContent>
+      </Dialog>
       <Msg error={act.error} />
     </div>
   );

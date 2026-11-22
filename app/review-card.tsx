@@ -26,7 +26,7 @@ export function LevelBadge({ level }: { level: CardLevel }) {
     <Badge variant="destructive" data-secure-bb-level="danger">{LEVEL_LABEL.danger}</Badge>
   ) : level === "check" ? (
     <Badge variant="outline" className="gap-1" data-secure-bb-level="check">
-      <Icon name="TriangleAlert" aria-hidden="true" className="size-3" />
+      <Icon name="AlertTriangle" aria-hidden="true" className="size-3" />
       {LEVEL_LABEL.check}
     </Badge>
   ) : (
@@ -69,7 +69,10 @@ export function SourceChip({ ux, q }: { ux: QueueUx | undefined; q: QueueRow }) 
   const label = ux?.sourceLabel ?? q.source;
   return (
     <div className="flex flex-wrap items-center gap-1.5">
-      <Badge variant="outline" className="max-w-full break-all font-mono text-xs font-normal" data-secure-bb-source>{label}</Badge>
+      {/* One line: a long address is cut with an ellipsis and stands in full in the hint (on a phone it must not wrap inside its frame). */}
+      <Tip tip={label} className="min-w-0 max-w-full">
+        <Badge variant="outline" className="inline-block max-w-full truncate font-mono text-xs font-normal" data-secure-bb-source>{label}</Badge>
+      </Tip>
       {ux ? (
         ux.level === "unknown" ? <Badge variant="secondary">неизвестный источник</Badge> : <Badge variant="secondary">{ux.level === "own" ? "ваш источник" : "известный источник"}</Badge>
       ) : null}
@@ -130,7 +133,8 @@ export function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onKeep, onT
   // A version the guard has no record of (it loaded without the guard's check): nothing here can approve it, and a green «можно включить» would be a lie.
   const noRecord = hasNoGuardRecord(q);
   const risk = noRecord ? { level: "caution" as const, text: NO_RECORD_HEADLINE } : cardRisk(q, found, ov.policy.flowDowngrade);
-  const allowedWhat = enabledWhat(q.pluginId, q.version);
+  // What the line that takes the card's place says (after «Готово: »).
+  const allowedWhat = `${q.pluginId} ${q.version} разрешён и включён`;
   const verb = approveVerb(risk);
   const approveWhat = actionLabel(verb, q.pluginId, q.version);
   const level = cardLevel({ red, risk });

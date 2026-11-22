@@ -13,6 +13,7 @@ import { useIsCompactViewport } from "./hooks/use-compact-viewport.js";
 import { usePointerCoarse } from "./hooks/use-pointer-coarse.js";
 import { usePortalScopeProps } from "../../lib/portal-scope.js";
 import { cn } from "../../lib/utils.js";
+import { SCRIM_STYLE } from "../../lib/scrim";
 
 export interface ResponsiveOverlayContextValue {
   isCompactViewport: boolean;
@@ -835,8 +836,9 @@ export function PersistentResponsiveDrawerShell({
         aria-hidden="true"
         data-persistent-drawer-backdrop=""
         data-state={open ? "open" : "closed"}
-        className="fixed inset-0 z-50 bg-black/40"
+        className="fixed inset-0 z-50"
         style={{
+          ...SCRIM_STYLE,
           opacity: open ? 1 : 0,
           pointerEvents: open ? "auto" : "none",
           transition: backdropTransition,

@@ -3,7 +3,7 @@ import { useRpc } from "@get-bb/plugin-sdk/app";
 import type { SecureBbRpc } from "../server";
 import type { QueueRow } from "../src/store";
 import { AWAY_KEY, DEFERRED_KEY, cardKey, KEPT_KEY, MODE_NAMES, WIZARD_KEY, awaySince, cardColor, deferKey, detailLevel, pageStatus, STOPPED_EXPLAIN, FREQ_KEY, FREQ_OFF_KEY, approvalEventsOf, parseFreqAt, pickFrequent, alarmCount, parseDeferred, wizardNeeded, GUARD_DOWN_TEXT, agentsSectionTab, decisionOf, launchProblem, moreVersionsText, planCards, trustButton, windowAvailability } from "../src/ux";
-import { makeStub, stableOrder, layoutItems, type Stub } from "../src/ux";
+import { makeStub, stableOrder, layoutItems, humanError, type Stub } from "../src/ux";
 import { DEFER_STUB_RESTORE, dropUnstamped, makeDeferStub, pageCounts, stampMark, withoutMark } from "../src/ux";
 import { emptySnapshot, makeNote, restoreView, snapshotView, type ViewSnapshot } from "../src/stable-view";
 import { openFold } from "../src/fold";
@@ -30,7 +30,7 @@ import { SentinelSection } from "./sentinel";
 import { SkillsSection } from "./skills";
 import { ExceptionsTab } from "./trust";
 import { card, muted, cardBlocked, when, useOverview, Fold, FoldAccordion, Section, type Note, type AnnounceOpts, DoneContext, AnchoredNotes, PinnedNotes, DONE_MS } from "./ui";
-import { headerLine, splitAlarms } from "../src/pageview";
+import { headerLine, SECOND_FACTOR_ANCHOR } from "../src/pageview";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card } from "../components/ui/card";
@@ -40,6 +40,7 @@ import { Tabs, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { WatchSection } from "./watch";
 import { WindowRows, JournalAlarm, gapsBySeverity, AliveAlarm } from "./windows";
 import { Wizard } from "./wizard";
+import { DoneRow } from "./done-row";
 
 /** Tells the server this page is open, so a registration started now counts as attended. */
 export function usePagePing(rpc: ReturnType<typeof useRpc<SecureBbRpc>>) {
@@ -71,6 +72,8 @@ export function GatePage() {
   // «Вы часто одобряете…»: when the hint was last used or put away, and whether the person switched it off (a convenience of this page, not a security fact).
   const [freqAt, setFreqAt] = useState<number | null>(() => parseFreqAt(lsGet(FREQ_KEY)));
   const [freqOff, setFreqOff] = useState<boolean>(() => lsGet(FREQ_OFF_KEY) === "1");
+  // «Настроить» in the header when the second factor is missing: the first-run wizard, on its screen about the second factor.
+  const [forceWizard, setForceWizard] = useState(false);
   const [wizardDone, setWizardDone] = useState<boolean>(() => lsGet(WIZARD_KEY) !== null);
   const [pending, setPending] = useState<Array<{ entry: string; label: string }>>([]);
   const [focus, setFocus] = useState<string | null>(null);
@@ -91,17 +94,26 @@ export function GatePage() {
   const laterOrderRef = useRef<string[] | null>(null);
   const freshRef = useRef<Set<string>>(new Set());
   const pageStart = useRef(Date.now());
+  // The list is shorter when a card turns into a line, and the next card comes up under the pointer: for a moment it does not take presses.
+  const [settling, setSettling] = useState(false);
+  const settle = useCallback(() => {
+    setSettling(true);
+    window.setTimeout(() => setSettling(false), 700);
+  }, []);
   const dismissNote = useCallback((id: number) => setDoneNotes((l) => l.filter((n) => n.id !== id)), []);
   const announce = useCallback((text: string, opts: AnnounceOpts = {}) => {
     const id = ++doneSeq.current;
     const kind = opts.kind ?? "done";
-    setDoneNotes((l) => [...l, makeNote(id, text, { kind, anchor: opts.anchor })].slice(-4));
-    if (kind !== "error") window.setTimeout(() => setDoneNotes((l) => l.filter((n) => n.id !== id)), DONE_MS);
     if (opts.slot && kind === "done") {
+      // The card's place is taken by ONE short line that says the result (no toast besides it, no empty frame).
       const { key, height } = opts.slot;
       setStubs((l) => [...l.filter((x) => x.key !== key), makeStub(key, text, height)]);
+      settle();
+      return;
     }
-  }, []);
+    setDoneNotes((l) => [...l, makeNote(id, text, { kind, anchor: opts.anchor })].slice(-4));
+    if (kind !== "error") window.setTimeout(() => setDoneNotes((l) => l.filter((n) => n.id !== id)), DONE_MS);
+  }, [settle]);
   const doneCtx = useMemo(() => ({ notes: doneNotes, announce, dismiss: dismissNote }), [doneNotes, announce, dismissNote]);
   // «Показать» and the banners: switch to the tab that holds the element, open the list of put-aside cards if it is there, scroll to it and
   // flash it, so that a press is always seen to do something (also when the element is already on the screen).
@@ -140,6 +152,7 @@ export function GatePage() {
     if (on) {
       const height = document.getElementById(`sbb-card-${q.id}`)?.offsetHeight ?? 0;
       setStubs((l) => [...l.filter((x) => x.key !== q.pluginId), makeDeferStub(q, height)]);
+      settle();
     } else setStubs((l) => l.filter((x) => !(x.restore && x.key === q.pluginId)));
     setDeferredKeys(next);
     store(DEFERRED_KEY, next);
@@ -243,7 +256,6 @@ export function GatePage() {
   // What the person has answered or put aside is not «waiting» any more: «Пока вас не было» does not repeat it.
   const keptIds = new Set([...plan.kept.map((q) => q.id), ...plan.later.flatMap((c) => c.all.map((q) => q.id))]);
   const header = headerLine({ status, waiting: counts.waiting, deferred: counts.deferred, alarms });
-  const { calm: calmAlarms } = splitAlarms(alarms);
   const headerMore = guardDown ? GUARD_DOWN_TEXT : status.level === "stopped" ? STOPPED_EXPLAIN : null;
   return (
     <DoneContext.Provider value={doneCtx}>
@@ -268,8 +280,8 @@ export function GatePage() {
         </Tabs>
         {tab === "status" ? (
           <div className="space-y-6">
-            {!wizardDone && wizardNeeded({ hasTrust: ov.guard?.trust != null, mySources: ov.guard?.trust?.mySources.length ?? 0, done: false }) ? <Wizard ov={ov} rpc={rpc} refetch={refetch} onClose={closeWizard} /> : null}
-            <StatusHeader line={header} more={headerMore} onAction={header.target ? () => showProblem(header.target!) : null} session={<SessionBar ov={ov} rpc={rpc} session={approval.session} open={open} lock={lock} closed={sessionClosed} />} />
+            {forceWizard || (!wizardDone && wizardNeeded({ hasTrust: ov.guard?.trust != null, mySources: ov.guard?.trust?.mySources.length ?? 0, done: false })) ? <Wizard ov={ov} rpc={rpc} refetch={refetch} onClose={() => { setForceWizard(false); closeWizard(); }} startStep={forceWizard ? 2 : 0} /> : null}
+            <StatusHeader line={header} more={headerMore} onAction={header.target ? () => (header.target!.anchor === SECOND_FACTOR_ANCHOR && ov.guard?.trust != null ? setForceWizard(true) : showProblem(header.target!)) : null} session={<SessionBar ov={ov} rpc={rpc} session={approval.session} open={open} lock={lock} closed={sessionClosed} />} />
             {ov.totp.blockedUntil > 0 ? (
               <p className="rounded-md border border-destructive p-2 text-sm text-destructive">Слишком много неверных кодов: коды заблокированы до {when(ov.totp.blockedUntil)}.{(ov.guard?.passkey?.keys.length ?? 0) > 0 ? " Касание ключом работает: подпись не подобрать, поэтому её это не касается." : ""}</p>
             ) : null}
@@ -282,23 +294,33 @@ export function GatePage() {
             <AgentsAlarm ov={ov} onShow={() => showProblem({ anchor: "sbb-agents", tab: agentsTab, text: "" })} />
             <WindowRows windows={ov.windows} cfgWindows={ov.watch.windows} rpc={rpc} refetch={refetch} />
             <Section title={`Ждут решения вас${counts.waiting > 0 ? ` (${counts.waiting})` : ""}`}>
+              <div className={settling ? "pointer-events-none space-y-2" : "space-y-2"} data-secure-bb-settling={settling ? "" : undefined}>
               {activeItems.length === 0 ? <EmptyState message="Сейчас решать нечего — всё под защитой" className="py-2" /> : activeItems.map((it) => {
                 if (it.stub) {
                   const st = it.stub;
+                  const approvalId = st.restore ? null : ov.plugins.find((p) => p.id === st.key)?.pin?.id ?? null;
+                  const hide = () => setStubs((l) => l.filter((x) => x.key !== st.key));
                   return (
-                    <Card key={`stub:${st.key}`} className="flex items-center justify-between gap-2 border-dashed p-4 text-sm font-medium" style={{ minHeight: st.height }} data-secure-bb-stub>
-                      <span>{st.text}</span>
-                      {st.restore ? (
-                        <Button size="sm" variant="outline" onClick={() => { const r = st.restore!; const e = heldAll.find((x) => x.id === r.id); if (e) onDefer(e, false); else setStubs((l) => l.filter((x) => x.key !== st.key)); }}>{DEFER_STUB_RESTORE}</Button>
-                      ) : (
-                        <Button size="sm" variant="outline" onClick={() => setStubs((l) => l.filter((x) => x.key !== st.key))}>Скрыть</Button>
-                      )}
-                    </Card>
+                    <DoneRow
+                      key={`stub:${st.key}`}
+                      text={st.text}
+                      undoLabel={DEFER_STUB_RESTORE}
+                      busy={settling}
+                      onHide={hide}
+                      onUndo={
+                        st.restore
+                          ? () => { const r = st.restore!; const e = heldAll.find((x) => x.id === r.id); if (e) onDefer(e, false); else hide(); }
+                          : approvalId !== null && /разрешён/.test(st.text)
+                          ? () => void rpc.call("approval.revoke", { approvalId }).then(() => { hide(); announce("Отозвано: плагину снова нужно ваше решение.", { kind: "info" }); refetch(); }, (e: unknown) => announce(humanError(e instanceof Error ? e.message : String(e)), { kind: "error" }))
+                          : null
+                      }
+                    />
                   );
                 }
                 const c = plan.active.find((x) => x.pluginId === it.key)!;
                 return renderCard(c, false);
               })}
+              </div>
             </Section>
             {plan.later.length > 0 ? (
               <FoldAccordion id="deferred" title={`Отложено (${counts.deferred})`}>
@@ -306,9 +328,9 @@ export function GatePage() {
                 <div className="mt-2 space-y-3">{laterOrder.order.map((k) => plan.later.find((c) => c.pluginId === k)).filter((c): c is NonNullable<typeof c> => c !== undefined).map((c) => renderCard(c, true))}</div>
               </FoldAccordion>
             ) : null}
-            <AwayCard ov={ov} since={since} onSeen={seen} kept={keptIds} calmAlarms={calmAlarms} onShowAlarm={showProblem} />
+            <AwayCard ov={ov} since={since} onSeen={seen} kept={keptIds} />
             <SkillsLine ov={ov} onOpen={() => showProblem({ anchor: "sbb-skills", tab: "more", text: "" })} />
-            <ProtectedSection ov={ov} waiting={new Set(plan.active.map((c) => c.pluginId))} />
+            <ProtectedSection ov={ov} waiting={new Set(plan.active.map((c) => c.pluginId))} onShowCard={(pluginId) => { const c = plan.active.find((x) => x.pluginId === pluginId); if (c) showProblem(refOf(c)); }} />
             {plan.kept.length > 0 ? <p className={`text-xs ${muted}`}>Оставлено вами в карантине: {plan.kept.map((q) => `${q.pluginId} ${q.version}`).join(", ")}. Они не запущены; вернуть решение можно на вкладке «Карантин».</p> : null}
             {launchFailed.length > 0 ? (
               <Section title="Разрешены, но не запустились">

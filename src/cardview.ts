@@ -30,29 +30,32 @@ export const VISIBLE_ROWS = 5;
 
 const SHORT: Record<string, { icon: string; label: string }> = {
   network: { icon: "Globe", label: "Выходит в сеть" },
-  env: { icon: "KeyRound", label: "Читает переменные окружения" },
-  credentials: { icon: "KeyRound", label: "Читает учётные данные других программ" },
+  env: { icon: "Lock", label: "Читает переменные окружения" },
+  credentials: { icon: "Lock", label: "Читает учётные данные других программ" },
   fs: { icon: "Folder", label: "Работает с файлами" },
   child_process: { icon: "Terminal", label: "Запускает программы на компьютере" },
   dynamic_code: { icon: "Code", label: "Выполняет код, собранный на лету" },
-  server_access: { icon: "ServerCog", label: "Управляет самим bb" },
-  builtin_rpc: { icon: "ServerCog", label: "Управляет самим bb" },
+  server_access: { icon: "Settings", label: "Управляет самим bb" },
+  builtin_rpc: { icon: "Settings", label: "Управляет самим bb" },
   sdk_read: { icon: "MessageSquare", label: "Читает ваши переписки в bb" },
-  sdk_meta: { icon: "MessagesSquare", label: "Знает названия и состояние тредов" },
-  sdk_questions: { icon: "CircleHelp", label: "Видит вопросы, которые задают агенты" },
+  sdk_meta: { icon: "Eye", label: "Знает названия и состояние тредов" },
+  sdk_questions: { icon: "CircleQuestion", label: "Видит вопросы, которые задают агенты" },
   sdk_agents: { icon: "Bot", label: "Запускает и останавливает агентов" },
-  sdk_send: { icon: "Send", label: "Пишет в ваши переписки от вашего имени" },
+  sdk_send: { icon: "Sent", label: "Пишет в ваши переписки от вашего имени" },
   sdk_answer: { icon: "Bot", label: "Отвечает на вопросы агентов за вас" },
   sdk_settings: { icon: "Settings", label: "Меняет настройки bb" },
   ui: { icon: "Palette", label: "Меняет внешний вид bb" },
-  ui_click: { icon: "MousePointerClick", label: "Нажимает элементы интерфейса bb" },
+  ui_click: { icon: "AppWindow", label: "Нажимает элементы интерфейса bb" },
   http_routes: { icon: "Link", label: "Открывает свои адреса на сервере bb" },
-  contribute_env: { icon: "Variable", label: "Меняет окружение запускаемых программ" },
-  host_artifact: { icon: "FileDown", label: "Кладёт свои файлы на компьютер" },
-  database: { icon: "Database", label: "Хранит свои данные в bb" },
+  contribute_env: { icon: "Layers", label: "Меняет окружение запускаемых программ" },
+  host_artifact: { icon: "PackageReceive", label: "Кладёт свои файлы на компьютер" },
+  database: { icon: "Layers", label: "Хранит свои данные в bb" },
 };
 
 const SECRETISH = /TOKEN|KEY|SECRET|PASSW|CREDENTIAL|AUTH/i;
+
+/** Reading the environment as a whole, or a variable that looks like a secret. */
+const secretEnv = (c: CapLike): boolean => c.kind === "env" && (c.detail.length === 0 || c.detail.some((d) => d === "*" || d === "env:*" || SECRETISH.test(d.replace(/^env:/, ""))));
 
 const trimJoin = (s: string): string => s.replace(/^[;\s—-]+/, "").replace(/^и /, "").trim();
 
@@ -94,12 +97,11 @@ function detailOf(c: CapLike): string | null {
 /** One right as a row. Danger is judged on the right alone, by the same headline the card uses. */
 export function permissionRow(c: CapLike, downgrade: boolean): PermissionRow {
   const short = SHORT[c.kind];
-  const secretEnv = c.kind === "env" && (c.detail.length === 0 || c.detail.some((d) => d === "*" || d === "env:*" || SECRETISH.test(d.replace(/^env:/, ""))));
   const danger = riskHeadline([c], [], { downgrade }).level === "danger";
   return {
     kind: c.kind,
-    icon: short?.icon ?? "ShieldQuestion",
-    label: secretEnv ? "Может читать ваши пароли и токены" : (short?.label ?? capabilityPhrase(c)),
+    icon: short?.icon ?? "AlertCircle",
+    label: secretEnv(c) ? "Может читать ваши пароли и токены" : (short?.label ?? capabilityPhrase(c)),
     detail: detailOf(c),
     danger,
   };
@@ -108,7 +110,7 @@ export function permissionRow(c: CapLike, downgrade: boolean): PermissionRow {
 export interface PermissionList {
   rows: PermissionRow[];
   visible: PermissionRow[];
-  /** «ещё N» */
+  /** «ещё N»: never holds a right of the level «Опасно». */
   more: PermissionRow[];
   /** One muted line under the list: the network is there but not tied to what is read. */
   networkNote: string | null;
@@ -118,15 +120,41 @@ export const NETWORK_UNRELATED_NOTE = "Сеть в плагине есть, с �
 
 const READS = new Set(["sdk_read", "sdk_questions", "env", "credentials"]);
 
-/** The rights as rows, dangerous first; no more than five are visible. */
+/**
+ * Where a right stands in the list. First what a plugin can get at that is worth something to a person (conversations, secrets, files at home, the questions of
+ * agents); then what it does (presses, starts, goes to the network); last the looks. Inside a group the dangerous come first, then the order of the checks.
+ */
+function tierOf(c: CapLike): 0 | 1 | 2 {
+  switch (c.kind) {
+    case "sdk_read":
+    case "credentials":
+    case "sdk_questions":
+      return 0;
+    case "env":
+      return secretEnv(c) ? 0 : 1;
+    case "fs":
+      return c.detail.includes("home") ? 0 : 1;
+    case "ui":
+    case "database":
+      return 2;
+    default:
+      return 1;
+  }
+}
+
+/** The rights as rows, in the order above; no more than five are visible, but a dangerous one is never put under «ещё N». */
 export function permissionList(caps: CapLike[], downgrade: boolean): PermissionList {
-  const rows = caps.filter((c) => c.kind !== "database" || caps.length === 1).map((c) => permissionRow(c, downgrade));
-  // A stable sort: dangerous first, the order of the checks kept inside each group.
-  const sorted = rows.map((r, i) => ({ r, i })).sort((a, b) => Number(b.r.danger) - Number(a.r.danger) || a.i - b.i).map((x) => x.r);
+  const rows = caps.filter((c) => c.kind !== "database" || caps.length === 1).map((c) => ({ c, row: permissionRow(c, downgrade) }));
+  const sorted = rows
+    .map((x, i) => ({ ...x, i }))
+    .sort((a, b) => tierOf(a.c) - tierOf(b.c) || Number(b.row.danger) - Number(a.row.danger) || a.i - b.i)
+    .map((x) => x.row);
+  const visible = sorted.filter((r, i) => i < VISIBLE_ROWS || r.danger);
+  const more = sorted.filter((r) => !visible.includes(r));
   const hasNet = caps.some((c) => c.kind === "network");
   const followed = caps.filter((c) => READS.has(c.kind) && c.flow !== undefined);
   const unrelated = hasNet && followed.length > 0 && followed.every((c) => c.flow!.verdict !== "unknown" && c.flow!.verdict !== "leaves");
-  return { rows: sorted, visible: sorted.slice(0, VISIBLE_ROWS), more: sorted.slice(VISIBLE_ROWS), networkNote: unrelated ? NETWORK_UNRELATED_NOTE : null };
+  return { rows: sorted, visible, more, networkNote: unrelated ? NETWORK_UNRELATED_NOTE : null };
 }
 
 /** The one line of «why»: the author's words if there are any (marked as unchecked by the page), else what the checks found the plugin does it for, else the reason it waits. */

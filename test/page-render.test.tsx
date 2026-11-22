@@ -12,6 +12,8 @@ import plugin from "../server.js";
 import type { Overview } from "../src/overview";
 import { CLEAN } from "./support/checks";
 
+vi.setConfig({ testTimeout: 20_000 }); // the first draw of the page compiles a lot of modules
+
 // jsdom has none of these; the host's overlays ask for them.
 beforeAll(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -52,15 +54,25 @@ async function overviewWithThreeWaiting(): Promise<Overview> {
   } as Overview;
 }
 
-async function drawPage(ov: Overview) {
+async function drawPage(ov: Overview | (() => Overview), waitFor = "Ждут вашего решения: 3", rpc: Record<string, (i: unknown) => unknown> = {}) {
   const app = await loadPluginApp(() => import("../app"));
-  const slot = renderSlot(app.navPanels[0]!, { subPath: "" }, { rpc: { overview: () => ov, "page.ping": () => null } as never });
+  const slot = renderSlot(app.navPanels[0]!, { subPath: "" }, { rpc: { overview: () => (typeof ov === "function" ? ov() : ov), "page.ping": () => null, ...rpc } as never });
   mounted.push(slot);
   // the overview arrives after the first draw
   await act(async () => void (await new Promise((r) => setTimeout(r, 300))));
-  await act(async () => void (await slot.findByText("Ждут вашего решения: 3", {}, { timeout: 2500 })));
+  await act(async () => void (await slot.findByText(waitFor, {}, { timeout: 2500 })));
   return slot;
 }
+
+const typeCode = async (code: string) => {
+  const input = document.body.querySelector('input[autocomplete="one-time-code"]') as HTMLInputElement;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, code);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () => void (await new Promise((r) => setTimeout(r, 50))));
+};
+const flush = async (ms = 100) => act(async () => void (await new Promise((r) => setTimeout(r, ms))));
 
 describe("the page, drawn", () => {
   it("one state in the header, three cards with a level and rights as rows, no code field on a card, tabs with the new names", async () => {
@@ -98,5 +110,76 @@ describe("the page, drawn", () => {
     const what = document.body.querySelector("[data-secure-bb-confirm-what]");
     expect(what?.textContent).toMatch(/chime 0\.1\.0/);
     expect(document.body.querySelector('input[autocomplete="one-time-code"]')).not.toBeNull();
+  });
+
+  it("after «Разрешить»: ONE short line in the card's place, no empty frame, no second plate, the focus on the line", async () => {
+    let ov = await overviewWithThreeWaiting();
+    const approved: unknown[] = [];
+    await drawPage(() => ov, "Ждут вашего решения: 3", {
+      "queue.approve": (i) => {
+        approved.push(i);
+        ov = { ...ov, queue: ov.queue.filter((q) => q.id !== (i as { id: number }).id) };
+        return { ok: true };
+      },
+    });
+    const approve = Array.from(document.body.querySelectorAll("button")).find((b) => /^(Разрешить|Включить) chime 0\.1\.0$/.test(b.textContent ?? ""))!;
+    await act(async () => approve.click());
+    await typeCode("123456");
+    await flush(300);
+    expect(approved).toHaveLength(1);
+    const rows = Array.from(document.body.querySelectorAll("[data-secure-bb-stub]"));
+    expect(rows).toHaveLength(1);
+    const row = rows[0] as HTMLElement;
+    expect(row.textContent).toContain("Готово: chime 0.1.0 разрешён и включён");
+    expect(Array.from(row.querySelectorAll("button")).map((b) => b.textContent)).toContain("Скрыть");
+    // the row is a short line: no frame as tall as the card
+    expect(row.style.minHeight).toBe("");
+    // one message, not three: no toasts, no «Разрешено: плагин …» plate
+    expect(document.body.querySelector("[data-secure-bb-toast]")).toBeNull();
+    expect(document.body.textContent).not.toContain("Разрешено: плагин");
+    expect((document.body.textContent ?? "").split("разрешён и включён")).toHaveLength(2);
+    // the keyboard stays where the person was: on the line
+    expect(document.activeElement).toBe(row);
+    // «Скрыть» takes the line away
+    await act(async () => (Array.from(row.querySelectorAll("button")).find((b) => b.textContent === "Скрыть") as HTMLButtonElement).click());
+    expect(document.body.querySelector("[data-secure-bb-stub]")).toBeNull();
+  });
+
+  it("no second factor: the header asks for it (an alarm, not a calm line), with a button; the summary does not carry it", async () => {
+    const ov = await overviewWithThreeWaiting();
+    const slot = await drawPage({ ...ov, totp: { ...ov.totp, state: "none" } } as Overview, "Настройте второй фактор: без него ничего нельзя подтвердить");
+    const status = document.body.querySelector("[data-secure-bb-status]") as HTMLElement;
+    expect(status.getAttribute("data-secure-bb-alarm-alert")).not.toBeNull();
+    expect(Array.from(status.querySelectorAll("button")).map((b) => b.textContent)).toContain("Настроить");
+    expect(document.body.querySelector("[data-secure-bb-away]")?.textContent ?? "").not.toContain("Второй фактор");
+    void slot;
+  });
+
+  it("the session that cannot be opened is one short state in the header; the reason is behind «почему?»", async () => {
+    const ov = await overviewWithThreeWaiting();
+    const reason = "Сессия недоступна, пока работает плагин chime не из ваших источников: его код мог бы её перехватить.";
+    await drawPage({ ...ov, sessionBlockers: [{ id: "chime", foreign: true, ui: true }] } as Overview);
+    const header = document.body.querySelector("[data-secure-bb-status]") as HTMLElement;
+    expect(header.textContent).toContain("Сессия: недоступна");
+    expect(header.textContent).not.toContain("его код мог бы");
+    const why = Array.from(header.querySelectorAll("button")).find((b) => b.textContent === "почему?")!;
+    await act(async () => why.click());
+    expect(document.body.textContent).toContain("chime");
+    expect(document.body.textContent).toMatch(/Сессия подтверждения/);
+    void reason;
+  });
+
+  it("the shield is in the line of the sentence; the source chip is cut with an ellipsis; a version that waits is one line in «Под защитой»", async () => {
+    const ov = await overviewWithThreeWaiting();
+    await drawPage({ ...ov, plugins: ov.queue.map((q) => ({ id: q.pluginId, version: q.version, status: "disabled", statusDetail: null, enabled: false, source: q.source, pin: null, history: [], window: null, frozenPin: false, unreviewedBaseline: false, threadId: null })) } as unknown as Overview);
+    const text = document.body.querySelector("[data-secure-bb-status-text]") as HTMLElement;
+    expect(text.previousElementSibling?.getAttribute("data-secure-bb-shield")).not.toBeNull(); // the icon and the sentence are in one row
+    for (const chip of Array.from(document.body.querySelectorAll("[data-secure-bb-source]"))) expect(chip.className).toMatch(/\btruncate\b/);
+    const rows = Array.from(document.body.querySelectorAll("[data-protected-plugin]"));
+    expect(rows.length).toBe(3);
+    for (const r of rows) {
+      expect(r.textContent).toContain("ждёт решения · к карточке");
+      expect(r.textContent).not.toMatch(/Откуда|версия не одобрена/);
+    }
   });
 });

@@ -2,11 +2,12 @@
 // The verdicts themselves (what is red, what waits, what is an alarm) are ux.ts's; this arranges them for the page.
 import { awayText, type AwayGroup, type ProblemRef, type Status } from "./ux";
 
-/** The alarms that are not alarms: the person is told of them calmly (a line in «Пока вас не было»), not in a red box. The model does not change: they still count. */
-const CALM_ALARM_ANCHORS = new Set(["sbb-registration"]);
+/** The anchor of the alarm «Второй фактор не настроен»: without a second factor nothing can be approved, so it is the first thing to do, not a calm line. */
+export const SECOND_FACTOR_ANCHOR = "sbb-registration";
 
+/** Every alarm is a real alarm and stays visible; none is turned down to a calm line. (`calm` is kept empty for the callers that ask.) */
 export function splitAlarms(alarms: ProblemRef[]): { critical: ProblemRef[]; calm: ProblemRef[] } {
-  return { critical: alarms.filter((a) => !CALM_ALARM_ANCHORS.has(a.anchor)), calm: alarms.filter((a) => CALM_ALARM_ANCHORS.has(a.anchor)) };
+  return { critical: alarms, calm: [] };
 }
 
 export type HeaderTone = "ok" | "waiting" | "alarm";
@@ -21,7 +22,7 @@ export interface HeaderLine {
   action: string | null;
 }
 
-/** The one state of the header. Waiting cards and calm lines never make a red alarm; stopped plugins, a guard that is down and real alarms do. */
+/** The one state of the header. Waiting cards never make a red alarm; stopped plugins, a guard that is down, a missing second factor and the other alarms do. */
 export function headerLine(i: { status: { level: Status["level"]; first: ProblemRef | null }; waiting: number; deferred: number; alarms: ProblemRef[] }): HeaderLine {
   const { critical } = splitAlarms(i.alarms);
   const first = i.status.first;
@@ -30,6 +31,9 @@ export function headerLine(i: { status: { level: Status["level"]; first: Problem
     const target = first;
     return { tone: "alarm", text: `Тревога: ${target ? `остановлен плагин — ${target.text}` : "плагин остановлен"}`, target, action: "Показать" };
   }
+  // The second factor first: until it is set up the person cannot approve anything, so this is what the header asks for.
+  const noFactor = critical.find((a) => a.anchor === SECOND_FACTOR_ANCHOR);
+  if (noFactor) return { tone: "alarm", text: "Настройте второй фактор: без него ничего нельзя подтвердить", target: noFactor, action: "Настроить" };
   if (critical.length > 0) {
     const t = critical[0]!;
     return { tone: "alarm", text: `Тревога: ${t.text}${critical.length > 1 ? ` (и ещё ${critical.length - 1})` : ""}`, target: t, action: "Показать" };

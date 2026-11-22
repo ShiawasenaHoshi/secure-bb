@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { Overview } from "../src/overview";
 import type { TrustMode } from "../src/guardlink";
 import { EXCEPTIONS_EMPTY, EXCEPTIONS_HELP, RESET_NOTE, SAVED_NARROWING, clockText, exceptionRows, exceptionsHeadline, type ExceptionRow, FREQ_SETTING_LABEL, MODE_DESCRIPTIONS, MODE_NAMES, REVOKE_CODE_NOTE, resetConfirmText, resetRows } from "../src/ux";
+import { truthfulApproval } from "../src/factor";
 import { useCodeAction, usePasskey, type Rpc } from "./code";
 import { useProof, type AnyProof } from "./confirm";
 import { MODE_RANK_UI, ModePicker } from "./mode-picker";
@@ -102,7 +103,7 @@ export function ExceptionsTab({ ov, rpc, refetch, freqOff, onFreqOff }: { ov: Ov
   const input = {
     windows: ov.windows.map((w) => ({ id: w.id, pluginId: w.pluginId, openedAt: w.openedAt, remainingSec: Math.max(0, Math.ceil((Math.min(w.expiresAt, w.hardExpiresAt) - now) / 1000)) })),
     cfgWindows: ov.watch.windows.map((w) => ({ id: w.id, openedAt: w.openedAt, scopeLabels: w.scopeLabels, remainingSec: Math.max(0, Math.ceil((Math.min(w.expiresAt, w.hardExpiresAt) - now) / 1000)) })),
-    approvals: ov.plugins.flatMap((p) => p.history.map((a) => ({ ...a, pluginId: p.id }))),
+    approvals: ov.plugins.flatMap((p) => p.history.map((a) => ({ ...truthfulApproval(a, { guardMode: ov.guard?.connected === true, recent: ov.guard?.recent ?? [] }), pluginId: p.id }))),
     sources: ov.guard?.trust?.mySources ?? [],
     kept: ov.agents?.state?.kept ?? [],
   };

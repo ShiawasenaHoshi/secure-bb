@@ -13,9 +13,9 @@ import { Switch } from "../components/ui/switch";
 import { cn } from "../lib/utils";
 
 /** Three screens: the mode, "my sources", the second factor. Shown once (the page remembers that it was closed: a convenience, not a security fact). */
-export function Wizard({ ov, rpc, refetch, onClose }: { ov: Overview; rpc: Rpc; refetch: () => void; onClose: () => void }) {
+export function Wizard({ ov, rpc, refetch, onClose, startStep = 0 }: { ov: Overview; rpc: Rpc; refetch: () => void; onClose: () => void; startStep?: number }) {
   const t = ov.guard?.trust ?? null;
-  const [step, setStep] = useState(0);
+  const [step, setStep] = useState(startStep);
   const [mode, setMode] = useState<TrustMode>(t?.mode ?? "simple");
   const [picked, setPicked] = useState<string[]>([]);
   const act = useCodeAction(refetch);
