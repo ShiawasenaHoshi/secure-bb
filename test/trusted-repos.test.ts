@@ -96,7 +96,7 @@ describe("through the plugin surfaces", () => {
       sdk: { plugins: { list: async () => ({ plugins: [] }) }, system: { config: async () => ({}) }, threads: {} } as never,
     } as never);
     await plugin(bb);
-    expect((await harness.behavior.runCli(["status"])).stdout).toContain("trusted repositories: 0");
+    expect((await harness.behavior.runCli(["status"])).stdout).toContain("repositories that do not taint a thread: 0");
     await harness.behavior.callRpc("page.ping", null);
     const begin = (await harness.behavior.callRpc("totp.begin", null)) as { secret: string };
     const gen = () => hotp(base32Decode(begin.secret), stepAt(Date.now()));
@@ -104,7 +104,7 @@ describe("through the plugin surfaces", () => {
     await expect(harness.behavior.callRpc("trusted.set", { add: "me/x", code: "000000" })).rejects.toThrow();
     vi.setSystemTime(Date.now() + 31_000); // next TOTP step
     await harness.behavior.callRpc("trusted.set", { add: "me/x", code: gen() });
-    expect((await harness.behavior.runCli(["status"])).stdout).toContain("trusted repositories: 1");
+    expect((await harness.behavior.runCli(["status"])).stdout).toContain("repositories that do not taint a thread: 1");
     const ov = (await harness.behavior.callRpc("overview", null)) as { trustedRepos: string[] };
     expect(ov.trustedRepos).toEqual(["me/x"]);
   });

@@ -164,11 +164,11 @@ export function claudeJsonView(text: string): string | null {
     }
   }
   out.projects = projects;
-  return `${stable(out)}\n`;
+  return `${prettyStableJson(out)}\n`;
 }
 
-/** JSON with sorted keys and two-space indent: the same text for the same data, and a diff that reads. */
-export function stable(v: unknown): string {
+/** JSON with sorted keys and two-space indent: the same text for the same data, and a diff that reads. For READING a diff; the canonical form for hashing is `canonicalJson` in json-parts.ts. */
+export function prettyStableJson(v: unknown): string {
   const sort = (x: unknown): unknown => {
     if (Array.isArray(x)) return x.map(sort);
     if (typeof x === "object" && x !== null) return Object.fromEntries(Object.entries(x as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([k, val]) => [k, sort(val)]));

@@ -62,7 +62,7 @@ import {
 } from "./trust.ts";
 import { scan as scanAgents, type FileKind, type Limits, type ScanResult } from "./agents-scan.ts";
 import { JSON_FILE, applyPathChange, watchedRel, type JsonKey } from "./restore.ts";
-import { stable } from "./agents-scan.ts";
+import { prettyStableJson } from "./agents-scan.ts";
 import { helperUp, sendRestore } from "./restore-client.ts";
 import { applyForward, partAction, partDanger, partRestorable, rollbackDanger, shownValue, splitSettings, viewPart, type JsonPart, type PartView } from "./json-parts.ts";
 
@@ -2177,7 +2177,7 @@ export class Guard {
     const isEmpty = (v: unknown): boolean => v === undefined || (typeof v === "object" && v !== null && Object.keys(v).length === 0);
     const ops: JsonOp[] = [];
     const add = (key: JsonKey, want: unknown, have: unknown): void => {
-      if (stable(want ?? {}) === stable(have ?? {})) return;
+      if (prettyStableJson(want ?? {}) === prettyStableJson(have ?? {})) return;
       if (isEmpty(want)) ops.push({ key, value: null, sha: "0".repeat(64) });
       else ops.push({ key, value: want as Record<string, unknown>, sha: sha256hex(JSON.stringify(want)) });
     };

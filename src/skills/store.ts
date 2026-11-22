@@ -177,7 +177,7 @@ export class SkillStore {
     this.db.prepare(`UPDATE skill_queue SET note = ? WHERE id = ?`).run(note, id);
   }
 
-  // ---- trusted sources ----
+  // ---- the sources of skills ----
   trustedSources(): string[] {
     return (this.db.prepare(`SELECT pattern FROM trusted_skill_sources ORDER BY pattern`).all() as Array<{ pattern: string }>).map((r) => r.pattern);
   }

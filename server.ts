@@ -21,7 +21,7 @@ import { GuardLink, GuardLinkError, guardSocketFromEnv, type GuardAction, type G
 import { MODE_RANK, liftBlock, normalizeEntry } from "./guard/src/trust.ts";
 import { buildExport, writeExport } from "./src/export.js";
 import { localCheckKey } from "./src/decision.js";
-import { mintListProof } from "./src/approval.js";
+import { mintListProof, type GuardTouched } from "./src/approval.js";
 import { realpath } from "node:fs/promises";
 import { BatchService, type BatchSource, type GuardBatch } from "./src/batch.js";
 import type { Proof } from "./src/approval.js";
@@ -552,7 +552,9 @@ export default async function plugin(bb: BbPluginApi) {
 
   // ---- guard mode helpers ------------------------------------------------------------------------------------------
   /** A code the guard has already checked (once, for the call that carries it): the mark `Gate.touch` takes without looking at a secret. */
-  const VERIFIED = mintListProof() as unknown as string;
+  const VERIFIED: GuardTouched = mintListProof();
+  /** A `code` that is the mark of the guard's touch (the contract types it as a string; only this module has the mark). */
+  const guardTouched = (code: unknown): code is GuardTouched => code === VERIFIED;
   /** Routes that always need a touch: with neither a code nor a passkey they are refused the way a wrong code is, but without counting it. */
   const needCode = (code: string | undefined): string => {
     if (code === undefined) throw new GateError("invalid_code", "a code is needed (in guard mode, a passkey touch works too)");
@@ -773,7 +775,7 @@ export default async function plugin(bb: BbPluginApi) {
       // The test touch of `sbb-guard setup`. The touch itself was checked at the guard (and is in its journal, which is what the console waits for);
       // with no touch (nothing came, or this is a bb without a guard) nothing happens and the answer says so. No side effect but a line in our journal.
       needGuard();
-      if (code !== VERIFIED) throw new GateError("invalid_code", "a touch is needed: press «Проверить касание» on the page");
+      if (!guardTouched(code)) throw new GateError("invalid_code", "a touch is needed: press «Проверить касание» on the page");
       store.log("setup.check", null, null, { via: "guard touch" });
       return { ok: true as const };
     }),
@@ -808,7 +810,7 @@ export default async function plugin(bb: BbPluginApi) {
     }),
     "trust.migrate": wrap(async ({ code, passkey }) => {
       const moved = store.trustedRepos().map((r) => `github:${r}`);
-      if (moved.length === 0) throw new GateError("invalid", "в старом списке доверенных репозиториев ничего нет");
+      if (moved.length === 0) throw new GateError("invalid", "в старом списке репозиториев, которые не загрязняют тред, ничего нет");
       const mySources = await needGuard().addSources(moved, proofOf(code, passkey), true);
       changed();
       return { ok: true as const, mySources, moved };
@@ -1163,14 +1165,15 @@ export default async function plugin(bb: BbPluginApi) {
         await guardLink.policy(plan.wanted, proof);
         verified = plan.guardWidens && proof !== undefined;
       }
-      let mark: string | undefined = verified ? VERIFIED : undefined;
+      let mark: GuardTouched | undefined = verified ? VERIFIED : undefined;
       if (!verified && plan.localWidens) {
         // Only the local part (thread scope, configuration windows) widens: then the guard checks the touch for "policy.set".
         if (proof === undefined) throw new GateError("invalid_code", "a code or a touch is needed: this widens the policy");
         await guardLink.touch("policy.set", proof);
         mark = VERIFIED;
       }
-      gate.setPolicy(plan.local, mark);
+      // `Gate.setPolicy` still takes `string | undefined` for its code; the mark is passed as it was before. The signature belongs to the gate (another change): the cast goes when it takes a Proof.
+      gate.setPolicy(plan.local, mark as unknown as string | undefined);
       changed();
       return { ok: true as const };
     }),
@@ -1272,7 +1275,7 @@ export default async function plugin(bb: BbPluginApi) {
               `gate before load: ${hookRegistered ? "yes" : "no (after the fact)"}`,
               `trust window for this thread: ${open.length > 0 ? `open (${open.map((w) => `${w.pluginId}, ${Math.ceil((Math.min(w.expiresAt, w.hardExpiresAt) - now()) / 60_000)} min`).join("; ")})` : "closed"}`,
               agentLine(journal()),
-              `trusted repositories: ${store.trustedRepos().length}`,
+              `repositories that do not taint a thread: ${store.trustedRepos().length}`,
             ];
             return { exitCode: 0, stdout: lines.join("\n") };
           },

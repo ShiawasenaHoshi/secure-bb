@@ -21,7 +21,7 @@ import { TroubleshootBar, StatusHeader } from "./header";
 import { ConfirmHost } from "./confirm-dialog";
 import { TaintCard, LogCard } from "./journal";
 import { PluginRow } from "./plugins";
-import { PolicyCard, TrustedRepos } from "./policy";
+import { PolicyCard, UntaintingRepos } from "./policy";
 import { ProtectedSection } from "./protected";
 import { removedSkillsOf, QuarantineTab } from "./quarantine";
 import { QueueCard } from "./queue-card";
@@ -370,7 +370,7 @@ export function GatePage() {
             <Section title={`Дозор${ov.sentinel.settings.enabled ? "" : " (выключен)"}`}><SentinelSection ov={ov} rpc={rpc} refetch={refetch} /></Section>
             <Section id="sbb-skills" title={`Скиллы${ov.skills.open.length > 0 ? ` — очередь (${ov.skills.open.length})` : ""}`}><SkillsSection ov={ov} rpc={rpc} refetch={refetch} /></Section>
             <Section title={`Загрязнение тредов${ov.tainted.length > 0 ? ` (${ov.tainted.length})` : ""}`}><TaintCard ov={ov} /></Section>
-            <Section title={`Доверенные репозитории (${ov.trustedRepos.length})`}><TrustedRepos ov={ov} rpc={rpc} refetch={refetch} /></Section>
+            <Section title={`Репозитории, которые не загрязняют тред (${ov.trustedRepos.length})`}><UntaintingRepos ov={ov} rpc={rpc} refetch={refetch} /></Section>
             <Section title="Перенос одобрений в сторож"><MigrationCard ov={ov} rpc={rpc} refetch={refetch} /></Section>
             <Section title={`Журнал${ov.journal.ok ? "" : " (!)"}`}><LogCard ov={ov} rpc={rpc} refetch={refetch} /></Section>
           </div>

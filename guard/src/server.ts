@@ -148,8 +148,8 @@ export interface ServerOptions {
   chown?: ChownFn;
 }
 
-/** Is something already listening there? A stale socket file (a crash) is not. */
-function isLive(path: string): Promise<boolean> {
+/** Asks by connecting (and at once closing): is something already listening there? A stale socket file (a crash) is not. It does touch the socket: not a pure check. */
+function probeListener(path: string): Promise<boolean> {
   return new Promise((resolve) => {
     const c = net.connect(path);
     c.once("connect", () => (c.destroy(), resolve(true)));
@@ -163,7 +163,7 @@ export async function listen(o: ServerOptions): Promise<net.Server> {
   mkdirSync(dir, { recursive: true, mode: 0o750 });
   // The socket's directory must be enterable by the socket's group (the umask of `serve` would make it 0700); one that already existed is the installer's.
   if (fresh) chmodSync(dir, 0o750);
-  if (await isLive(o.socket)) throw new Error(`another guard is already listening on ${o.socket}`);
+  if (await probeListener(o.socket)) throw new Error(`another guard is already listening on ${o.socket}`);
   try {
     unlinkSync(o.socket);
   } catch {

@@ -22,12 +22,13 @@ const MAX_DEPTH = 8;
 
 const isPlain = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const has = (o: Record<string, unknown>, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k);
-export function stable(v: unknown): string {
-  if (Array.isArray(v)) return `[${v.map(stable).join(",")}]`;
-  if (isPlain(v)) return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${stable(v[k])}`).join(",")}}`;
+/** Canonical JSON for HASHING and comparing: sorted keys, no spaces, the same text for the same data (the id of a part is a hash of it). Not for reading: see `prettyStableJson` in agents-scan.ts. */
+export function canonicalJson(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(",")}]`;
+  if (isPlain(v)) return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(v[k])}`).join(",")}}`;
   return JSON.stringify(v) ?? "null";
 }
-const partId = (p: Omit<JsonPart, "id">): string => createHash("sha256").update(stable([p.path, p.kind, p.before ?? null, p.after ?? null, p.elem ?? null])).digest("hex").slice(0, 16);
+const partId = (p: Omit<JsonPart, "id">): string => createHash("sha256").update(canonicalJson([p.path, p.kind, p.before ?? null, p.after ?? null, p.elem ?? null])).digest("hex").slice(0, 16);
 
 const parse = (t: string): Record<string, unknown> | null => {
   try {
@@ -55,7 +56,7 @@ export function splitSettings(base: string | null, now: string): JsonPart[] | nu
   const walk = (was: unknown, is: unknown, path: string[]): void => {
     if (!ok) return;
     if (path.length > MAX_DEPTH) return void (ok = false);
-    if (stable(was) === stable(is)) return;
+    if (canonicalJson(was) === canonicalJson(is)) return;
     if ((was === undefined || isPlain(was)) && (is === undefined || isPlain(is)) && (isPlain(was) || isPlain(is))) {
       const w = (was ?? {}) as Record<string, unknown>;
       const i = (is ?? {}) as Record<string, unknown>;
@@ -65,10 +66,10 @@ export function splitSettings(base: string | null, now: string): JsonPart[] | nu
     if ((was === undefined || Array.isArray(was)) && (is === undefined || Array.isArray(is)) && path.length > 0) {
       const w = (was ?? []) as unknown[];
       const i = (is ?? []) as unknown[];
-      const wk = new Set(w.map(stable));
-      const ik = new Set(i.map(stable));
-      for (const e of w) if (!ik.has(stable(e))) push({ path, kind: "elem-removed", elem: e });
-      for (const e of i) if (!wk.has(stable(e))) push({ path, kind: "elem-added", elem: e });
+      const wk = new Set(w.map(canonicalJson));
+      const ik = new Set(i.map(canonicalJson));
+      for (const e of w) if (!ik.has(canonicalJson(e))) push({ path, kind: "elem-removed", elem: e });
+      for (const e of i) if (!wk.has(canonicalJson(e))) push({ path, kind: "elem-added", elem: e });
       return;
     }
     if (path.length === 0) return void (ok = false);

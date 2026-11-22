@@ -189,7 +189,7 @@ export const MIGRATIONS: string[] = [
      scanned_at INTEGER NOT NULL)`,
   // Stage 5: repositories whose use does not taint a thread (`owner/name`, `owner/*`, github.com). Empty by default; changed only with a code.
   `CREATE TABLE IF NOT EXISTS trusted_repos (pattern TEXT PRIMARY KEY, added_at INTEGER NOT NULL)`,
-  // Stage 6: skills module (pins, queue, trusted registry sources).
+  // Stage 6: skills module (pins, queue, the sources of skills).
   ...SKILL_MIGRATIONS,
   // Stage 4: publishing frozen versions to the plugins monorepo (one row per attempt).
   `CREATE TABLE IF NOT EXISTS publications (
@@ -1209,7 +1209,7 @@ export class Store implements RegistryCache {
     }));
   }
 
-  // ---- trusted repositories (stage 5) -------------------------------------------
+  // ---- repositories that do not taint a thread (stage 5; API name `trustedRepos`) -------------------------------------------
   trustedRepos(): string[] {
     return (this.db.prepare(`SELECT pattern FROM trusted_repos ORDER BY pattern`).all() as Array<{ pattern: string }>).map((r) => r.pattern);
   }

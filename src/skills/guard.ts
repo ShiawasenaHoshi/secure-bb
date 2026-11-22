@@ -6,7 +6,7 @@
 //   block  -> the skill is removed at once (bb allows it for user and project skills); what it contained is recorded;
 //             where bb does not allow removal, or the skill was there before the module: an alarm
 //   review -> kept in the skills queue on the page until a code
-//   clean  -> accepted if it comes from a trusted registry source, or inside an open configuration window on "skills"
+//   clean  -> accepted if it comes from a source of skills, or inside an open configuration window on "skills"
 //             (the window is the watchdog's); otherwise it waits in the queue like a review
 // bb's own skills (built-in, and those of built-in plugins) are only pinned: never blocked, never queued.
 import type { Proof } from "../approval.js";
@@ -59,7 +59,7 @@ export interface EvalResult {
 export const SKILL_BLIND: string[] = [
   "API bb не показывает скрытые файлы и каталоги скилла (имя с точкой) и ссылки: их содержимое не хешируется и не проверяется",
   "Бит «исполняемый» у файлов API не отдаёт: скрипт определяется по расширению и shebang",
-  "Скилл, установленный «из реестра», помечен файлом рядом со скиллом; метка не доказывает происхождение — доверенный источник ослабляет ступень, а не заменяет проверки",
+  "Скилл, установленный «из реестра», помечен файлом рядом со скиллом; метка не доказывает происхождение — источник скиллов ослабляет ступень, а не заменяет проверки",
 ];
 
 export interface SkillQueueView extends Omit<SkillQueueRow, "removedFiles"> {
@@ -267,7 +267,7 @@ export class SkillGuard {
     if (ctx.baselineMode && !pin) return this.accept(base, files, "baseline", "baseline", open, ctx.out, null);
     if (trusted) return this.accept(base, files, "approved", "trusted-source", open, ctx.out, null);
     if (viaWindow) return this.accept(base, files, "approved", `window:${ctx.skillsWindow}`, open, ctx.out, ctx.skillsWindow);
-    ctx.out.raised += this.hold(base, "review", `${when} скилл: проверки чисты, но источник не доверенный и окно «скиллы» закрыто`, check, source, false, open);
+    ctx.out.raised += this.hold(base, "review", `${when} скилл: проверки чисты, но источник не в «источниках скиллов» и окно «скиллы» закрыто`, check, source, false, open);
     this.d.store.log("skills.hold", null, snap.hash, { key: ref.key, why: "clean-untrusted", when });
     return "held";
   }

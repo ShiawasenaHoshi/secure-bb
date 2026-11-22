@@ -3,6 +3,7 @@
 // The API on 127.0.0.1 has no authentication: any local process, an agent included, can call any RPC. So an approval is always
 // proof of a secret the agent does not have: a fresh TOTP code, or the token of an approval session that one code opened on
 // a page. The token lives only in the memory of that page; the server keeps its hash.
+// Words: «code» is the one-time code of the second factor (TOTP) and nothing else; what identifies a version is its hash; the plugin's own text is its source.
 //
 // This file holds the ONE table that says which RPC a session covers ("routine") and which always needs a fresh code
 // ("dangerous"). The README prints the same table (generated from it, and a test checks that they agree).
@@ -47,8 +48,8 @@ export const RPC_AUTH = {
   "session.open": { group: "dangerous", note: "открыть сессию подтверждения (сама сессия её открыть не может); в режиме сторожа её выдаёт сторож по касанию (код или passkey), у него остаётся только хеш токена" },
   "queue.approveTrust": { group: "dangerous", note: "«Вернуть и доверять источнику» (режим сторожа): одна операция сторожа — одобрить версию и добавить источник в «мои источники»; одно касание, одна запись в журнале; сессия не годится" },
   "totp.confirm": { group: "dangerous", note: "регистрация второго фактора; повторная невозможна (секрет заперт)" },
-  "trusted.set": { group: "dangerous", note: "изменить доверенные репозитории" },
-  "skills.trusted": { group: "dangerous", note: "изменить доверенные источники скиллов" },
+  "trusted.set": { group: "dangerous", note: "изменить репозитории, которые не загрязняют тред" },
+  "skills.trusted": { group: "dangerous", note: "изменить источники скиллов" },
   "policy.set": { group: "dangerous", note: "размер и потолок окна, режим, «на всё дерево», автопропуск безопасного класса (расширение — со свежим кодом; сужение — без кода)" },
   "watch.rollbackMode": { group: "dangerous", note: "выключить автоматический откат (включение — без кода: это ужесточение)" },
   "ai.settings": { group: "dangerous", note: "включить ИИ-скан или его опцию: код плагина уходит в облако (выключение — без кода)" },
@@ -59,7 +60,7 @@ export const RPC_AUTH = {
   "agents.restore": { group: "dangerous", note: "«Вернуть как было» (режим сторожа): сторож через помощника sbb-restore записывает файл агента из СВОИХ одобренных настроек (или удаляет файл, которого там нет); нужно свежее касание на это расхождение, сессия не годится: иначе вредный процесс откатывал бы законные изменения владельца" },
   "trust.mode": { group: "dangerous", note: "режим доверия по источнику (Простой/Подробный/Строгий) у сторожа: ослабить — касание или код (сторож проверяет сам); усилить — без касания" },
   "trust.add": { group: "dangerous", note: "добавить «мой источник» (репозиторий или каталог, версии которого проходят сами при тех же правах): касание у сторожа, сессия не годится" },
-  "trust.migrate": { group: "dangerous", note: "перенести старый список «доверенные репозитории» в «мои источники» сторожа: касание, сессия не годится" },
+  "trust.migrate": { group: "dangerous", note: "перенести старый список «репозитории, которые не загрязняют тред» в «мои источники» сторожа: касание, сессия не годится" },
   "sentinel.settings": { group: "dangerous", note: "настройки дозора: включение, провайдер, «во всех тредах», пороги и вопросы (только выключение дозора или сужение «во всех тредах» — без кода)" },
 
   // ---- free: no secret --------------------------------------------------------------------------------------------
@@ -102,9 +103,11 @@ export const hashToken = (token: string): string => createHash("sha256").update(
 export const newToken = (): string => randomBytes(32).toString("base64url");
 
 // ---- proofs ------------------------------------------------------------------------------------------------------------
-// What `Gate.touch` accepts: a fresh code (a string), a session token, or the mark "a code for this whole list was just accepted".
-// The last two cannot be built outside this module: the mint is not exported, and the gate hands them out only after it
-// looked at the RPC table (routine) or consumed the code (batch).
+// What `Gate.touch` accepts: a fresh code (a string), a session token, or the mark "a touch for this whole list was just accepted".
+// The mint is not exported, so these two marks cannot be built by `new` outside this module. That is a guard against a slip, not a wall: the mint FUNCTIONS
+// (`mintSessionProof`, `mintListProof`) are exported, and `Gate` and `server.ts` call them. `mintListProof` is called by the server for what the guard has
+// checked («guard touched», see `GuardTouched`) and by the gate for a batch whose code it consumed; the session mark is handed out by the gate only,
+// after it looked at the RPC table (routine).
 const MINT = Symbol("mint");
 
 export class SessionProof {
@@ -121,8 +124,10 @@ export class ListProof {
   }
 }
 export type Proof = string | SessionProof | ListProof;
+/** The mark of «the guard checked the touch for this action»: made by `mintListProof` in the server and compared with `===` where it is expected. */
+export type GuardTouched = ListProof;
 
-/** Only `Gate` calls these. */
+/** Called by `Gate` (session, batch) and by `server.ts` (the guard's touch): the code that decides what a mark stands for. Nothing else should call them. */
 export const mintSessionProof = (token: string): SessionProof => new SessionProof(token, MINT);
 export const mintListProof = (): ListProof => new ListProof(MINT);
 
@@ -131,7 +136,7 @@ export type BatchKind = "queue" | "skill" | "drift";
 export interface BatchItem {
   kind: BatchKind;
   id: number;
-  /** What the item is right now (content hash, version…): if it differs when the code arrives, the item is not approved. */
+  /** What the item is right now (content hash, version…): if it differs when the touch arrives, the item is not approved. */
   fingerprint: string;
   label: string;
 }
