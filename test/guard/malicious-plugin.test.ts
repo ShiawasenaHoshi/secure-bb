@@ -53,7 +53,7 @@ describe("a harmful plugin inside the bb process", () => {
 
   it("rejects a version stopped by the plugin's hook, then tries to load it through the window: still held, the window is closed", async () => {
     // the owner's window is open; the hook stopped a new capability; the harmful plugin dismisses the entry (no code needed) and asks again
-    expect((await g.send({ op: "open-window", pluginId: "victim", minutes: 30, code: fresh() })).ok).toBe(true);
+    expect((await g.send({ op: "open-window", scope: "tree", pluginId: "victim", minutes: 30, code: fresh() })).ok).toBe(true);
     const ctx = victim();
     await evil.call({ op: "hold", pluginId: ctx.pluginId, version: ctx.version, contentHash: ctx.contentHash, rootDir: ctx.rootDir, source: ctx.source, sourceKind: ctx.sourceKind, trigger: ctx.trigger, stop: true });
     const entry = (await g.send({ op: "state" })).queue.find((q: any) => q.status === "held");
@@ -67,7 +67,7 @@ describe("a harmful plugin inside the bb process", () => {
   });
 
   it("open-window without a code, with a wrong one, or with a huge size: refused, no window", async () => {
-    expect(await refused(evil.call({ op: "open-window", pluginId: "victim", minutes: 60 }))).toBe("invalid_code");
+    expect(await refused(evil.call({ op: "open-window", scope: "tree", pluginId: "victim", minutes: 60 }))).toBe("invalid_code");
     expect(await refused(evil.openWindow("victim", 60, "000000"))).toBe("invalid_code");
     expect(await refused(evil.openWindow("victim", 100_000, "000000"))).toBe("invalid");
     expect((await g.send({ op: "state" })).windows).toHaveLength(0);
@@ -177,7 +177,7 @@ describe("a harmful plugin inside the bb process", () => {
   });
 
   it("five wrong codes block approvals for an hour (the limit), but the human can still close windows and revoke", async () => {
-    await g.send({ op: "open-window", pluginId: "victim", minutes: 20, code: fresh() });
+    await g.send({ op: "open-window", scope: "tree", pluginId: "victim", minutes: 20, code: fresh() });
     await core(g, h, victim());
     for (let i = 0; i < 5; i++) await refused(evil.approve(1, "000000"));
     expect(await refused(h.rpc("queue.approve", { id: 1, code: fresh() }))).toBeTruthy(); // the human's right code is refused too: the block
@@ -187,7 +187,7 @@ describe("a harmful plugin inside the bb process", () => {
     expect((await g.send({ op: "state" })).windows).toHaveLength(0);
     tick(3_600_001);
     expect((await g.send({ op: "state" })).totp.blockedUntil).toBe(0);
-    await g.send({ op: "open-window", pluginId: "victim", minutes: 5, code: fresh() });
+    await g.send({ op: "open-window", scope: "tree", pluginId: "victim", minutes: 5, code: fresh() });
   });
 
   // The residual risk the design doc names ("Остаточный риск TOTP"): a code typed on the page passes through the bb process. This test says plainly

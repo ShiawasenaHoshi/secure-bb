@@ -31,8 +31,6 @@ export interface GapAlarm {
   cause?: "server" | "unknown";
   /** The core holds every unvetted plugin while the gate plugin is down (BB_PLUGIN_ACTIVATION_GUARDS names secure-bb). */
   coreHolds?: boolean;
-  /** Guard mode: versions the guard let through by an open window during the gap (no plugin checks stood behind them); null when the guard could not be asked. */
-  windowPasses?: number | null;
   /** The text the core gave for the failure, when the plugin could learn it. Not learnable at a start today; kept so the text can use it. */
   errorText?: string | null;
 }
@@ -62,8 +60,6 @@ export interface AliveDeps {
   coreHolds?: boolean;
   /** When the bb server process started (ms), if known: a gap that ends right after it is the server being stopped. */
   serverStartedAt?: () => number | null;
-  /** Guard mode: how many versions the guard let in by a window between the two times. Null: could not be asked. Must not throw. */
-  windowPasses?: (from: number, to: number) => Promise<number | null>;
 }
 
 /** The plugin starts with the server or soon after it; a gap that ends within this of the server's start is a stopped server. */
@@ -89,8 +85,7 @@ export class Alive {
 
     let alarm: GapAlarm | null = null;
     if (prev !== null && Number.isFinite(prev) && now - prev > GAP_THRESHOLD_MS) {
-      const passes = this.d.guardMode ? await this.d.windowPasses?.(prev, now).catch(() => null) ?? null : null;
-      alarm = { from: prev, to: now, ms: now - prev, stopped, safeMode, at: now, mode: this.d.guardMode ? "guard" : "hook", cause: gapCause(prev, now, this.d.serverStartedAt?.() ?? null), coreHolds: this.d.coreHolds === true, windowPasses: passes, errorText: null };
+      alarm = { from: prev, to: now, ms: now - prev, stopped, safeMode, at: now, mode: this.d.guardMode ? "guard" : "hook", cause: gapCause(prev, now, this.d.serverStartedAt?.() ?? null), coreHolds: this.d.coreHolds === true, errorText: null };
       store.log("gate.gap", null, null, { ...alarm });
       this.d.log?.(`secure-bb was not running from ${new Date(prev).toISOString()} to ${new Date(now).toISOString()}${stopped ? " (stopped in an orderly way)" : ""}${safeMode ? "; bb safe-mode is ON" : ""}`);
     }

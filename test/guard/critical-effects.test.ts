@@ -45,7 +45,7 @@ async function measure(): Promise<CriticalEffects> {
   const first = await g.send(decideOf(own, "own"));
   expect(first).toMatchObject({ action: "wait" });
   await g.send({ op: "approve", requestId: first.requestId, code: g.nextCode() });
-  g.guard.openWindow({ pluginId: "windowed", minutes: 30, code: g.nextCode() });
+  g.guard.openWindow({ pluginId: "windowed", scope: "tree", minutes: 30, code: g.nextCode() });
   expect((await g.send({ op: "state" })).windows).toHaveLength(1);
 
   // the critical change
@@ -67,11 +67,11 @@ async function measure(): Promise<CriticalEffects> {
   const sess = g.guard.sessionOpen({ code: g.nextCode() });
   let bySession = true;
   try {
-    g.guard.openWindow({ pluginId: "fresh", minutes: 30, session: sess.token });
+    g.guard.openWindow({ pluginId: "fresh", scope: "tree", minutes: 30, session: sess.token });
   } catch {
     bySession = false;
   }
-  g.guard.openWindow({ pluginId: "fresh", minutes: 30, code: g.nextCode() });
+  g.guard.openWindow({ pluginId: "fresh", scope: "tree", minutes: 30, code: g.nextCode() });
   const viaWindow = await g.send(decideOf(plugin(plugins, "fresh", BASE), "fresh"));
   const newWindowsNeedFreshTouch = !bySession && viaWindow.action === "proceed" && viaWindow.via === "window";
   // The hold of new messages to the agents is made by the plugin's `message.dispatch` hook, and only when AgentStopper.stoppedAt() is set (src/stop.ts `holding`).

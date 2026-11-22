@@ -28,6 +28,9 @@ export function dispatch(guard: Guard, req: unknown, version: string): Record<st
   switch (r.op) {
     case "ping":
       return { protocol: PROTOCOL, version, ts: Date.now() };
+    // The plugin's pulse: a window bound to a thread lets versions in only while it is fresh. Carries nothing and decides nothing.
+    case "beat":
+      return guard.beat();
     // The only op that takes time: the guard reads the version's directory itself before it answers.
     case "decide":
       return guard.decideChecked(r).then((d) => (d.action === "proceed" ? { action: "proceed", via: d.via } : d.action === "reject" ? { action: "reject", message: d.message } : { action: "wait", reason: d.reason, requestId: d.requestId }));

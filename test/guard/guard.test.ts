@@ -153,7 +153,7 @@ describe("touches: codes", () => {
     g = await startGuard({ register: false });
     await g.send(decideReq({ contentHash: H1 }));
     expect(await g.send({ op: "approve", requestId: 1, code: "123456" })).toMatchObject({ ok: false, error: { code: "not_registered" } });
-    expect(await g.send({ op: "open-window", pluginId: "demo", minutes: 5, code: "123456" })).toMatchObject({ ok: false, error: { code: "not_registered" } });
+    expect(await g.send({ op: "open-window", scope: "tree", pluginId: "demo", minutes: 5, code: "123456" })).toMatchObject({ ok: false, error: { code: "not_registered" } });
   });
 
   it("does not spend a code on a request that cannot succeed", async () => {
@@ -169,7 +169,7 @@ describe("touches: codes", () => {
 describe("windows", () => {
   it("approves any version of the plugin inside, slides, and freezes at the end", async () => {
     g = await startGuard();
-    const w = await g.send({ op: "open-window", pluginId: "demo", minutes: 10, code: g.code() });
+    const w = await g.send({ op: "open-window", scope: "tree", pluginId: "demo", minutes: 10, code: g.code() });
     expect(w.ok).toBe(true);
     g.clock.advance(5 * 60_000);
     expect(await g.send(decideReq({ contentHash: H1 }))).toMatchObject({ action: "proceed", via: "window" });
@@ -192,7 +192,7 @@ describe("windows", () => {
   it("never outlives the ceiling", async () => {
     g = await startGuard();
     expect(await g.send({ op: "policy", patch: { capMin: 20, windowMin: 10 } })).toMatchObject({ ok: true }); // narrowing: no code
-    await g.send({ op: "open-window", pluginId: "demo", minutes: 10, code: g.code() });
+    await g.send({ op: "open-window", scope: "tree", pluginId: "demo", minutes: 10, code: g.code() });
     for (const minute of [8, 16]) {
       g.clock.advance(8 * 60_000);
       expect(await g.send(decideReq({ contentHash: `${minute}`.repeat(10) }))).toMatchObject({ action: "proceed", via: "window" });
@@ -206,7 +206,7 @@ describe("windows", () => {
 
   it("window size is limited by the ceiling; policy widening needs a code, narrowing does not", async () => {
     g = await startGuard();
-    expect(await g.send({ op: "open-window", pluginId: "demo", minutes: 241, code: g.code() })).toMatchObject({ ok: false, error: { code: "invalid" } });
+    expect(await g.send({ op: "open-window", scope: "tree", pluginId: "demo", minutes: 241, code: g.code() })).toMatchObject({ ok: false, error: { code: "invalid" } });
     // narrowing without a code
     expect(await g.send({ op: "policy", patch: { capMin: 40, windowMin: 20, mode: "fixed" } })).toMatchObject({ ok: true, policy: { capMin: 40, windowMin: 20, mode: "fixed" } });
     // widening without / with a code
@@ -216,7 +216,7 @@ describe("windows", () => {
     expect(await g.send({ op: "policy", patch: { windowMin: 90 }, code: g.nextCode() })).toMatchObject({ ok: false, error: { code: "invalid" } });
     // fixed: does not slide
     await g.send({ op: "policy", patch: { mode: "fixed" } });
-    const o = await g.send({ op: "open-window", pluginId: "demo", minutes: 10, code: g.nextCode() });
+    const o = await g.send({ op: "open-window", scope: "tree", pluginId: "demo", minutes: 10, code: g.nextCode() });
     const exp = o.window.expiresAt;
     g.clock.advance(5 * 60_000);
     await g.send(decideReq({ contentHash: H1 }));
@@ -225,12 +225,12 @@ describe("windows", () => {
 
   it("is closed without a code, and a revoke closes it and the approvals of the plugin", async () => {
     g = await startGuard();
-    await g.send({ op: "open-window", pluginId: "demo", minutes: 10, code: g.code() });
+    await g.send({ op: "open-window", scope: "tree", pluginId: "demo", minutes: 10, code: g.code() });
     await g.send(decideReq({ contentHash: H1 }));
     expect((await g.send({ op: "close-window", pluginId: "demo" })).ok).toBe(true);
     expect(await g.send(decideReq({ contentHash: H2 }))).toMatchObject({ action: "wait" });
     expect(await g.send({ op: "close-window", pluginId: "demo" })).toMatchObject({ ok: false, error: { code: "not_found" } });
-    await g.send({ op: "open-window", pluginId: "demo", minutes: 10, code: g.nextCode() });
+    await g.send({ op: "open-window", scope: "tree", pluginId: "demo", minutes: 10, code: g.nextCode() });
     expect((await g.send({ op: "revoke", pluginId: "demo" })).revoked).toBe(1);
     const s = await g.send({ op: "state" });
     expect(s.windows).toHaveLength(0);
@@ -239,8 +239,8 @@ describe("windows", () => {
 
   it("reopening replaces the old window of the same plugin", async () => {
     g = await startGuard();
-    await g.send({ op: "open-window", pluginId: "demo", minutes: 10, code: g.code() });
-    await g.send({ op: "open-window", pluginId: "demo", minutes: 20, code: g.nextCode() });
+    await g.send({ op: "open-window", scope: "tree", pluginId: "demo", minutes: 10, code: g.code() });
+    await g.send({ op: "open-window", scope: "tree", pluginId: "demo", minutes: 20, code: g.nextCode() });
     expect((await g.send({ op: "state" })).windows).toHaveLength(1);
   });
 });
@@ -300,7 +300,7 @@ describe("revoke and annotate", () => {
     g = await startGuard();
     await g.send(decideReq({ contentHash: H1 }));
     expect(await g.send({ op: "lookup", pluginId: "demo", contentHash: H1 })).toMatchObject({ ok: true, approved: false, window: null, requestId: 1 });
-    await g.send({ op: "open-window", pluginId: "demo", minutes: 10, code: g.code() });
+    await g.send({ op: "open-window", scope: "tree", pluginId: "demo", minutes: 10, code: g.code() });
     const l = await g.send({ op: "lookup", pluginId: "demo", contentHash: H2 });
     expect(l.window).toMatchObject({ sizeSec: 600 });
     expect((await g.send({ op: "state" })).approvals).toHaveLength(0); // looking approved nothing
@@ -319,7 +319,7 @@ describe("hold (a request of the plugin's hook: tightening only)", () => {
 
   it("a hold with `stop` is not lifted by a window: only a human's approval lifts it", async () => {
     g = await startGuard();
-    await g.send({ op: "open-window", pluginId: "demo", minutes: 10, code: g.code() });
+    await g.send({ op: "open-window", scope: "tree", pluginId: "demo", minutes: 10, code: g.code() });
     await g.send(holdReq({ contentHash: H1, stop: true }));
     expect(await g.send(decideReq({ contentHash: H1 }))).toMatchObject({ action: "wait" });
     // other versions of the plugin still pass by the window
@@ -330,7 +330,7 @@ describe("hold (a request of the plugin's hook: tightening only)", () => {
 
   it("dismissing a stopped entry (no code) neither lifts the stop nor leaves the window open: decide stays `wait`, the window is closed, the journal says so", async () => {
     g = await startGuard();
-    await g.send({ op: "open-window", pluginId: "demo", minutes: 10, code: g.code() });
+    await g.send({ op: "open-window", scope: "tree", pluginId: "demo", minutes: 10, code: g.code() });
     await g.send(holdReq({ contentHash: H1, stop: true }));
     expect((await g.send({ op: "dismiss", requestId: 1 })).ok).toBe(true); // no code
     expect(await g.send(decideReq({ contentHash: H1 }))).toMatchObject({ action: "reject" });
@@ -340,7 +340,7 @@ describe("hold (a request of the plugin's hook: tightening only)", () => {
     expect((s.journal.recent as any[]).some((j) => j.kind === "dismissed" && j.detail.stop === true)).toBe(true);
     expect((s.journal.recent as any[]).some((j) => j.kind === "window.close" && j.detail.reason === "dismissed-stop")).toBe(true);
     // a window opened again (with a code) still does not wave this version in; the entry decide makes keeps the stop
-    await g.send({ op: "open-window", pluginId: "demo", minutes: 10, code: g.nextCode() });
+    await g.send({ op: "open-window", scope: "tree", pluginId: "demo", minutes: 10, code: g.nextCode() });
     expect(await g.send(decideReq({ contentHash: H1 }))).toMatchObject({ action: "reject" });
     expect(await g.send(decideReq({ contentHash: H1 }))).toMatchObject({ action: "reject" });
     expect(await g.send(decideReq({ contentHash: H2 }))).toMatchObject({ action: "proceed", via: "window" }); // other versions: the window works
@@ -351,12 +351,12 @@ describe("hold (a request of the plugin's hook: tightening only)", () => {
 
   it("the stop of a dismissed entry is not pruned by a flood of other entries; dismissing a plain entry leaves the window alone", async () => {
     g = await startGuard();
-    await g.send({ op: "open-window", pluginId: "demo", minutes: 10, code: g.code() });
+    await g.send({ op: "open-window", scope: "tree", pluginId: "demo", minutes: 10, code: g.code() });
     await g.send(holdReq({ contentHash: H1, stop: true }));
     await g.send({ op: "dismiss", requestId: 1 });
     for (let i = 0; i < 150; i++) g.guard.hold({ ...holdReq({ pluginId: "other", contentHash: `${String(i).padStart(8, "0")}${"e".repeat(32)}` }) });
     for (const r of (await g.send({ op: "state" })).queue.filter((q: any) => q.status === "held")) await g.send({ op: "dismiss", requestId: r.id });
-    await g.send({ op: "open-window", pluginId: "demo", minutes: 10, code: g.nextCode() });
+    await g.send({ op: "open-window", scope: "tree", pluginId: "demo", minutes: 10, code: g.nextCode() });
     expect(await g.send(decideReq({ contentHash: H1 }))).toMatchObject({ action: "reject" });
     // plain (stop=0) entry: dismissing it does not close the window
     await g.send(holdReq({ contentHash: H2 }));
@@ -368,7 +368,7 @@ describe("hold (a request of the plugin's hook: tightening only)", () => {
   it("a plain hold is lifted by a window opened later, as a hold of decide is", async () => {
     g = await startGuard();
     await g.send(holdReq({ contentHash: H1 }));
-    await g.send({ op: "open-window", pluginId: "demo", minutes: 10, code: g.code() });
+    await g.send({ op: "open-window", scope: "tree", pluginId: "demo", minutes: 10, code: g.code() });
     expect(await g.send(decideReq({ contentHash: H1 }))).toMatchObject({ action: "proceed", via: "window" });
     expect((await g.send({ op: "state" })).queue[0].status).toBe("approved");
   });
@@ -448,7 +448,7 @@ describe("the secret", () => {
     await g.send(decideReq({ contentHash: H1 }));
     await g.send({ op: "approve", requestId: 1, code: g.code() });
     await g.send({ op: "approve", requestId: 1, code: "000000" });
-    await g.send({ op: "open-window", pluginId: "demo", minutes: 5, code: g.nextCode() });
+    await g.send({ op: "open-window", scope: "tree", pluginId: "demo", minutes: 5, code: g.nextCode() });
     await g.send({ op: "touch", purpose: "x", code: g.nextCode() });
     const answers: string[] = [];
     for (const req of [{ op: "state" }, { op: "ping" }, { op: "policy" }, { op: "journal-verify" }, { op: "lookup", pluginId: "demo", contentHash: H1 }, { op: "secret" }, { op: "totp" }, { op: "state", include: "secret" }, { op: "export" }]) {
@@ -472,7 +472,7 @@ describe("journal", () => {
     g = await startGuard();
     await g.send(decideReq({ contentHash: H1 }));
     await g.send({ op: "approve", requestId: 1, code: g.code() });
-    await g.send({ op: "open-window", pluginId: "demo", minutes: 10, code: g.nextCode() });
+    await g.send({ op: "open-window", scope: "tree", pluginId: "demo", minutes: 10, code: g.nextCode() });
     await g.send(decideReq({ contentHash: H2 }));
     await g.send({ op: "close-window", pluginId: "demo" });
   }
