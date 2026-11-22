@@ -2,6 +2,7 @@
 // can change settings through the API without authentication).
 import type BetterSqlite3 from "better-sqlite3";
 import type { CheckResult } from "./checks/types.js";
+import type { FullPolicy } from "../guard/src/policy.ts";
 import { appendRecord, lastHead, sealLegacy, verifyChain, type JournalAnchor, type JournalReport } from "./journal.js";
 import { PRUNE_MS, type RegistryCache, type RegistryEntry } from "./deps/registry.js";
 import { SENTINEL_MIGRATIONS } from "./sentinel/store.js";
@@ -258,29 +259,8 @@ export interface BatchRow {
 }
 const session = (r: Raw): SessionRow => ({ id: Number(r.id), tokenHash: String(r.token_hash), openedAt: Number(r.opened_at), lastAt: Number(r.last_at), expiresAt: Number(r.expires_at), hardExpiresAt: Number(r.hard_expires_at) });
 
-export interface Policy {
-  /** Trust-window size in minutes. */
-  windowMin: number;
-  /** Hard ceiling of one window, minutes. */
-  capMin: number;
-  mode: "sliding" | "fixed";
-  scope: "tree" | "thread";
-  /** Configuration trust window (spec §6): size in minutes, default 10. */
-  cfgWindowMin: number;
-  /** Hard ceiling of one configuration window, minutes. */
-  cfgCapMin: number;
-  cfgMode: "sliding" | "fixed";
-  /**
-   * Threat model F7: any server code of a plugin runs in the gate's process and uid and can rewrite its state, so
-   * "clean checks, no capabilities" is not a reason to skip the touch. Off by default; turned on only with a code.
-   */
-  autoSafe: boolean;
-  /**
-   * `flow.downgrade`: a card may be less red because the checks followed what a plugin reads and found no way out. Off by default: the analysis is not yet
-   * proven complete, so «никуда не отправляет» is told but does not lower the level. Turning it on loosens the protection: only with a code or a touch.
-   */
-  flowDowngrade: boolean;
-}
+/** The guard's three fields and the plugin's six; what widens it is in guard/src/policy.ts. */
+export type Policy = FullPolicy;
 export const DEFAULT_POLICY: Policy = { windowMin: 30, capMin: 240, mode: "sliding", scope: "tree", cfgWindowMin: 10, cfgCapMin: 240, cfgMode: "sliding", autoSafe: false, flowDowngrade: false };
 
 export interface TotpRow {

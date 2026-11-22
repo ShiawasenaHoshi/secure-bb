@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import plugin from "../server.js";
-import { RPC_AUTH, SESSION_CAP_MS, SESSION_IDLE_MS, SessionProof, authTableMarkdown, groupOf, hashToken, setHash, type RpcGroup } from "../src/approval.js";
+import { RPC_AUTH, SessionProof, authTableMarkdown, groupOf, hashToken, setHash, type RpcGroup } from "../src/approval.js";
 import { rpcContract } from "../src/contract.js";
 import { Gate } from "../src/gate.js";
 import { base32Decode, hotp, stepAt } from "../src/totp.js";

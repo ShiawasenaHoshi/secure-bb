@@ -18,6 +18,7 @@ import { AgentWatchLink, type AgentThreadSource } from "./src/agents.js";
 import { AgentStopper } from "./src/stop.js";
 import { agentAcceptProblem } from "./src/ux.js";
 import { GuardLink, GuardLinkError, guardSocketFromEnv, type GuardAction, type GuardPolicy, type GuardProof, type GuardQueueEntry, type PasskeyAssertion } from "./src/guardlink.js";
+import { guardPolicyWidens, localPolicyWidens, windowScopeWidens } from "./guard/src/policy.ts";
 import { MODE_RANK, capabilityTokens, liftBlock, normalizeEntry } from "./guard/src/trust.ts";
 import { buildExport, writeExport } from "./src/export.js";
 import { localCheckKey } from "./src/decision.js";
@@ -741,11 +742,11 @@ export default async function plugin(bb: BbPluginApi) {
     if (patch.windowMin !== undefined && patch.windowMin !== cur.windowMin) wanted.windowMin = patch.windowMin;
     if (patch.capMin !== undefined && patch.capMin !== cur.capMin) wanted.capMin = patch.capMin;
     if (patch.mode !== undefined && patch.mode !== cur.mode) wanted.mode = patch.mode;
-    const guardWidens = (wanted.windowMin ?? cur.windowMin) > cur.windowMin || (wanted.capMin ?? cur.capMin) > cur.capMin || (wanted.mode === "sliding" && cur.mode === "fixed");
+    const guardWidens = guardPolicyWidens(cur, { ...cur, ...wanted });
     const { windowMin: _w, capMin: _c, mode: _m, autoSafe: _a, ...local } = patch;
     const cp = store.policy();
     const next = { ...cp, ...local };
-    const localWidens = (next.scope === "tree" && cp.scope === "thread") || next.cfgWindowMin > cp.cfgWindowMin || next.cfgCapMin > cp.cfgCapMin || (next.cfgMode === "sliding" && cp.cfgMode === "fixed") || (next.flowDowngrade && !cp.flowDowngrade);
+    const localWidens = localPolicyWidens(cp, next);
     return { wanted, guardWidens, local, localWidens };
   };
 
@@ -961,7 +962,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (pluginId !== undefined && queueId === undefined) {
         // From the plugin's own row (no waiting version): bound to the thread of its latest proposal.
         if (!guardLink) throw new GateError("invalid", "из строки плагина окно открывается только в режиме сторожа; без него — с карточки версии, которая ждёт решения");
-        const proof = proofOrSession({ code, passkey, session }, scope === "tree" && store.policy().scope === "thread");
+        const proof = proofOrSession({ code, passkey, session }, windowScopeWidens(store.policy().scope, scope));
         if (proof === undefined) throw new GateError("invalid_code", "a code or a touch is needed: the guard checks it");
         await gate.openGuardWindowForPlugin(pluginId, proof, scope);
         recheck();
@@ -971,7 +972,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (queueId === undefined) throw new GateError("invalid", "queueId or pluginId is needed");
       if (guardLink) {
         // "The whole tree" while the policy says "this thread only" widens the policy: a fresh touch, never a session.
-        const proof = proofOrSession({ code, passkey, session }, scope === "tree" && store.policy().scope === "thread");
+        const proof = proofOrSession({ code, passkey, session }, windowScopeWidens(store.policy().scope, scope));
         if (proof === undefined) throw new GateError("invalid_code", "a code or a touch is needed: the guard checks it");
         if (queueId < 0) throw new GateError("invalid", "this proposal is not installed yet: approve it (or install it) first, then open a window from the guard's entry");
         await gate.openGuardWindow(await guardEntry(queueId), proof, scope);
@@ -980,7 +981,7 @@ export default async function plugin(bb: BbPluginApi) {
         return { ok: true as const };
       }
       // A window wider than the policy ("whole tree" when the policy says "this thread only") widens the policy: a fresh code.
-      const proof = gate.proofFor("window.open", { code, session }, { escalate: scope === "tree" && store.policy().scope === "thread" });
+      const proof = gate.proofFor("window.open", { code, session }, { escalate: windowScopeWidens(store.policy().scope, scope) });
       gate.openWindow(queueId, proof, scope);
       recheck();
       changed();

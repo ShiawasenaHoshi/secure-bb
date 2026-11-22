@@ -4,8 +4,10 @@
 import { readFileSync } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
 import { CHECKS_VERSION, runChecks as defaultRunChecks, type CheckResult } from "./checks/index.js";
-import { SESSION_CAP_MS, SESSION_IDLE_MS, groupOf, hashToken, mintListProof, mintSessionProof, newToken, SessionProof, ListProof, type Proof, type RpcName } from "./approval.js";
+import { groupOf, hashToken, mintListProof, mintSessionProof, newToken, SessionProof, ListProof, type Proof, type RpcName } from "./approval.js";
 import { BLOCKED_REASON, bySeverity, localCheckKey, summarize } from "./decision.js";
+import { SESSION_CAP_MS, SESSION_IDLE_MS } from "../guard/src/session-rules.ts";
+import { guardPolicyWidens, localPolicyWidens } from "../guard/src/policy.ts";
 import { capabilityTokens, grown, rightsOf, windowAllows, type Rights } from "../guard/src/trust.ts";
 
 /** The rights of a result for a comparison here: `rightsOf` stores at most 400 tokens (the guard's database), a comparison must see all of them, as it always did in the hook. */
@@ -220,11 +222,13 @@ export class Gate {
   /**
    * What an RPC may use as its proof. `escalate`: this call is the dangerous kind of an otherwise routine RPC (lifting a block,
    * widening); it then needs a fresh code, as every "dangerous" RPC does. A fresh code is always welcome, whatever the group.
+   * This gate takes a session token only without a guard. With a guard it takes none: the guard checks the session, and only for routine actions
+   * (guard/src/session-rules.ts); a token the page sends goes to the guard (`withGuardTouch` in server.ts), never to this method.
    */
   proofFor(rpc: RpcName, cred: { code?: string; session?: string }, opts: { escalate?: boolean } = {}): Proof {
     if (cred.code !== undefined) return cred.code;
     if (cred.session !== undefined) {
-      if (this.d.guard) throw new GateError("invalid_code", "there are no sessions in guard mode: the guard checks a fresh code for every approval");
+      if (this.d.guard) throw new GateError("invalid_code", "with a guard this gate takes no session token: the guard checks the session, and only for routine actions");
       if (groupOf(rpc) !== "routine" || opts.escalate === true) throw new GateError("invalid_code", "this action needs a fresh code: a session does not cover it");
       return mintSessionProof(cred.session);
     }
@@ -1139,16 +1143,7 @@ export class Gate {
       throw new GateError("invalid", "window size must be at least 1 minute and not exceed the ceiling (at most 24 hours)");
     if (next.cfgWindowMin < 1 || next.cfgCapMin < 1 || next.cfgCapMin > 1440 || next.cfgWindowMin > next.cfgCapMin)
       throw new GateError("invalid", "configuration window size must be at least 1 minute and not exceed its ceiling (at most 24 hours)");
-    const widens =
-      next.windowMin > cur.windowMin ||
-      next.capMin > cur.capMin ||
-      (next.mode === "sliding" && cur.mode === "fixed") ||
-      (next.scope === "tree" && cur.scope === "thread") ||
-      next.cfgWindowMin > cur.cfgWindowMin ||
-      next.cfgCapMin > cur.cfgCapMin ||
-      (next.cfgMode === "sliding" && cur.cfgMode === "fixed") ||
-      (next.autoSafe && !cur.autoSafe) ||
-      (next.flowDowngrade && !cur.flowDowngrade);
+    const widens = guardPolicyWidens(cur, next) || localPolicyWidens(cur, next); // policy.ts: the one list of what widens
     if (widens) {
       if (code === undefined) throw new GateError("invalid_code", "widening the policy needs a code");
       this.touch("policy", code);
