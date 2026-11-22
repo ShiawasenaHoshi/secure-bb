@@ -1855,8 +1855,10 @@ export interface PluginDownEffects {
   guardWatchesAgents: boolean;
   /** An open window keeps its time (the guard expires it). */
   guardExpiresWindows: boolean;
-  /** An open window lets a version in WITHOUT what the plugin's hook adds: hard signs, a new capability, the thread scope, pollution. */
-  windowPassesUnchecked: boolean;
+  /** A window bound to a thread (tree / thread) lets nothing in while the plugin does not call the guard: only the plugin knows the threads. */
+  windowPausedWithoutPlugin: boolean;
+  /** A window over everything lets a version in only after the guard's own checks: no hard sign, no right the approved version did not have. */
+  windowAllChecked: boolean;
   /** The page, the form for codes and touches, `bb secure-bb propose` and the config watch (account, instructions, skills, env, built-in plugins) are the plugin's own. */
   pageAndConfigWatchAreThePlugins: boolean;
 }
@@ -1865,7 +1867,8 @@ export const PLUGIN_DOWN_EFFECTS: PluginDownEffects = {
   guardApprovedStillRun: true,
   guardWatchesAgents: true,
   guardExpiresWindows: true,
-  windowPassesUnchecked: true,
+  windowPausedWithoutPlugin: true,
+  windowAllChecked: true,
   pageAndConfigWatchAreThePlugins: true,
 };
 export interface GapLike {
@@ -1877,7 +1880,6 @@ export interface GapLike {
   mode?: "guard" | "hook";
   cause?: "server" | "unknown";
   coreHolds?: boolean;
-  windowPasses?: number | null;
   errorText?: string | null;
 }
 export interface GapContext {
@@ -1931,19 +1933,13 @@ export function gapAlarmText(gap: GapLike, ctx: GapContext, e: PluginDownEffects
   if (e.guardHoldsUnknown) works.push("версии плагинов удерживались и проверялись сторожем");
   if (e.guardApprovedStillRun) works.push("одобренные версии работали");
   if (e.guardWatchesAgents) works.push("настройки агентов отслеживались");
+  if (e.windowPausedWithoutPlugin) works.push("окна доверия по треду стояли (версии по ним не проходили)");
+  if (e.windowAllChecked) works.push("окна на все версии пропускали только после проверок сторожа");
   const notWorking: string[] = [];
   const opens: string[] = [];
   if (e.pageAndConfigWatchAreThePlugins) notWorking.push("страница, коды и касания (одобрить версию и открыть окно было нельзя), команда `bb secure-bb propose`");
   if (e.pageAndConfigWatchAreThePlugins && ctx.configWatch) {
     const t = "наблюдение за настройками bb (аккаунт, инструкции, скиллы, окружение, встроенные плагины): что изменили и вернули за это время, не видно";
-    notWorking.push(t);
-    opens.push(t);
-  }
-  if (e.windowPassesUnchecked && gap.windowPasses !== 0) {
-    const t =
-      typeof gap.windowPasses === "number"
-        ? `${gap.windowPasses} ${plural(gap.windowPasses, "версия прошла", "версии прошли", "версий прошли")} по окну доверия без проверок плагина (жёсткие признаки, новая возможность, охват по тредам)`
-        : "если было открыто окно доверия, версии шли по нему без проверок плагина (жёсткие признаки, новая возможность, охват по тредам); сколько их было, узнать не удалось";
     notWorking.push(t);
     opens.push(t);
   }

@@ -34,7 +34,7 @@ export interface TestGuard {
   close(): Promise<void>;
 }
 
-export async function startGuard(opts: { register?: boolean; serve?: boolean; rp?: RelyingParty; agents?: AgentsConfig; trust?: TrustConfig } = {}): Promise<TestGuard> {
+export async function startGuard(opts: { register?: boolean; serve?: boolean; rp?: RelyingParty; agents?: AgentsConfig; trust?: TrustConfig; /** The secure-bb plugin calls the guard (default): every request is preceded by its pulse. */ pluginAlive?: boolean } = {}): Promise<TestGuard> {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "sbb-guard-")));
   const paths = resolvePaths({ data: dir, socket: join(dir, "run", "guard.sock") });
   privateDir(paths.stateDir);
@@ -60,7 +60,10 @@ export async function startGuard(opts: { register?: boolean; serve?: boolean; rp
       clock.advance(31_000);
       return code();
     },
-    send: (req) => request(paths.socket, req) as Promise<Record<string, any>>,
+    send: (req) => {
+      if (opts.pluginAlive !== false) guard.beat();
+      return request(paths.socket, req) as Promise<Record<string, any>>;
+    },
     async close() {
       if (closed) return;
       closed = true;
@@ -114,7 +117,11 @@ export async function startGuardOnDate(opts: { agents?: AgentsConfig; trust?: Tr
     secret,
     code,
     nextCode: () => code(),
-    send: (req) => request(paths.socket, req) as Promise<Record<string, any>>,
+    // The plugin runs in these tests (its background loop is not started by the fake host): its pulse precedes every request.
+    send: (req) => {
+      guard.beat();
+      return request(paths.socket, req) as Promise<Record<string, any>>;
+    },
     async close() {
       if (closed) return;
       closed = true;

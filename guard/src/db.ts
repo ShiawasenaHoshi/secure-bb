@@ -179,6 +179,10 @@ export const MIGRATIONS: string[] = [
      danger TEXT,
      kept_at INTEGER NOT NULL,
      revoked_at INTEGER)`,
+  // What a window covers, as the guard itself can enforce it: "tree" / "thread" need the plugin's page to be alive (it knows the threads); "all" does not.
+  // NULL (a window opened before this column existed) counts as "thread": the stricter. `base_rights`: what the held version showed when the window was opened.
+  `ALTER TABLE windows ADD COLUMN scope TEXT`,
+  `ALTER TABLE windows ADD COLUMN base_rights TEXT`,
 ];
 
 export function openDb(path: string): DatabaseSync {
