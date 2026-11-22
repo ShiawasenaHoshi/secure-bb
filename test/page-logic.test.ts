@@ -24,7 +24,7 @@ describe("the alarms of the page", () => {
     const a = pageAlarms(ovOf({ agents }), true).find((x) => x.anchor === "sbb-agents")!;
     expect(a.text).toBe("Настройки агентов: критичных изменений — 1, файлов не прочитать — 1");
     expect(a.weight).toBe(2);
-    expect(agentsFacts(ovOf({ agents: { state: { drifts: [], alarms: [] } } })).tab).toBe("more");
+    expect(agentsFacts(ovOf({ agents: { state: { drifts: [], alarms: [] } } })).tab).toBe("settings");
   });
 });
 

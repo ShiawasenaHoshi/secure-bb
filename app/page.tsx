@@ -3,19 +3,21 @@ import type { ReactNode } from "react";
 import { useRpc } from "@get-bb/plugin-sdk/app";
 import type { SecureBbRpc } from "../server";
 import type { Overview } from "../src/overview";
-import { awaySince, type ProblemRef, type TabId } from "../src/ux";
+import { awaySince, TAB_LABEL, TAB_ORDER, type ProblemRef, type TabId } from "../src/ux";
 import { openFold } from "../src/fold";
-import { summarize, type PageSummary } from "../src/pageview";
+import { registeredOf, summarize, type PageSummary } from "../src/pageview";
 import { AgentsSection } from "./agents";
 import { ApprovalContext, useApprovalSession } from "./approval";
 import { enrollTokenOnce } from "./code";
 import { ConfirmHost } from "./confirm-dialog";
 import { TroubleshootBar } from "./header";
+import { PAGE_TITLE } from "./page-title";
 import { ExceptionsTab } from "./trust";
 import { JournalTab } from "./journal-tab";
+import { SettingsTab } from "./settings-tab";
 import { OverviewTab, type OverviewProps, type SessionProps } from "./overview-tab";
 import { useCardPlan } from "./page-plan";
-import { useFocusJump, useMarks, useNotes, useStableView } from "./page-state";
+import { useFocusJump, useMarks, useNotes, useSavedTab, useStableView } from "./page-state";
 import { QuarantineTab } from "./quarantine";
 import type { Rpc } from "./touch";
 import { muted, useOverview, Section, DoneContext, AnchoredNotes, PinnedNotes } from "./ui";
@@ -33,8 +35,6 @@ export function usePagePing(rpc: ReturnType<typeof useRpc<SecureBbRpc>>) {
   }, [rpc]);
 }
 
-export const TAB_LABEL: Record<TabId, string> = { status: "Обзор", quarantine: "Карантин", trust: "Доверие и исключения", more: "Журнал" };
-
 
 /** The section of the agents' configurations and memory, drawn on the tab the facts say (a critical change or an alarm brings it to «Обзор»). */
 function agentsSectionOf(ov: Overview, rpc: Rpc, refetch: () => void, agents: PageSummary["agents"]): ReactNode {
@@ -42,7 +42,7 @@ function agentsSectionOf(ov: Overview, rpc: Rpc, refetch: () => void, agents: Pa
   const open = ov.agents.state?.openTotal ?? 0;
   const mark = agents.alarms > 0 || agents.critical > 0 ? " (!)" : open > 0 ? ` (${open})` : "";
   return (
-    <Section id="sbb-agents" title={`Агенты: конфигурации и память${mark}`}>
+    <Section id="sbb-agents" sub={agents.tab !== "status"} title={`Агенты: конфигурации и память${mark}`}>
       <AgentsSection ov={ov} rpc={rpc} refetch={refetch} showDone={agents.tab !== "status"} />
     </Section>
   );
@@ -51,8 +51,8 @@ function agentsSectionOf(ov: Overview, rpc: Rpc, refetch: () => void, agents: Pa
 function PageTabs({ tab, setTab, counts }: { tab: TabId; setTab: (t: TabId) => void; counts: Record<TabId, number> }) {
   return (
     <Tabs value={tab} onValueChange={(v) => setTab(v as TabId)}>
-      <TabsList aria-label="Разделы secure-bb">
-        {(["status", "quarantine", "trust", "more"] as const).map((t) => (
+      <TabsList aria-label={`Разделы ${PAGE_TITLE}`}>
+        {TAB_ORDER.map((t) => (
           <TabsTrigger key={t} value={t}>
             {TAB_LABEL[t]}
             {counts[t] > 0 ? <Badge variant="secondary" className="px-1.5 py-0">{counts[t]}</Badge> : null}
@@ -85,7 +85,7 @@ function GateContent(c: ContentProps) {
   // «Настроить» in the header when the second factor is missing: the first-run wizard, on its screen about the second factor.
   const [forceWizard, setForceWizard] = useState(false);
   const view = useCardPlan(ov, marks.decisions, { off: marks.freqOff, lastAt: marks.freqAt }, notes.stubs);
-  const registered = ov.totp.state === "locked" || ov.totp.state === "external";
+  const registered = registeredOf(ov);
   const summary = summarize(ov, view.plan, registered);
   const showProblem = (p: ProblemRef) => {
     setTab(p.tab);
@@ -95,7 +95,7 @@ function GateContent(c: ContentProps) {
   };
   const addPending = (entry: string, label: string) => setPending((p) => (p.some((x) => x.entry === entry) ? p : [...p, { entry, label }]));
   const agentsSection = agentsSectionOf(ov, rpc, refetch, summary.agents);
-  const tabCount: Record<TabId, number> = { status: summary.status.count, quarantine: summary.counts.quarantine, trust: 0, more: 0 };
+  const tabCount: Record<TabId, number> = { status: summary.status.count, quarantine: summary.counts.quarantine, trust: 0, journal: 0, settings: 0 };
   const overview: OverviewProps = { ov, rpc, refetch, view, summary, marks, notes, session: c.session, since: awaySince(marks.seenAt, Math.max(c.pageStart, Number(marks.seenAt ?? 0) || 0)), pending, setPending, addPending, forceWizard, setForceWizard, showProblem, agentsSection };
   return (
     <>
@@ -104,7 +104,8 @@ function GateContent(c: ContentProps) {
       {tab === "status" ? <OverviewTab p={overview} /> : null}
       {tab === "quarantine" ? <QuarantineTab ov={ov} rpc={rpc} refetch={refetch} onTrustPending={addPending} onShowCard={(id) => { setTab("status"); c.setFocus(`sbb-card-${id}`); }} isKept={view.isKept} onUnkeep={marks.onUnkeep} /> : null}
       {tab === "trust" ? <ExceptionsTab ov={ov} rpc={rpc} refetch={refetch} freqOff={marks.freqOff} onFreqOff={marks.setFreqSwitch} /> : null}
-      {tab === "more" ? <JournalTab ov={ov} rpc={rpc} refetch={refetch} held={view.held} registered={registered} enrollToken={c.enrollToken} agentsSection={agentsSection} agentsHere={summary.agents.tab === "more"} /> : null}
+      {tab === "journal" ? <JournalTab ov={ov} rpc={rpc} refetch={refetch} /> : null}
+      {tab === "settings" ? <SettingsTab ov={ov} rpc={rpc} refetch={refetch} held={view.held} registered={registered} enrollToken={c.enrollToken} agentsSection={agentsSection} agentsHere={summary.agents.tab === "settings"} /> : null}
     </>
   );
 }
@@ -112,7 +113,7 @@ function GateContent(c: ContentProps) {
 function Loading() {
   return (
     <div className="mx-auto max-w-3xl space-y-3 p-6" role="status" aria-busy="true" data-secure-bb-loading>
-      <h1 className="text-xl font-semibold">secure-bb</h1>
+      <h1 className="text-xl font-semibold">{PAGE_TITLE}</h1>
       <p className={`text-base ${muted}`}>Загрузка…</p>
     </div>
   );
@@ -124,7 +125,8 @@ export function GatePage() {
   const { approval, open, lock, closed } = useApprovalSession(rpc, refetch);
   // The link from `sbb-guard setup` (#enroll=TOKEN): taken once, from the fragment (it never went to a server), and the address bar is cleaned at once.
   const [enrollToken] = useState<string | null>(enrollTokenOnce);
-  const [tab, setTab] = useState<TabId>(enrollToken !== null ? "more" : "status");
+  // The link from `sbb-guard setup` leads to the guard card (on «Настройки»); otherwise the tab the page was left on, or «Обзор».
+  const [tab, setTab] = useSavedTab(enrollToken !== null ? "settings" : null);
   const [focus, setFocus] = useState<string | null>(null);
   const pageStart = useRef(Date.now());
   const { scrollRef, rememberView } = useStableView();
@@ -141,7 +143,7 @@ export function GatePage() {
             <div className="h-full overflow-y-auto" ref={scrollRef} onScroll={rememberView} onFocusCapture={rememberView} onKeyUp={rememberView} onPointerUp={rememberView}>
               <AnchoredNotes />
               <div className="mx-auto max-w-3xl space-y-6 p-4 sm:p-6">
-                <h1 className="text-xl font-semibold">secure-bb</h1>
+                <h1 className="text-xl font-semibold">{PAGE_TITLE}</h1>
                 <PinnedNotes />
                 <GateContent ov={ov} rpc={rpc} refetch={refetch} notes={notes} marks={marks} session={{ session: approval.session, open, lock, closed }} enrollToken={enrollToken} tab={tab} setTab={setTab} setFocus={setFocus} pageStart={pageStart.current} />
               </div>

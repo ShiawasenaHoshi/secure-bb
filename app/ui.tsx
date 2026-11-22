@@ -158,10 +158,24 @@ export function Msg({ error, ok, reserve }: { error?: string | null; ok?: string
   return reserve ? <p className="mt-2 min-h-5 text-sm" aria-hidden /> : null;
 }
 
-export function Section({ title, children, id }: { title: string; children: ReactNode; id?: string }) {
+export function Section({ title, children, id, sub = false }: { title: string; children: ReactNode; id?: string; sub?: boolean }) {
+  const Heading = sub ? "h3" : "h2";
   return (
     <section className="space-y-2" id={id}>
-      <h2 className="text-base font-semibold">{title}</h2>
+      <Heading className="text-base font-semibold">{title}</Heading>
+      {children}
+    </section>
+  );
+}
+
+/** A heading of a group of sections on «Настройки»: the sections under it are its sub-sections. */
+export function Group({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) {
+  return (
+    <section className="space-y-3" aria-label={title} data-secure-bb-group={title}>
+      <div className="border-b border-border pb-1">
+        <h2 className="text-lg font-semibold">{title}</h2>
+        {hint ? <p className="text-sm text-muted-foreground">{hint}</p> : null}
+      </div>
       {children}
     </section>
   );

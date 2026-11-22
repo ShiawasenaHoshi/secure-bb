@@ -97,7 +97,6 @@ export const whyOf = (detail: unknown): string | null => {
 
 export function GuardCard({ ov, rpc, refetch, enrollToken }: { ov: Overview; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void; enrollToken: string | null }) {
   const g = ov.guard;
-  const act = useCodeAction(refetch);
   if (!g) return null;
   return (
     <div className="space-y-3">
@@ -108,8 +107,24 @@ export function GuardCard({ ov, rpc, refetch, enrollToken }: { ov: Overview; rpc
         </p>
         <p className={`mt-1 ${muted}`}>
           {g.connected ? "Сторож отвечает." : "Сторож не отвечает."}
-          {g.journal ? ` Журнал сторожа: ${g.journal.valid ? "цепочка цела" : "НАРУШЕН"}, записей ${g.journal.entries}, голова ${g.journal.head ?? "—"}.` : ""}
-          {" "}Код, введённый здесь, проходит через процесс bb, поэтому вредный плагин мог бы его перехватить (с passkey подпись привязана к действию); после действия в журнале видно, что именно одобрено и чем.
+          {" "}Журнал сторожа — на вкладке «Журнал». Код, введённый здесь, проходит через процесс bb, поэтому вредный плагин мог бы его перехватить (с passkey подпись привязана к действию); после действия в журнале видно, что именно одобрено и чем.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/** The guard's own journal: the chain's state, the check on demand, and its latest records. Events only; the guard's settings are in «Сторож решений». */
+export function GuardJournal({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void }) {
+  const g = ov.guard;
+  const act = useCodeAction(refetch);
+  if (!g) return null;
+  return (
+    <div className="space-y-3">
+      <div className={card}>
+        <p className={g.journal && !g.journal.valid ? "font-semibold text-destructive" : undefined}>
+          {g.connected ? "" : "Сторож не отвечает. "}
+          {g.journal ? `Цепочка: ${g.journal.valid ? "цела" : "НАРУШЕНА"}, записей ${g.journal.entries}, голова ${g.journal.head ?? "—"}.` : "Журнал сторожа сейчас не прочитать."}
         </p>
         <div className="mt-2">
           <button className={btn} disabled={act.busy} onClick={() => void act.run(async () => { await rpc.call("guard.verify"); })}>Проверить журнал сторожа</button>

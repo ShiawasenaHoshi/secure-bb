@@ -196,7 +196,7 @@ function OverviewFoot({ p }: { p: OverviewProps }) {
   return (
     <>
       <AwayCard ov={ov} since={p.since} onSeen={p.marks.seen} kept={kept} />
-      <SkillsLine ov={ov} onOpen={() => p.showProblem({ anchor: "sbb-skills", tab: "more", text: "" })} />
+      <SkillsLine ov={ov} onOpen={() => p.showProblem({ anchor: "sbb-skills", tab: "settings", text: "" })} />
       <ProtectedSection ov={ov} waiting={new Set(view.plan.active.map((c) => c.pluginId))} onShowCard={showWaiting} />
       <PlainNotes p={p} />
     </>

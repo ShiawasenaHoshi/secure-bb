@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { usePublishStatus } from "./status-store";
 import { useBbNavigate, useRpc } from "@get-bb/plugin-sdk/app";
 import type { SecureBbRpc } from "../server";
 import type { Overview, WindowView } from "../src/overview";
@@ -146,6 +147,7 @@ export function WindowOverlay() {
   const { rpc, data, refetch } = useOverview();
   const nav = useBbNavigate();
   const [stored, setStored] = useState<string | null>(readCollapsed);
+  usePublishStatus(data);
   if (!data) return null;
   const v = overlayView(data, stored);
   if (!v.show) return null;
@@ -164,7 +166,7 @@ export function WindowOverlay() {
         <div className="flex items-center gap-2 text-sm text-destructive" role="alert" data-secure-bb-alarm-line>
           <span className="min-w-0 flex-1 font-semibold">{v.alarmLine}</span>
           <button type="button" className="shrink-0 underline hover:no-underline" onClick={() => nav.toPluginPanel("gate")}>Открыть</button>
-          <button type="button" className="shrink-0 px-1 leading-none" aria-label="Свернуть" title="Свернуть (тревога останется на странице secure-bb)" onClick={() => fold(v.alarmKey)}>×</button>
+          <button type="button" className="shrink-0 px-1 leading-none" aria-label="Свернуть" title="Свернуть (тревога останется на странице SecureBB)" onClick={() => fold(v.alarmKey)}>×</button>
         </div>
       ) : null}
       <WindowRows windows={data.windows} cfgWindows={data.watch.windows} rpc={rpc} refetch={refetch} />
