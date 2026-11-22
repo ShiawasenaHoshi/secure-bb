@@ -1017,7 +1017,7 @@ export function planCards<E extends HeldLike>(held: E[], d: Decisions): CardPlan
 export const moreVersionsText = (n: number): string => `ещё ${n} ${plural(n, "версия ждёт", "версии ждут", "версий ждут")}`;
 
 /**
- * What a card IS, for React and for its folds: the plugin, the version and the code (the hash), not the number of the queue entry. The same version held again
+ * What a card IS, for React and for its folds: the plugin, the version and its hash, not the number of the queue entry. The same version held again
  * gets a new entry number (after a rejection, a restart, a second ask of the core); a key made of the number would build the card anew at every such change and
  * lose what the person had just opened. A version of another content is another card.
  */
@@ -1055,7 +1055,7 @@ export function windowAvailability(i: WindowAvailInput): WindowAvail {
   if (i.sourceKind === "path") {
     return {
       available: false,
-      note: `Окно доверия тут не подходит: оно работает для плагинов, которые агент ставит из чата, а этот взят из папки на компьютере. ${i.level === "own" ? "Ваш источник уже в доверенных: версии без новых прав проходят сами." : "Вместо него доверьте источник кнопкой «Разрешить и доверять источнику»: тогда версии без новых прав будут проходить сами."}`,
+      note: `Окно доверия тут не подходит: оно работает для плагинов, которые агент ставит из чата, а этот взят из папки на компьютере. ${i.level === "own" ? "Ваш источник уже в «моих источниках»: версии без новых прав проходят сами." : "Вместо него доверьте источник кнопкой «Разрешить и доверять источнику»: тогда версии без новых прав будут проходить сами."}`,
     };
   }
   return { available: false, note: "Окно доверия тут не подходит: оно работает для плагинов, которые агент ставит из чата, а этот пришёл иначе. Разрешите версию или доверьте источник." };
@@ -1084,7 +1084,7 @@ export interface TrustButton {
 export function trustButton(i: TrustButtonInput): TrustButton {
   if (i.entry === null) return { enabled: false, note: "Этот источник нельзя занести в «мои источники» (не github и не папка на диске)." };
   if (i.queueId < 0) return { enabled: false, note: "Плагин ещё не установлен: сначала разрешите версию." };
-  if (i.level === "own") return { enabled: false, note: "Ваш источник уже в доверенных: версии без новых прав проходят сами." };
+  if (i.level === "own") return { enabled: false, note: "Ваш источник уже в «моих источниках»: версии без новых прав проходят сами." };
   return { enabled: true, note: null };
 }
 
@@ -2119,7 +2119,7 @@ export const FREQ_BUTTON: Record<"trust" | "window", (windowMin: number) => stri
 
 // ---- exceptions: one list ---------------------------------------------------------------------------------------------------------
 export type ExceptionKind = "window" | "cfgWindow" | "approval" | "source" | "kept";
-export const EXCEPTION_LABEL: Record<ExceptionKind, string> = { window: "Окно доверия", cfgWindow: "Окно доверия", approval: "Одобрение", source: "Доверенный источник", kept: "Оставлено в настройках агента" };
+export const EXCEPTION_LABEL: Record<ExceptionKind, string> = { window: "Окно доверия", cfgWindow: "Окно доверия", approval: "Одобрение", source: "Мой источник", kept: "Оставлено в настройках агента" };
 export interface ExceptionRow {
   key: string;
   kind: ExceptionKind;
@@ -2141,7 +2141,7 @@ export interface ExceptionInput {
   kept: Array<{ id: number; rel: string; keptAt: number; danger: string | null; part: PartLike }>;
 }
 export const minutesLeft = (sec: number): string => `${Math.max(1, Math.ceil(sec / 60))} мин`;
-/** Every exception the person made — windows, approvals, trusted sources, kept changes of the agents — in one list, newest first (sources, which have no time, last). */
+/** Every exception the person made — windows, approvals, «мои источники», kept changes of the agents — in one list, newest first (sources, which have no time, last). */
 export function exceptionRows(i: ExceptionInput, now: number, onlyDay = false): ExceptionRow[] {
   const rows: ExceptionRow[] = [
     ...i.windows.map((w): ExceptionRow => ({ key: `window:${w.id}`, kind: "window", title: `${EXCEPTION_LABEL.window}: плагин ${w.pluginId} — ещё ${minutesLeft(w.remainingSec)}`, detail: "новые версии проходят без вопросов, пока окно открыто", at: w.openedAt, revoke: { kind: "window", id: w.id }, needsCode: null })),

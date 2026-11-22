@@ -155,7 +155,7 @@ export function ReviewCard({ q, ov, rpc, refetch, deferred, onDefer, onKeep, onT
       const r = (await proof.run({ kind: "approve.trust", queueId: q.id }, (p) => rpc.call("queue.approveTrust", { id: q.id, ...p } as never), { what: `${approveWhat} и доверять источнику`, ...(trust.note ? { detail: trust.note } : {}) })) as { note: string };
       onFreqDone?.();
       return { note: `${r.note}. Новые версии из этого источника идут без вопросов, пока плагин не попросит новых прав.` };
-    }, `${allowedWhat}, источник доверенный`);
+    }, `${allowedWhat}, источник добавлен в «мои источники»`);
   const del = () =>
     void act.run(async () => {
       await rpc.call("queue.dismiss", { id: q.id });

@@ -598,7 +598,8 @@ export function answer(home: string, line: string, log: (l: string) => void = ()
   }
 }
 
-function isLive(path: string): Promise<boolean> {
+/** Asks by connecting (and at once closing): is something already listening there? Not a pure check. */
+function probeListener(path: string): Promise<boolean> {
   return new Promise((resolve) => {
     const c = net.connect(path);
     c.once("connect", () => (c.destroy(), resolve(true)));
@@ -620,7 +621,7 @@ export async function listen(o: ServeOptions): Promise<net.Server> {
     chmodSync(dir, 0o750);
     if (o.socketGid !== null) chownGroup({ program: "sbb-restore" }, dir, o.socketGid, o.chown);
   }
-  if (await isLive(o.socket)) throw new Error(`another sbb-restore is already listening on ${o.socket}`);
+  if (await probeListener(o.socket)) throw new Error(`another sbb-restore is already listening on ${o.socket}`);
   try {
     unlinkSync(o.socket);
   } catch {

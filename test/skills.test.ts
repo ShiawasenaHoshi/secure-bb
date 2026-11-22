@@ -194,7 +194,7 @@ describe("review: held in the queue", () => {
     h.bb.put("skill_c", "fresh", { "SKILL.md": "# fresh\n\nBe brief.\n" });
     await h.watch.scan();
     expect(h.guard.view().open[0]).toMatchObject({ name: "fresh", state: "held" });
-    expect(h.guard.view().open[0]!.reason).toMatch(/не доверенный/);
+    expect(h.guard.view().open[0]!.reason).toMatch(/не в «источниках скиллов»/);
   });
   it("one entry follows the skill while it keeps changing", async () => {
     const h = await started();

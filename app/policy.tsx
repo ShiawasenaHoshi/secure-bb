@@ -107,7 +107,8 @@ export function PolicyCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType
   );
 }
 
-export function TrustedRepos({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void }) {
+/** The list of repositories whose use does not taint a thread (the pollution tracker's; not «мои источники» of the guard, not the sources of skills). */
+export function UntaintingRepos({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void }) {
   const [pattern, setPattern] = useState("");
   const [code, setCode] = useState("");
   const act = useCodeAction(refetch);

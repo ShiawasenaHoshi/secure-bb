@@ -66,7 +66,7 @@ export function QuarantineRow({ q, ov, rpc, refetch, onTrustPending, onShowCard,
                 className={btn}
                 disabled={act.busy || unsafeDir || !proof.ready()}
                 title="Одна операция сторожа: одобрить версию и добавить источник. Одно касание."
-                onClick={() => void act.run(() => approveAndTrust(), `вернули ${q.pluginId} ${q.version}, источник доверенный`)}
+                onClick={() => void act.run(() => approveAndTrust(), `вернули ${q.pluginId} ${q.version}, источник добавлен в «мои источники»`)}
               >
                 Вернуть и доверять этому источнику
               </button>

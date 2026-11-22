@@ -9,7 +9,9 @@
 //
 // CONSERVATIVE, on purpose: «nowhere» is said only where no path exists. Whatever the analysis cannot follow — a call into a library it has not read,
 // a computed call (`obj[k](data)`), `eval`, a budget that ran out — is «unknown», never «nowhere». A path that is found is reported even when the
-// rest is unknown. Not followed: implicit flows (a branch on the data), and what a dependency does with a capability handed to it (`bb`, `sdk`).
+// rest is unknown. Followed too: the implicit flow, a CHOICE made by the data (a branch, a comparison, a length, a loop count, a timer delay): the bits go out
+// without the content, so a sink reached only by the choice is reported as a flow of its own («choice»; README, «Выбор по содержимому»). Not followed:
+// the residual channels (the running time and the resource use of the plugin itself), and what a dependency does with a capability handed to it (`bb`, `sdk`).
 //
 // Pure: no file access (the tree scan has read it all). The plugin's checks and the guard's are the same module.
 import { CHILD_FUNCS, collectConsts, credentialLabels, FS_FUNCS, FS_WRITE, fold, moduleCapability, normalizeModule, PLAIN_BUILTINS, RUNTIME_TS, SKIP_KEYS } from "./ast.ts";

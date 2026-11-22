@@ -85,7 +85,7 @@ export function TrustSection({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; ref
           <Button size="sm" disabled={act.busy || entry.trim() === "" || !proof.registered} onClick={add}>Добавить</Button>
           {oldRepos.length > 0 ? (
             <Button size="sm" variant="outline" disabled={act.busy || !proof.registered} onClick={() => void act.run(async () => { await proof.run({ kind: "trust.migrate" }, (p) => rpc.call("trust.migrate", p as never), { what: "Перенести «доверенные репозитории» в мои источники" }); return { note: "Перенесено." }; })}>
-              Перенести из «доверенных репозиториев» ({oldRepos.length})
+              Перенести из «репозиториев, которые не загрязняют тред» ({oldRepos.length})
             </Button>
           ) : null}
         </div>

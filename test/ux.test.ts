@@ -554,7 +554,7 @@ describe("exceptions: one list", () => {
     expect(rows[0]!.detail).toContain("Делает агента опаснее: bypassPermissions");
     expect(rows[1]!.title).toBe("Окно доверия: плагин notes — ещё 20 мин");
     expect(rows[2]!.title).toBe("Окно доверия: инструкции, скиллы — ещё 2 мин");
-    expect(rows[5]!.title).toBe("Доверенный источник: me/* (на GitHub)");
+    expect(rows[5]!.title).toBe("Мой источник: me/* (на GitHub)");
   });
   it("a revoked approval is not an exception; «за 24 часа» cuts the old ones but not the sources, which have no time", () => {
     expect(exceptionRows(input, NOW).some((r) => r.key === "approval:9")).toBe(false);

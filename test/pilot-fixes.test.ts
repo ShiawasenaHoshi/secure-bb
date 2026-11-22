@@ -150,7 +150,7 @@ describe("9. trust window for a plugin from a folder", () => {
     const w = windowAvailability({ threadId: null, queueId: 4, sourceKind: "path", level: "own" });
     expect(w.available).toBe(false);
     expect(w.note).toContain("взят из папки");
-    expect(w.note).toContain("Ваш источник уже в доверенных: версии без новых прав проходят сами");
+    expect(w.note).toContain("Ваш источник уже в «моих источниках»: версии без новых прав проходят сами");
   });
   it("a folder that is not yet trusted points at «доверять источнику»", () => {
     const w = windowAvailability({ threadId: null, queueId: 4, sourceKind: "path", level: "unknown" });
@@ -162,7 +162,7 @@ describe("9. trust window for a plugin from a folder", () => {
   });
   it("the button that would do nothing is not active", () => {
     expect(trustButton({ entry: "path:/x", level: "own", queueId: 4 }).enabled).toBe(false);
-    expect(trustButton({ entry: "path:/x", level: "own", queueId: 4 }).note).toContain("уже в доверенных");
+    expect(trustButton({ entry: "path:/x", level: "own", queueId: 4 }).note).toContain("уже в «моих источниках»");
     expect(trustButton({ entry: null, level: "unknown", queueId: 4 }).enabled).toBe(false);
     expect(trustButton({ entry: "path:/x", level: "unknown", queueId: -1 }).enabled).toBe(false);
     expect(trustButton({ entry: "path:/x", level: "unknown", queueId: 4 })).toEqual({ enabled: true, note: null });

@@ -1,5 +1,5 @@
-// Trusted repositories: patterns `owner/name` and `owner/*` (github.com only). A `git clone` of, or a `gh` call on,
-// a trusted repository is the user's own work and does not taint a thread; anything else with an address does.
+// Repositories that do not taint a thread («trusted» in the names of the functions below): patterns `owner/name` and `owner/*` (github.com only). A `git clone` of, or a `gh` call on,
+// such a repository is the user's own work and does not taint a thread; anything else with an address does.
 
 export const REPO_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,38})\/(?:\*|[a-z0-9._-]{1,100})$/;
 

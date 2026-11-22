@@ -148,11 +148,11 @@ describe("4. no jargon in the main text", () => {
 });
 
 describe("5. the same sentence once; no dead button", () => {
-  it("«Ваш источник уже в доверенных…» comes once", () => {
+  it("«Ваш источник уже в «моих источниках»…» comes once", () => {
     const w = windowAvailability({ threadId: null, queueId: 4, sourceKind: "path", level: "own" });
     const t = trustButton({ entry: "path:/x", level: "own", queueId: 4 });
     const text = uniqueSentences([w.note, t.note]).join(" ");
-    expect(text.match(/уже в доверенных/g)).toHaveLength(1);
+    expect(text.match(/уже в «моих источниках»/g)).toHaveLength(1);
   });
   it("a button that would add nothing is not shown", () => {
     expect(trustButton({ entry: "path:/x", level: "own", queueId: 4 }).enabled).toBe(false);

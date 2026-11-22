@@ -298,7 +298,7 @@ export interface GuardPort {
   touch(purpose: string, proof: GuardProof): Promise<void>;
   /** The mode of trust by source: weakening it takes a touch (the guard checks), the same or a stricter one does not. */
   setTrustMode(mode: TrustMode, proof?: GuardProof): Promise<TrustMode>;
-  /** "My sources": adding takes a touch (`migrated`: from the old list of trusted repositories); removing does not. */
+  /** "My sources": adding takes a touch (`migrated`: from the old list of repositories that do not taint a thread); removing does not. */
   addSources(entries: string[], proof: GuardProof | undefined, migrated?: boolean): Promise<string[]>;
   removeSource(entry: string): Promise<string[]>;
   /** A challenge for one action; the touch that answers it goes with the command itself. */

@@ -70,7 +70,8 @@ export function SkillRow({ q, registered, rpc, refetch }: { q: SkillQueueView; r
   );
 }
 
-export function SkillTrusted({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void }) {
+/** The sources of skills: registry repositories whose clean skills pass without a code (not «мои источники» of the guard, not the repositories that do not taint a thread). */
+export function SkillSources({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void }) {
   const [pattern, setPattern] = useState("");
   const [code, setCode] = useState("");
   const act = useCodeAction(refetch);
@@ -85,7 +86,7 @@ export function SkillTrusted({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnTy
   return (
     <div className={card}>
       <p>
-        Доверенные источники: репозитории реестра скиллов (<span className="font-mono">owner/repo</span> или <span className="font-mono">owner/*</span>). Скилл, установленный оттуда, чистый по проверкам и не из очереди, принимается без кода. По умолчанию список пуст; менять — только с кодом. Источник определяется по метке рядом со скиллом, которую агент может подделать: проверки при этом всё равно проходят.
+        Источники скиллов: репозитории реестра скиллов (<span className="font-mono">owner/repo</span> или <span className="font-mono">owner/*</span>). Скилл, установленный оттуда, чистый по проверкам и не из очереди, принимается без кода. По умолчанию список пуст; менять — только с кодом. Источник определяется по метке рядом со скиллом, которую агент может подделать: проверки при этом всё равно проходят.
       </p>
       {ov.skills.trusted.length === 0 ? <p className={`mt-2 ${muted}`}>Список пуст: любой новый скилл вне окна «скиллы» ждёт вашего кода.</p> : (
         <ul className="mt-2 space-y-1 font-mono text-xs">
@@ -139,7 +140,7 @@ export function SkillsSection({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnT
           <div className="mt-2 space-y-2">{k.recent.map((q) => <SkillRow key={q.id} q={q} registered={registered} rpc={rpc} refetch={refetch} />)}</div>
         </Fold>
       ) : null}
-      <SkillTrusted ov={ov} rpc={rpc} refetch={refetch} />
+      <SkillSources ov={ov} rpc={rpc} refetch={refetch} />
       <Fold id="skills-blind" className={card} summaryClassName="cursor-pointer font-medium" summary={`Что не видно в скиллах (${k.blind.length})`}>
         <ul className="mt-2 list-disc pl-5">{k.blind.map((b) => <li key={b}>{b}</li>)}</ul>
       </Fold>
