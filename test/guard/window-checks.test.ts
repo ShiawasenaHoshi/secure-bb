@@ -30,7 +30,7 @@ const decideOf = (rootDir: string, pluginId: string, version = "1.0.0") => ({ op
 
 async function setup() {
   const plugins = tmp("sbb-wc-");
-  const g: TestGuard = await startGuard({ trust: {}, pluginAlive: false });
+  const g: TestGuard = await startGuard({ trust: {}, pluginAlive: false, windowContentChecks: true });
   cleanup.push(() => g.close());
   const dir = write(plugins, "p", QUIET);
   const first = await g.send(decideOf(dir, "p"));
@@ -96,6 +96,33 @@ describe("a window at the guard, without the plugin", () => {
     await g.send({ op: "beat" });
     set(`${QUIET}// three\n`);
     expect((await g.send(decideOf(dir, "p", "1.0.3"))).action).toBe("proceed");
+  });
+
+  it("a window bound to a thread, the pulse is there: eval(atob) + fetch is still held by the hard sign, and so is a new right", async () => {
+    const { g, dir, set, noteOf } = await setup();
+    g.guard.openWindow({ pluginId: "p", minutes: 30, scope: "tree", code: g.nextCode() });
+    await g.send({ op: "beat" });
+    set(LOUD);
+    const loud = await g.send(decideOf(dir, "p", "1.0.1"));
+    expect(loud.action).toBe("wait");
+    expect(await noteOf(loud.requestId)).toMatch(/жёсткий флаг/);
+    set(NET);
+    await g.send({ op: "beat" });
+    const net = await g.send(decideOf(dir, "p", "1.0.2"));
+    expect(net.action).toBe("wait");
+    expect(await noteOf(net.requestId)).toMatch(/новое право: .*net/);
+  });
+
+  it("a window bound to a thread, the pulse is there, but there is nothing to compare rights with: held", async () => {
+    const plugins = tmp("sbb-wc-nb-");
+    const g: TestGuard = await startGuard({ trust: {}, pluginAlive: false, windowContentChecks: true });
+    cleanup.push(() => g.close());
+    const dir = write(plugins, "fresh", QUIET);
+    g.guard.openWindow({ pluginId: "fresh", minutes: 30, scope: "tree", code: g.nextCode() });
+    await g.send({ op: "beat" });
+    const r = await g.send(decideOf(dir, "fresh"));
+    expect(r.action).toBe("wait");
+    expect((((await g.send({ op: "state" })).queue as any[]).find((q) => q.id === r.requestId)?.note ?? "") as string).toMatch(/нет одобренной версии/);
   });
 
   it("a window opened before the scope was recorded counts as bound to a thread", async () => {

@@ -5,12 +5,22 @@ import { join } from "node:path";
 import type net from "node:net";
 import { resolvePaths, type GuardPaths } from "../../guard/src/config.ts";
 import { openDb, privateDir } from "../../guard/src/db.ts";
-import { Guard, type AgentsConfig, type TrustConfig } from "../../guard/src/guard.ts";
+import { Guard, WINDOW_PAUSED_NOTE, type AgentsConfig, type TrustConfig } from "../../guard/src/guard.ts";
 import { request } from "../../guard/src/cli.ts";
 import { listen } from "../../guard/src/server.ts";
 import { base32Decode, generateSecret, hotp, stepAt } from "../../guard/src/totp.ts";
 import type { RelyingParty } from "../../guard/src/config.ts";
 import { SoftAuthenticator, type Assertion, type Overrides } from "./authenticator.ts";
+
+/**
+ * Most of the tests of the guard are about what a window DOES with time (slides, freezes, closes) and about the plugin around it, with made-up hashes and
+ * directories that the guard cannot read. For them the guard's own reading of a version (hard signs, new rights, a base to compare with) is switched off and
+ * only the pulse rule stays. That reading is tested on real directories in window-checks.test.ts, plugin-down-effects.test.ts and critical-effects.test.ts
+ * (`windowContentChecks: true`).
+ */
+export function pulseOnlyWindows(guard: Guard): void {
+  (guard as any).windowRefuses = (w: { scope: string }) => (w.scope !== "all" && !guard.pluginAlive() ? { note: WINDOW_PAUSED_NOTE, stop: false } : null);
+}
 
 export class Clock {
   t = 1_800_000_000_000;
@@ -34,13 +44,14 @@ export interface TestGuard {
   close(): Promise<void>;
 }
 
-export async function startGuard(opts: { register?: boolean; serve?: boolean; rp?: RelyingParty; agents?: AgentsConfig; trust?: TrustConfig; /** The secure-bb plugin calls the guard (default): every request is preceded by its pulse. */ pluginAlive?: boolean } = {}): Promise<TestGuard> {
+export async function startGuard(opts: { register?: boolean; serve?: boolean; rp?: RelyingParty; agents?: AgentsConfig; trust?: TrustConfig; /** The secure-bb plugin calls the guard (default): every request is preceded by its pulse. */ pluginAlive?: boolean; /** Keep the guard's own reading of a version in a window (see `pulseOnlyWindows`). */ windowContentChecks?: boolean } = {}): Promise<TestGuard> {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "sbb-guard-")));
   const paths = resolvePaths({ data: dir, socket: join(dir, "run", "guard.sock") });
   privateDir(paths.stateDir);
   const clock = new Clock();
   const db = openDb(paths.db);
   const guard = new Guard({ db, now: clock.now, secretPath: paths.secret, headPath: paths.head, ...(opts.rp ? { rp: opts.rp } : {}), ...(opts.agents ? { agents: opts.agents } : {}), ...(opts.trust ? { trust: opts.trust } : {}) });
+  if (opts.windowContentChecks !== true) pulseOnlyWindows(guard);
   const secret = generateSecret();
   const code = (): string => hotp(base32Decode(secret), stepAt(clock.t));
   if (opts.register !== false) {
@@ -103,6 +114,7 @@ export async function startGuardOnDate(opts: { agents?: AgentsConfig; trust?: Tr
   privateDir(paths.stateDir);
   const db = openDb(paths.db);
   const guard = new GuardClass({ db, now: () => Date.now(), secretPath: paths.secret, headPath: paths.head, ...(opts.agents ? { agents: opts.agents } : {}), ...(opts.trust ? { trust: opts.trust } : {}) });
+  pulseOnlyWindows(guard);
   const secret = generateSecret();
   const code = (): string => hotp(base32Decode(secret), stepAt(Date.now()));
   guard.registerSecret(secret, code());

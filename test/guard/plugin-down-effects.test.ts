@@ -38,7 +38,7 @@ async function measure(): Promise<PluginDownEffects> {
   const settings = join(home, ".claude", "settings.json");
   mkdirSync(join(home, ".claude"), { recursive: true });
   writeFileSync(settings, '{"theme":"dark"}\n');
-  const g: TestGuard = await startGuard({ agents: { home, extraRoots: [] }, trust: {}, pluginAlive: false });
+  const g: TestGuard = await startGuard({ agents: { home, extraRoots: [] }, trust: {}, pluginAlive: false, windowContentChecks: true });
   cleanup.push(() => g.close());
   const scan = (): void => void g.guard.agentsScan({ force: true });
   scan();
@@ -66,7 +66,12 @@ async function measure(): Promise<PluginDownEffects> {
   const loudAll = await g.send(decideOf(own, "everything", { version: "1.0.1" }));
   writeFileSync(join(own, "server.ts"), `${QUIET}// again\n`);
   const quietAll = await g.send(decideOf(own, "everything", { version: "1.0.2" }));
-  const windowAllChecked = loudAll.action === "wait" && quietAll.action === "proceed" && quietAll.via === "window";
+  // …and a thread window with a (possibly forged) pulse is no easier: the same version is held there too
+  g.guard.openWindow({ pluginId: "everything", minutes: 30, scope: "tree", code: g.nextCode() });
+  await g.send({ op: "beat" });
+  writeFileSync(join(own, "server.ts"), `${LOUD}// pulse\n`);
+  const loudPulse = await g.send(decideOf(own, "everything", { version: "1.0.3" }));
+  const windowChecked = loudPulse.action === "wait" && loudAll.action === "wait" && quietAll.action === "proceed" && quietAll.via === "window";
   // …and the guard expires the window by itself
   g.guard.openWindow({ pluginId: "short", minutes: 5, code: g.nextCode() });
   g.clock.advance(6 * 60_000);
@@ -80,7 +85,7 @@ async function measure(): Promise<PluginDownEffects> {
   const st = await g.send({ op: "state" });
   const seen = (g.guard.agentsState() as any).drifts[0]?.class === "critical";
   const guardWatchesAgents = seen && st.windows.length === 0 && st.closedWindows.some((w: any) => w.closedReason === "agents-critical");
-  return { guardHoldsUnknown, guardApprovedStillRun, guardWatchesAgents, guardExpiresWindows, windowPausedWithoutPlugin, windowAllChecked, pageAndConfigWatchAreThePlugins: true };
+  return { guardHoldsUnknown, guardApprovedStillRun, guardWatchesAgents, guardExpiresWindows, windowPausedWithoutPlugin, windowChecked, pageAndConfigWatchAreThePlugins: true };
 }
 
 const ctx = (over: Partial<GapContext> = {}): GapContext => ({ guardModeNow: true, coreHoldsNow: false, configWatch: true, ...over });
@@ -95,7 +100,7 @@ describe("the alarm about a stopped plugin tells the truth about its mode", () =
     const t = gapAlarmText(gap(), ctx());
     expect(t.severity).toBe("critical");
     expect(t.headline).toBe("Страница защиты не работала 13 мин");
-    expect(t.works).toBe("Сторож в это время работал: версии плагинов удерживались и проверялись сторожем, одобренные версии работали, настройки агентов отслеживались, окна доверия по треду стояли (версии по ним не проходили), окна на все версии пропускали только после проверок сторожа.");
+    expect(t.works).toBe("Сторож в это время работал: версии плагинов удерживались и проверялись сторожем, одобренные версии работали, настройки агентов отслеживались, окна доверия по треду стояли (версии по ним не проходили), окна доверия пропускали версию только после проверок сторожа (жёсткие признаки, новые права).");
     expect(t.notWorking).toMatch(/страница, коды и касания/);
     expect(t.notWorking).toMatch(/наблюдение за настройками bb/);
     expect(t.notWorking).not.toMatch(/по окну доверия|без проверок плагина/);
@@ -112,11 +117,11 @@ describe("the alarm about a stopped plugin tells the truth about its mode", () =
   });
 
   it("if the guard ever stopped checking, the text could not claim it did (effects drive the words)", () => {
-    const t = gapAlarmText(gap(), ctx(), { ...PLUGIN_DOWN_EFFECTS, guardHoldsUnknown: false, guardWatchesAgents: false, windowPausedWithoutPlugin: false, windowAllChecked: false });
+    const t = gapAlarmText(gap(), ctx(), { ...PLUGIN_DOWN_EFFECTS, guardHoldsUnknown: false, guardWatchesAgents: false, windowPausedWithoutPlugin: false, windowChecked: false });
     expect(t.works).not.toMatch(/удерживались/);
     expect(t.works).not.toMatch(/агентов/);
     expect(t.works).not.toMatch(/окна доверия/);
-    expect(t.works).not.toMatch(/окна на все версии/);
+    expect(t.works).not.toMatch(/окна доверия пропускали/);
   });
 
   it("without a guard: honest «ничего не удерживается», or what the core did when it waits for the gate", () => {

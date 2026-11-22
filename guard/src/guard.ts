@@ -819,15 +819,13 @@ export class Guard {
   }
 
   /**
-   * An open window lets a version in only if the same things stand that stand when the plugin runs: no hard flag, no right the last approved version
-   * did not have, and the thread scope (which only the plugin knows) held by a plugin that is alive. Null: the window may let it in.
-   * With a live plugin and a thread-bound window the plugin's own hook does 1 and 2 (and withdraws a window approval); a window over "all" has no plugin row
-   * behind it, so the guard does them itself, and so it does whenever the plugin is not alive. What the guard cannot read, it does not let in without the plugin.
+   * An open window lets a version in only if the same stands as when the plugin runs. The pulse decides ONE thing: the thread scope (only the plugin knows
+   * the threads), so a window bound to a thread pauses without it. Whoever reaches the socket can fake a pulse, so everything the guard can read itself it
+   * checks always: the version was read and its hash matched, no hard flag, no right beyond the last approved version and the one the window was opened from.
+   * No base to compare with: held. Null: the window may let it in.
    */
   private windowRefuses(w: WindowRow, req: DecideInput, ev: Evaluation | null): { note: string; stop: boolean } | null {
-    const alive = this.pluginAlive();
-    if (w.scope !== "all" && !alive) return { note: WINDOW_PAUSED_NOTE, stop: false };
-    if (alive && w.scope !== "all") return null;
+    if (w.scope !== "all" && !this.pluginAlive()) return { note: WINDOW_PAUSED_NOTE, stop: false };
     if (ev === null) return { note: "окно: права версии не посчитаны", stop: false };
     if (!ev.ok) return { note: `окно: ${ev.reason}`, stop: false };
     if (ev.hash !== req.contentHash) return { note: "окно: хеш каталога не совпал с хешем из запроса", stop: false };

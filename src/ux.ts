@@ -1857,8 +1857,8 @@ export interface PluginDownEffects {
   guardExpiresWindows: boolean;
   /** A window bound to a thread (tree / thread) lets nothing in while the plugin does not call the guard: only the plugin knows the threads. */
   windowPausedWithoutPlugin: boolean;
-  /** A window over everything lets a version in only after the guard's own checks: no hard sign, no right the approved version did not have. */
-  windowAllChecked: boolean;
+  /** Any window lets a version in only after the guard's own checks, pulse or no pulse (a pulse can be faked): no hard sign, no right the approved version did not have. */
+  windowChecked: boolean;
   /** The page, the form for codes and touches, `bb secure-bb propose` and the config watch (account, instructions, skills, env, built-in plugins) are the plugin's own. */
   pageAndConfigWatchAreThePlugins: boolean;
 }
@@ -1868,7 +1868,7 @@ export const PLUGIN_DOWN_EFFECTS: PluginDownEffects = {
   guardWatchesAgents: true,
   guardExpiresWindows: true,
   windowPausedWithoutPlugin: true,
-  windowAllChecked: true,
+  windowChecked: true,
   pageAndConfigWatchAreThePlugins: true,
 };
 export interface GapLike {
@@ -1934,7 +1934,7 @@ export function gapAlarmText(gap: GapLike, ctx: GapContext, e: PluginDownEffects
   if (e.guardApprovedStillRun) works.push("одобренные версии работали");
   if (e.guardWatchesAgents) works.push("настройки агентов отслеживались");
   if (e.windowPausedWithoutPlugin) works.push("окна доверия по треду стояли (версии по ним не проходили)");
-  if (e.windowAllChecked) works.push("окна на все версии пропускали только после проверок сторожа");
+  if (e.windowChecked) works.push("окна доверия пропускали версию только после проверок сторожа (жёсткие признаки, новые права)");
   const notWorking: string[] = [];
   const opens: string[] = [];
   if (e.pageAndConfigWatchAreThePlugins) notWorking.push("страница, коды и касания (одобрить версию и открыть окно было нельзя), команда `bb secure-bb propose`");
