@@ -4,8 +4,9 @@ import { T } from "../src/text";
 import type { PasskeyAssertion } from "../src/guardlink";
 import { sessionClosedText, sessionEndReason, slideIdle, type SessionCloseReason, sessionBlockText, sessionText } from "../src/ux";
 import { useCodeAction, CodeField, type Rpc } from "./code";
-import { useProof, ProofField, ProofNotes } from "./confirm";
-import { card, btn, btnPrimary, muted, when, Fold, useNow, Msg } from "./ui";
+import { useProof } from "./confirm";
+import { muted, when, useNow, Msg, Tip } from "./ui";
+import { Button } from "../components/ui/button";
 
 // The session token lives ONLY in this component's memory (state): not localStorage, not a cookie, not the URL. Reloading the page
 // forgets it, and so does leaving it. The server keeps only a hash. Routine actions use it instead of a code; dangerous ones never do.
@@ -104,7 +105,10 @@ export function useApprovalSession(rpc: Rpc, refetch: () => void): { approval: A
   return { approval, open, lock, closed };
 }
 
-/** The strip at the top: open a session with one touch (a code, or a key at the guard), or see how long it lasts and lock it. */
+/**
+ * The session of confirmation, small, at the right of the header: «Сессия: закрыта · Открыть» / «открыта ещё 12 мин · Закрыть». «Открыть» goes to the same
+ * confirmation dialog as every other action. When it cannot be opened, the reason is in the hint and in a muted line.
+ */
 export function SessionBar({ ov, rpc, session, open, lock, closed }: { ov: Overview; rpc: Rpc; session: SessionLocal | null; open: (proof: { code?: string; passkey?: PasskeyAssertion }, hour?: boolean) => Promise<void>; lock: () => Promise<void>; closed: SessionCloseReason | null }) {
   const now = useNow();
   const proof = useProof(ov, rpc, "session");
@@ -114,38 +118,44 @@ export function SessionBar({ ov, rpc, session, open, lock, closed }: { ov: Overv
     const left = Math.max(0, Math.ceil((Math.min(session.idleUntil, session.hardUntil) - now) / 60_000));
     const ceiling = Math.max(0, Math.ceil((session.hardUntil - now) / 60_000));
     return (
-      <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted px-3 py-2 text-sm" role="status">
-        <span className="min-w-0 flex-1">Сессия открыта, осталось {left} мин (потолок — через {ceiling} мин; 15-минутная продлевается от каждого действия). Опасное всё равно требует свежего {ov.guard ? "касания" : "кода"}.</span>
-        <button className={btnPrimary} onClick={() => void act.run(() => lock())}>Заблокировать</button>
+      <div className="flex flex-wrap items-center justify-end gap-x-2 text-sm" role="status" id="sbb-session" data-secure-bb-session="open">
+        <Tip tip={`Потолок — через ${ceiling} мин; 15-минутная продлевается от каждого действия. Опасное всё равно требует свежего ${ov.guard ? "касания" : "кода"}.`}>
+          <span className={muted}>Сессия: открыта ещё {left} мин</span>
+        </Tip>
+        <span aria-hidden className={muted}>·</span>
+        <Button size="sm" variant="ghost" disabled={act.busy} onClick={() => void act.run(() => lock())}>Закрыть</Button>
       </div>
     );
   }
   const blockers = ov.sessionBlockers.map((b) => b.id);
   const st = sessionText(ov.guard?.trust?.mode ?? null, ov.guard !== undefined);
   const blocked = ov.guard && proof.pk.has ? false : ov.totp.blockedUntil > 0;
+  const blockReason = blockers.length > 0 ? sessionBlockText(ov.sessionBlockers) : blocked ? `Слишком много неверных кодов: коды заблокированы до ${when(ov.totp.blockedUntil)}.` : null;
+  const detail = [st.line, st.details].filter(Boolean).join(" ");
+  const openWith = (hour: boolean) =>
+    void act.run(async () => {
+      await proof.run({ kind: "session.open", ...(hour ? { hour: true } : {}) }, (p) => open(p as { code?: string; passkey?: PasskeyAssertion }, hour), { what: hour ? "Открыть сессию подтверждения на 1 час" : "Открыть сессию подтверждения на 15 минут", detail });
+    });
   return (
-    <div className={card} id="sbb-session">
-      <h3 className="font-semibold">Сессия подтверждения</h3>
-      {closed ? <p className="mt-1 rounded-md border border-border bg-muted px-2 py-1" role="status" data-secure-bb-session-closed>{sessionClosedText(closed)}</p> : null}
-      <p className={muted}>{st.line}</p>
-      {st.foldDetails ? (
-        <Fold id="session-details" summary="Подробнее" summaryClassName={`cursor-pointer text-xs ${muted}`}><p className={`mt-1 text-xs ${muted}`}>{st.details}</p></Fold>
-      ) : (
-        <p className={`mt-1 text-xs ${muted}`}>{st.details}</p>
-      )}
-      {blockers.length > 0 ? (
-        <p className={`mt-2 rounded-md border border-border bg-muted p-2 ${muted}`} data-secure-bb-session-block>{sessionBlockText(ov.sessionBlockers)}</p>
-      ) : null}
-      <div className="mt-2 flex flex-wrap items-center gap-2">
-        <ProofField proof={proof} />
-        <button className={btn} disabled={act.busy || !proof.ready() || blockers.length > 0 || blocked} onClick={() => void act.run(async () => { await proof.run({ kind: "session.open" }, (p) => open(p as { code?: string; passkey?: PasskeyAssertion })); })}>
-          Открыть на 15 минут
-        </button>
-        <button className={btn} disabled={act.busy || !proof.ready() || blockers.length > 0 || blocked} title="Один час подряд, без продления. Дольше потолка политики сессия не живёт." onClick={() => void act.run(async () => { await proof.run({ kind: "session.open", hour: true }, (p) => open(p as { code?: string; passkey?: PasskeyAssertion }, true)); })}>
-          Открыть на 1 час
-        </button>
+    <div className="flex flex-col items-end gap-1 text-sm" id="sbb-session" data-secure-bb-session="closed">
+      <div className="flex flex-wrap items-center justify-end gap-x-2">
+        <span className={muted}>Сессия: закрыта</span>
+        <span aria-hidden className={muted}>·</span>
+        {blockReason ? (
+          <Tip tip={blockReason}>
+            <Button size="sm" variant="ghost" disabled>Открыть</Button>
+          </Tip>
+        ) : (
+          <>
+            <Button size="sm" variant="ghost" disabled={act.busy} onClick={() => openWith(false)}>Открыть</Button>
+            <Tip tip="Один час подряд, без продления. Дольше потолка политики сессия не живёт.">
+              <Button size="sm" variant="ghost" disabled={act.busy} onClick={() => openWith(true)}>на 1 час</Button>
+            </Tip>
+          </>
+        )}
       </div>
-      <ProofNotes proof={proof} />
+      {blockReason ? <p className={`max-w-xs text-right text-xs ${muted}`} data-secure-bb-session-block>{blockReason}</p> : null}
+      {closed ? <p className={`max-w-xs text-right text-xs ${muted}`} role="status" data-secure-bb-session-closed>{sessionClosedText(closed)}</p> : null}
       <Msg error={act.error} />
     </div>
   );

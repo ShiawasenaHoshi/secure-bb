@@ -17,15 +17,16 @@ function RadioGroup({ value, onValueChange, disabled = false, className, childre
         role="radiogroup"
         className={cn("grid gap-2", className)}
         onKeyDown={(e) => {
-          const items = Array.from(e.currentTarget.querySelectorAll<HTMLButtonElement>('[role="radio"]:not(:disabled)'));
+          const items = Array.from(e.currentTarget.querySelectorAll<HTMLButtonElement>("button[data-secure-bb-radio]:not(:disabled)"));
           const i = items.indexOf(document.activeElement as HTMLButtonElement);
           if (i < 0) return;
           const step = e.key === "ArrowDown" || e.key === "ArrowRight" ? 1 : e.key === "ArrowUp" || e.key === "ArrowLeft" ? -1 : 0;
           if (!step) return;
           e.preventDefault();
           const next = items[(i + step + items.length) % items.length]!;
+          // Chosen through the state, not by pressing it for the person (see tabs.tsx).
           next.focus();
-          next.click();
+          onValueChange(next.dataset.value ?? "");
         }}
         {...props}
       >
@@ -44,6 +45,8 @@ const RadioGroupItem = React.forwardRef<HTMLButtonElement, Omit<React.ButtonHTML
       ref={ref}
       type="button"
       role="radio"
+      data-value={value}
+      data-secure-bb-radio=""
       aria-checked={checked}
       data-state={checked ? "checked" : "unchecked"}
       tabIndex={checked ? 0 : -1}

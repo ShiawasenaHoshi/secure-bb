@@ -34,6 +34,8 @@ export interface ProofOpts {
   what?: string;
   /** One more line under it: what gets more dangerous. */
   detail?: string;
+  /** The guard may say the action needs no touch (it only tightens): then it runs at once, with no dialog. */
+  optional?: boolean;
 }
 
 export interface ProofHook {
@@ -49,6 +51,9 @@ export interface ProofHook {
    */
   run: <T>(query: TouchQuery, call: (proof: AnyProof) => Promise<T>, o?: ProofOpts) => Promise<T>;
 }
+
+/** What the server says when an action needs a code or a touch (the same sentence humanError turns into «Нужен код…»). */
+const NEEDS_PROOF = /a code or a touch is needed|a code is needed|code, or an open session|invalid_code/i;
 
 const pressedLabel = (): string => {
   const el = typeof document !== "undefined" ? (document.activeElement as HTMLElement | null) : null;
@@ -68,6 +73,23 @@ export function useProof(ov: Overview, rpc: Rpc, draftKey?: string): ProofHook {
   const ready: ProofHook["ready"] = () => registered;
   const run: ProofHook["run"] = async (query, call, o = {}) => {
     if (viaSession(o)) return await ap.routine("", (p) => call(p as AnyProof), o.dangerous);
+    if (o.optional) {
+      // An action that may only tighten needs no touch, and then runs at once, with no dialog. The guard says so when asked; without a guard the action itself is tried
+      // with no proof, and only an answer «a code or a touch is needed» (it widens) sends the person to the dialog.
+      let widens = false;
+      if (ov.guard) {
+        const c = await rpc.call("passkey.challenge", query as never).catch(() => null);
+        if (c && !c.needed) return await call({});
+        widens = c !== null && c.needed;
+      }
+      if (!widens) {
+        try {
+          return await call({});
+        } catch (e) {
+          if (!NEEDS_PROOF.test(e instanceof Error ? e.message : String(e))) throw e;
+        }
+      }
+    }
     return (await ask({ what: o.what ?? pressedLabel(), ...(o.detail ? { detail: o.detail } : {}), query, draftKey: key, call: (p) => call(p as AnyProof) })) as Awaited<ReturnType<typeof call>>;
   };
   return { clearDraft: () => drafts.clear(key), pk, registered, ready, run };

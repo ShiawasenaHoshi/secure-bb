@@ -4,11 +4,11 @@ import type { QueueRow } from "../src/store";
 import type { SkillQueueView } from "../src/skills/guard";
 import { canRestore, rejectedAtOf, rejectedByText, cardColor } from "../src/ux";
 import { isMismatch } from "../src/ux";
-import { useApproval, RoutineCode } from "./approval";
 import { awayEventsOf } from "./away";
 import { useCodeAction, type Rpc } from "./code";
 import { useProof, ProofField, ProofNotes } from "./confirm";
-import { Origin, AuthorWhy } from "./review-card";
+import { Origin, AuthorWhy, SourceChip } from "./review-card";
+import { EmptyState } from "../components/ui/empty-state";
 import { card, btn, btnPrimary, muted, cardBlocked, when, Msg, Section } from "./ui";
 
 export function rejectedOf(queue: QueueRow[]): QueueRow[] {
@@ -45,7 +45,8 @@ export function QuarantineRow({ q, ov, rpc, refetch, onTrustPending, onShowCard,
       </div>
       {kept ? <p className="mt-1">Вы решили оставить его здесь: он не запущен и больше не отмечен как нерешённый. <button className={btn} onClick={() => onUnkeep(q)}>Вернуть в «Ждут решения»</button></p> : null}
       <AuthorWhy why={ux?.why} />
-      <Origin ux={ux} q={q} />
+      <SourceChip ux={ux} q={q} />
+      <Origin ux={ux} />
       {red ? (
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <span>Остановлен проверками: вернуть его можно только из карточки, через «Подробности».</span>
@@ -80,9 +81,7 @@ export function QuarantineRow({ q, ov, rpc, refetch, onTrustPending, onShowCard,
 
 export function RemovedSkillRow({ q, ov, rpc, refetch }: { q: SkillQueueView; ov: Overview; rpc: Rpc; refetch: () => void }) {
   const act = useCodeAction(refetch);
-  const ap = useApproval();
-  const [code, setCode] = useState("");
-  const registered = ov.totp.state === "locked" || ov.totp.state === "external";
+  const proof = useProof(ov, rpc, `skill:${q.id}`);
   const block = q.decision === "block";
   return (
     <div className={card}>
@@ -91,10 +90,10 @@ export function RemovedSkillRow({ q, ov, rpc, refetch }: { q: SkillQueueView; ov
         <span className={muted}>удалён · {when(q.firstSeen)}</span>
       </div>
       <p className="mt-1">{block ? "Остановлен проверками. " : ""}{q.reason}</p>
-      {block ? <p className={muted}>Вернуть такой скилл можно только в разделе «Скиллы» вкладки «Подробно».</p> : (
+      {block ? <p className={muted}>Вернуть такой скилл можно только в разделе «Скиллы» вкладки «Журнал».</p> : (
         <div className="mt-2 flex flex-wrap items-center gap-2">
-          <RoutineCode value={code} onChange={setCode} />
-          <button className={btnPrimary} disabled={act.busy || !registered || !ap.ready(code)} onClick={() => void act.run(async () => { const r = await ap.routine(code, (proof) => rpc.call("skills.approve", { id: q.id, ...proof, acknowledgeBlock: false } as never)); setCode(""); return r; })}>
+          <ProofField proof={proof} routine />
+          <button className={btnPrimary} disabled={act.busy || !proof.ready({ routine: true })} onClick={() => void act.run(async () => proof.run({ kind: "touch", purpose: "skills.approve" } as never, (p) => rpc.call("skills.approve", { id: q.id, ...p, acknowledgeBlock: false } as never), { routine: true, what: `Вернуть скилл ${q.name}` }))}>
             Вернуть только эту версию
           </button>
         </div>
@@ -150,7 +149,7 @@ export function QuarantineTab({ ov, rpc, refetch, onTrustPending, onShowCard, is
     <div className="space-y-3">
       <p className={muted}>Здесь то, что стоит на паузе: плагины, которые не запущены, пока вы не решите, и удалённые скиллы. Ничего не потеряно: любую вещь можно вернуть.</p>
       <Section title={`Плагины (${held.length})`} id="sbb-quarantine-plugins">
-        {held.length === 0 ? <div className={`${card} ${muted}`}>В карантине ничего нет.</div> : held.map((q) => <QuarantineRow key={q.id} q={q} ov={ov} rpc={rpc} refetch={refetch} onTrustPending={onTrustPending} onShowCard={onShowCard} kept={isKept(q)} onUnkeep={onUnkeep} />)}
+        {held.length === 0 ? <EmptyState message="В карантине ничего нет" className="py-2" /> : held.map((q) => <QuarantineRow key={q.id} q={q} ov={ov} rpc={rpc} refetch={refetch} onTrustPending={onTrustPending} onShowCard={onShowCard} kept={isKept(q)} onUnkeep={onUnkeep} />)}
       </Section>
       {rejected.length > 0 ? (
         <Section title={`Отклонено вами (${rejected.length})`} id="sbb-quarantine-rejected">
@@ -159,7 +158,7 @@ export function QuarantineTab({ ov, rpc, refetch, onTrustPending, onShowCard, is
         </Section>
       ) : null}
       <Section title={`Удалённые скиллы (${skills.length})`} id="sbb-quarantine-skills">
-        {skills.length === 0 ? <div className={`${card} ${muted}`}>Удалённых скиллов нет.</div> : skills.map((s) => <RemovedSkillRow key={s.id} q={s} ov={ov} rpc={rpc} refetch={refetch} />)}
+        {skills.length === 0 ? <EmptyState message="Удалённых скиллов нет" className="py-2" /> : skills.map((s) => <RemovedSkillRow key={s.id} q={s} ov={ov} rpc={rpc} refetch={refetch} />)}
       </Section>
     </div>
   );

@@ -9,7 +9,9 @@ import { splitNotes, toastPosition, type Box } from "../src/stable-view";
 import { isFoldOpen, toggleFold } from "../src/fold";
 import { press } from "./code";
 import { buttonVariants } from "../components/ui/button";
+import { Accordion } from "../components/ui/accordion";
 import { cn } from "../lib/utils";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/tooltip";
 
 export const card = "rounded-lg border border-border bg-card p-4 text-sm text-card-foreground";
 
@@ -96,6 +98,37 @@ export function Fold({ id, summary, children, defaultOpen = false, className, su
       </summary>
       {children}
     </details>
+  );
+}
+
+/** A hint on hover and on keyboard focus (a disabled button gets none of its own, so the wrapper is a span that takes it). */
+export function Tip({ tip, children, className }: { tip: ReactNode; children: ReactNode; className?: string }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className={cn("inline-flex", className)}>{children}</span>
+      </TooltipTrigger>
+      <TooltipContent>{tip}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+/** The disclosure of the bb look (Accordion) whose state is kept the way Fold's is: by id, outside the component, so a redraw does not close it. */
+export function FoldAccordion({ id, title, children, defaultOpen = false, className }: { id: string; title: ReactNode; children: ReactNode; defaultOpen?: boolean; className?: string }) {
+  const [, redraw] = useReducer((n: number) => n + 1, 0);
+  return (
+    <Accordion
+      id={`fold-${id}`}
+      className={className}
+      title={title}
+      open={isFoldOpen(id, defaultOpen)}
+      onOpenChange={() => {
+        toggleFold(id, defaultOpen);
+        redraw();
+      }}
+    >
+      {children}
+    </Accordion>
   );
 }
 

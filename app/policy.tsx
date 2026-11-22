@@ -4,7 +4,8 @@ import type { SecureBbRpc } from "../server";
 import type { Overview } from "../src/overview";
 import { T } from "../src/text";
 import { buildPolicyChange, buildPolicySetInput, buildPolicyTouchQuery } from "../src/rpc-input";
-import { useCodeAction, CodeField, usePasskey, TouchNote, touchFor } from "./code";
+import { useCodeAction, CodeField } from "./code";
+import { useProof, ProofField } from "./confirm";
 import { card, btn, btnPrimary, input, muted, Msg } from "./ui";
 
 export function PolicyCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void }) {
@@ -18,10 +19,8 @@ export function PolicyCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType
   const [cfgMode, setCfgMode] = useState<"sliding" | "fixed">(p.cfgMode);
   const [autoSafe, setAutoSafe] = useState(p.autoSafe);
   const [flowDowngrade, setFlowDowngrade] = useState(p.flowDowngrade);
-  const [code, setCode] = useState("");
   const act = useCodeAction(refetch);
-  const pk = usePasskey(ov);
-  const [touching, setTouching] = useState<string | null>(null);
+  const proof = useProof(ov, rpc, "policy");
   useEffect(() => {
     setAutoSafe(p.autoSafe);
     setFlowDowngrade(p.flowDowngrade);
@@ -86,29 +85,22 @@ export function PolicyCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType
         </>
       )}
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        {pk.has ? <span className={muted}>касание или код:</span> : null}
-        {pk.keyOnly ? null : <CodeField value={code} onChange={setCode} />}
         <button
           className={btnPrimary}
-          disabled={act.busy || (pk.has && pk.problem !== null && pk.keyOnly)}
+          disabled={act.busy || !proof.registered}
           onClick={() =>
             void act.run(async () => {
               // Guard mode has no "safe class passes": autoSafe is not sent there (bb rejects undefined fields in an RPC input).
               const change = buildPolicyChange({ autoSafe: ov.guard ? undefined : autoSafe, windowMin, capMin, mode, scope, cfgWindowMin, cfgCapMin, cfgMode, flowDowngrade });
-              // With a key and no code typed: the touch (if the change widens anything; a narrowing needs none).
-              const t = pk.has && code.length !== 6 ? await touchFor(rpc, buildPolicyTouchQuery(change), (d) => setTouching(`Подтвердите касанием. Сторож: «${d}»`)) : null;
-              await rpc.call("policy.set", buildPolicySetInput(change, t ? { passkey: t.passkey } : code.length === 6 ? { code } : {}) as never);
-              setCode("");
-              setTouching(null);
-              return t ? { note: `Сохранено касанием. Сторож описал действие так: «${t.description}».` } : undefined;
+              // A narrowing needs no touch and is saved at once; what widens anything goes through the confirmation dialog.
+              await proof.run(buildPolicyTouchQuery(change), (pr) => rpc.call("policy.set", buildPolicySetInput(change, pr) as never), { optional: true, what: "Сохранить настройки окон доверия", detail: "Расширение окон или потолка, скользящее окно, охват «всё дерево» делают защиту слабее." });
             })
           }
         >
-          {pk.has && code.length !== 6 ? "Сохранить (касанием, если расширяет)" : "Сохранить"}
+          Сохранить
         </button>
+        <ProofField proof={proof} />
       </div>
-      {pk.has && pk.problem ? <p className="mt-1 text-destructive">{pk.problem}</p> : null}
-      <TouchNote text={touching} />
       <Msg error={act.error} ok={act.ok} />
     </div>
   );

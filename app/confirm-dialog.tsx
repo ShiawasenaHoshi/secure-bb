@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import type { ComponentType, ReactNode } from "react";
 import type { Overview } from "../src/overview";
 import type { PasskeyAssertion } from "../src/guardlink";
 import { humanError, proofHint } from "../src/ux";
@@ -43,7 +43,8 @@ interface Pending {
 }
 
 /** Holds the one dialog of the page: every action that needs a touch or a code asks it. */
-export function ConfirmHost({ ov, rpc, children }: { ov: Overview; rpc: Rpc; children: ReactNode }) {
+/** `Shell` is what the panel is drawn in: the dialog (a test may draw it bare). */
+export function ConfirmHost({ ov, rpc, children, Shell = ConfirmDialog }: { ov: Overview; rpc: Rpc; children: ReactNode; Shell?: ComponentType<PanelProps> }) {
   const [pending, setPending] = useState<Pending | null>(null);
   const ref = useRef<Pending | null>(null);
   ref.current = pending;
@@ -65,12 +66,28 @@ export function ConfirmHost({ ov, rpc, children }: { ov: Overview; rpc: Rpc; chi
   return (
     <ConfirmContext.Provider value={ask}>
       {children}
-      {pending ? <ConfirmDialog key={`${pending.req.draftKey}:${pending.req.what}`} ov={ov} rpc={rpc} req={pending.req} onDone={(v) => finish("done", v)} onCancel={() => finish("cancel")} /> : null}
+      {pending ? <Shell key={`${pending.req.draftKey}:${pending.req.what}`} ov={ov} rpc={rpc} req={pending.req} onDone={(v) => finish("done", v)} onCancel={() => finish("cancel")} /> : null}
     </ConfirmContext.Provider>
   );
 }
 
-export function ConfirmDialog({ ov, rpc, req, onDone, onCancel }: { ov: Overview; rpc: Rpc; req: ConfirmRequest; onDone: (v: unknown) => void; onCancel: () => void }) {
+export interface PanelProps {
+  ov: Overview;
+  rpc: Rpc;
+  req: ConfirmRequest;
+  onDone: (v: unknown) => void;
+  onCancel: () => void;
+}
+
+/** The dialog's own parts, so that the panel can be drawn (and tested) without the dialog around it. */
+export interface PanelParts {
+  Title: ComponentType<{ className?: string; children: ReactNode }>;
+  Description: ComponentType<{ children: ReactNode }>;
+}
+
+/** What the dialog says and does: the action, the touch button, the code cells, the error under them. */
+export function ConfirmPanel({ ov, rpc, req, onDone, onCancel, parts }: PanelProps & { parts: PanelParts }) {
+  const { Title, Description } = parts;
   const pk = usePasskey(ov);
   const [code, setCodeState] = useState<string>(() => drafts.get(req.draftKey));
   const [busy, setBusy] = useState(false);
@@ -114,39 +131,49 @@ export function ConfirmDialog({ ov, rpc, req, onDone, onCancel }: { ov: Overview
     }, false);
   const sendCode = (v: string) => void submit(async () => ({ code: v }), true);
   return (
-    <Dialog open onOpenChange={(o) => (!o && !busy ? onCancel() : undefined)}>
+    <>
+      <DialogHeader>
+        <Title className="flex items-center gap-2">
+          <Icon name="Shield" aria-hidden="true" className="size-5 shrink-0" />
+          <span data-secure-bb-confirm-what>{req.what}</span>
+        </Title>
+        <Description>{req.detail ?? "Это действие требует подтверждения."}</Description>
+      </DialogHeader>
+      <div className="space-y-4">
+        {pk.has ? (
+          <div className="space-y-2">
+            <Button className="w-full" disabled={busy} onClick={touch}>
+              Приложить палец / ключ
+            </Button>
+            {pk.problem ? <p className="text-sm text-destructive">{pk.problem}</p> : null}
+            {touching ? <p className="text-sm text-muted-foreground" role="status">{touching}</p> : null}
+          </div>
+        ) : null}
+        {pk.keyOnly ? null : (
+          <div className="space-y-2">
+            {pk.has ? <p className="text-sm text-muted-foreground">или код из приложения</p> : <p className="text-sm text-muted-foreground">Код из приложения на телефоне</p>}
+            <InputOTP value={code} onChange={setCode} onComplete={sendCode} disabled={busy} invalid={error !== null} autoFocus={!pk.has} />
+          </div>
+        )}
+        <p className="text-xs text-muted-foreground">{proofHint({ hasKey: pk.has, keyOnly: pk.keyOnly })}</p>
+        <p className="min-h-5 text-sm text-destructive" role="alert" data-secure-bb-confirm-error>{error}</p>
+      </div>
+      <DialogFooter>
+        <Button variant="ghost" disabled={busy} onClick={onCancel}>
+          Отмена
+        </Button>
+      </DialogFooter>
+    </>
+  );
+}
+
+const DIALOG_PARTS: PanelParts = { Title: DialogTitle, Description: DialogDescription };
+
+export function ConfirmDialog(props: PanelProps) {
+  return (
+    <Dialog open onOpenChange={(o) => (!o ? props.onCancel() : undefined)}>
       <DialogContent data-secure-bb-confirm>
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <Icon name="Shield" aria-hidden="true" className="size-5 shrink-0" />
-            <span data-secure-bb-confirm-what>{req.what}</span>
-          </DialogTitle>
-          <DialogDescription>{req.detail ?? "Это действие требует подтверждения."}</DialogDescription>
-        </DialogHeader>
-        <div className="space-y-4">
-          {pk.has ? (
-            <div className="space-y-2">
-              <Button className="w-full" disabled={busy} onClick={touch}>
-                Приложить палец / ключ
-              </Button>
-              {pk.problem ? <p className="text-sm text-destructive">{pk.problem}</p> : null}
-              {touching ? <p className="text-sm text-muted-foreground" role="status">{touching}</p> : null}
-            </div>
-          ) : null}
-          {pk.keyOnly ? null : (
-            <div className="space-y-2">
-              {pk.has ? <p className="text-sm text-muted-foreground">или код из приложения</p> : <p className="text-sm text-muted-foreground">Код из приложения на телефоне</p>}
-              <InputOTP value={code} onChange={setCode} onComplete={sendCode} disabled={busy} invalid={error !== null} autoFocus={!pk.has} />
-            </div>
-          )}
-          <p className="text-xs text-muted-foreground">{proofHint({ hasKey: pk.has, keyOnly: pk.keyOnly })}</p>
-          <p className="min-h-5 text-sm text-destructive" role="alert" data-secure-bb-confirm-error>{error}</p>
-        </div>
-        <DialogFooter>
-          <Button variant="ghost" disabled={busy} onClick={onCancel}>
-            Отмена
-          </Button>
-        </DialogFooter>
+        <ConfirmPanel {...props} parts={DIALOG_PARTS} />
       </DialogContent>
     </Dialog>
   );

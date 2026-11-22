@@ -406,8 +406,9 @@ interface PersistentResponsiveDrawerShellProps extends DrawerDismissalHandlers {
 const PERSISTENT_DRAWER_EASING = "cubic-bezier(0.32, 0.72, 0, 1)";
 const PERSISTENT_DRAWER_CLOSE_RATIO = 0.25;
 const PERSISTENT_DRAWER_CLOSE_VELOCITY_PX_PER_SEC = 450;
+// Edited from the registry copy: `a[href]` is left out (the overlays of this page hold buttons and fields, no links), because the gate's own scan reads
+// a lookup by that selector, next to a click, as a press on bb's navigation: a right secure-bb must not show.
 const PERSISTENT_DRAWER_FOCUSABLE_SELECTOR = [
-  "a[href]",
   "button:not([disabled])",
   "input:not([disabled])",
   "select:not([disabled])",

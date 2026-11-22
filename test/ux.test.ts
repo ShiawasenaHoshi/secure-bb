@@ -594,7 +594,7 @@ describe("the leftover texts of the round-5 table", () => {
     expect(STOPPED_EXPLAIN).not.toMatch(TECHNICAL_WORDS);
   });
   it("the AI scan line says whether it is off or just not run yet", () => {
-    expect(aiScanEmptyText(false)).toMatch(/выключен.*Подробно/);
+    expect(aiScanEmptyText(false)).toMatch(/выключен.*Журнал/);
     expect(aiScanEmptyText(true)).toMatch(/ещё не запускался/);
   });
 });

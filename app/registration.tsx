@@ -7,7 +7,7 @@ import { T } from "../src/text";
 import { useCodeAction, CodeField } from "./code";
 import { card, btnPrimary, muted, Fold, Msg } from "./ui";
 
-export const dot: Record<string, string> = { ok: "bg-foreground", warn: "bg-muted-foreground", bad: "bg-destructive", unknown: "bg-gray-400" };
+export const dot: Record<string, string> = { ok: "bg-foreground", warn: "bg-muted-foreground", bad: "bg-destructive", unknown: "bg-border" };
 
 export function StageCard({ ov }: { ov: Overview }) {
   const a = ov.assessment;

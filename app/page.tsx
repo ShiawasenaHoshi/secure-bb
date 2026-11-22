@@ -4,7 +4,7 @@ import type { SecureBbRpc } from "../server";
 import type { QueueRow } from "../src/store";
 import { AWAY_KEY, DEFERRED_KEY, cardKey, KEPT_KEY, MODE_NAMES, WIZARD_KEY, awaySince, cardColor, deferKey, detailLevel, pageStatus, STOPPED_EXPLAIN, FREQ_KEY, FREQ_OFF_KEY, approvalEventsOf, parseFreqAt, pickFrequent, alarmCount, parseDeferred, wizardNeeded, GUARD_DOWN_TEXT, agentsSectionTab, decisionOf, launchProblem, moreVersionsText, planCards, trustButton, windowAvailability } from "../src/ux";
 import { makeStub, stableOrder, layoutItems, type Stub } from "../src/ux";
-import { countsLine, DEFER_STUB_RESTORE, dropUnstamped, makeDeferStub, pageCounts, stampMark, withoutMark } from "../src/ux";
+import { DEFER_STUB_RESTORE, dropUnstamped, makeDeferStub, pageCounts, stampMark, withoutMark } from "../src/ux";
 import { emptySnapshot, makeNote, restoreView, snapshotView, type ViewSnapshot } from "../src/stable-view";
 import { openFold } from "../src/fold";
 import type { ProblemRef, TabId } from "../src/ux";
@@ -15,7 +15,8 @@ import { BatchCard } from "./batch";
 import { press, enrollTokenOnce } from "./code";
 import { lsGet, lsSet } from "./confirm";
 import { GuardAlarm, GuardCard, MigrationCard } from "./guard";
-import { TroubleshootBar, StatusBar } from "./header";
+import { TroubleshootBar, StatusHeader } from "./header";
+import { ConfirmHost } from "./confirm-dialog";
 import { TaintCard, LogCard } from "./journal";
 import { PluginRow } from "./plugins";
 import { PolicyCard, TrustedRepos } from "./policy";
@@ -28,7 +29,14 @@ import { PublishCard, AiCard } from "./scan";
 import { SentinelSection } from "./sentinel";
 import { SkillsSection } from "./skills";
 import { ExceptionsTab } from "./trust";
-import { card, btn, muted, cardBlocked, when, useOverview, Fold, Section, type Note, type AnnounceOpts, DoneContext, AnchoredNotes, PinnedNotes, DONE_MS } from "./ui";
+import { card, muted, cardBlocked, when, useOverview, Fold, FoldAccordion, Section, type Note, type AnnounceOpts, DoneContext, AnchoredNotes, PinnedNotes, DONE_MS } from "./ui";
+import { headerLine, splitAlarms } from "../src/pageview";
+import { Badge } from "../components/ui/badge";
+import { Button } from "../components/ui/button";
+import { Card } from "../components/ui/card";
+import { EmptyState } from "../components/ui/empty-state";
+import { TooltipProvider } from "../components/ui/tooltip";
+import { Tabs, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { WatchSection } from "./watch";
 import { WindowRows, JournalAlarm, gapsBySeverity, AliveAlarm } from "./windows";
 import { Wizard } from "./wizard";
@@ -43,7 +51,10 @@ export function usePagePing(rpc: ReturnType<typeof useRpc<SecureBbRpc>>) {
   }, [rpc]);
 }
 
-export const TAB_LABEL: Record<TabId, string> = { status: "Статус", quarantine: "Карантин", trust: "Исключения и доверие", more: "Подробно" };
+/** What a place gets for a moment when «Показать» takes the person to it: the theme's ring. */
+const FLASH = ["ring-2", "ring-ring", "ring-offset-2", "ring-offset-background", "rounded-lg"];
+
+export const TAB_LABEL: Record<TabId, string> = { status: "Обзор", quarantine: "Карантин", trust: "Доверие и исключения", more: "Журнал" };
 
 export function GatePage() {
   const { rpc, data: ov, error, refetch } = useOverview();
@@ -101,8 +112,8 @@ export function GatePage() {
       el.scrollIntoView({ block: "start" });
       // The jump is the person's own («Показать»): remembered at once, so that it is not taken for a draw's.
       rememberView();
-      el.classList.add("sbb-flash");
-      window.setTimeout(() => el.classList.remove("sbb-flash"), 1800);
+      el.classList.add(...FLASH);
+      window.setTimeout(() => el.classList.remove(...FLASH), 1800);
       setFocus(null);
     }
   }, [focus, tab, ov]);
@@ -186,7 +197,7 @@ export function GatePage() {
   if (ov.guard?.connected && ov.guard.journal && !ov.guard.journal.valid) alarms.push({ anchor: "sbb-guard-alarm", tab: "status", text: "Журнал сторожа нарушен" });
   const agentsCritical = (ov.agents?.state?.drifts ?? []).filter((d) => d.class === "critical" && !d.initial).length;
   const agentsAlarms = (ov.agents?.state?.alarms ?? []).length;
-  // While something critical or an alarm waits, the section is on «Статус» (the banner leads to it); otherwise it stays in «Подробно».
+  // While something critical or an alarm waits, the section is on «Статус» (the banner leads to it); otherwise it stays in «Журнал».
   const agentsTab = agentsSectionTab({ critical: agentsCritical, alarms: agentsAlarms });
   if (ov.agents && (agentsAlarms > 0 || agentsCritical > 0)) alarms.push({ anchor: "sbb-agents", tab: agentsTab, text: `Настройки агентов: ${[agentsCritical > 0 ? `критичных изменений — ${agentsCritical}` : "", agentsAlarms > 0 ? `файлов не прочитать — ${agentsAlarms}` : ""].filter(Boolean).join(", ")}`, weight: agentsCritical + agentsAlarms });
   if (ov.watch.drifts.some((d) => d.status === "open" || d.status === "rollback-failed")) alarms.push({ anchor: "sbb-watch", tab: "more", text: "Настройки bb изменились" });
@@ -228,58 +239,61 @@ export function GatePage() {
     </div>
   );
   const agentsSection = ov.agents ? <Section id="sbb-agents" title={`Агенты: конфигурации и память${agentsAlarms > 0 || agentsCritical > 0 ? " (!)" : (ov.agents.state?.openTotal ?? 0) > 0 ? ` (${ov.agents.state?.openTotal})` : ""}`}><AgentsSection ov={ov} rpc={rpc} refetch={refetch} showDone={agentsTab !== "status"} /></Section> : null;
-  const tabCount: Record<TabId, string> = { status: status.count > 0 ? ` (${status.count})` : "", quarantine: counts.quarantine > 0 ? ` (${counts.quarantine})` : "", trust: "", more: "" };
+  const tabCount: Record<TabId, number> = { status: status.count, quarantine: counts.quarantine, trust: 0, more: 0 };
   // What the person has answered or put aside is not «waiting» any more: «Пока вас не было» does not repeat it.
   const keptIds = new Set([...plan.kept.map((q) => q.id), ...plan.later.flatMap((c) => c.all.map((q) => q.id))]);
+  const header = headerLine({ status, waiting: counts.waiting, deferred: counts.deferred, alarms });
+  const { calm: calmAlarms } = splitAlarms(alarms);
+  const headerMore = guardDown ? GUARD_DOWN_TEXT : status.level === "stopped" ? STOPPED_EXPLAIN : null;
   return (
     <DoneContext.Provider value={doneCtx}>
     <ApprovalContext.Provider value={approval}>
+    <TooltipProvider delayDuration={200}>
+    <ConfirmHost ov={ov} rpc={rpc}>
     <div className="h-full overflow-y-auto" ref={scrollRef} onScroll={rememberView} onFocusCapture={rememberView} onKeyUp={rememberView} onPointerUp={rememberView}>
       <AnchoredNotes />
-      <style>{".sbb-flash{outline:3px solid #eab308;outline-offset:3px;border-radius:0.5rem}"}</style>
       <div className="mx-auto max-w-3xl space-y-6 p-4 sm:p-6">
         <h1 className="text-xl font-semibold">secure-bb</h1>
         <PinnedNotes />
         <TroubleshootBar until={ov.guard?.troubleshootUntil ?? 0} />
-        <StatusBar level={status.level} label={status.label} text={guardDown ? GUARD_DOWN_TEXT : status.first ? `Сначала: ${status.first.text}.${status.level === "stopped" ? ` ${STOPPED_EXPLAIN}` : ""}` : "Всё, что нужно решить, решено."} onShow={status.first ? () => showProblem(status.first!) : null} />
-        {countsLine(counts) ? <p className={`-mt-4 text-xs ${muted}`} data-secure-bb-counts>{countsLine(counts)}</p> : null}
-        <div role="tablist" className="flex flex-wrap gap-1 border-b border-border">
-          {(["status", "quarantine", "trust", "more"] as const).map((t) => (
-            <button key={t} role="tab" aria-selected={tab === t} className={`rounded-t-md px-3 py-1.5 text-sm font-medium ${tab === t ? "border border-b-0 border-border bg-card" : "text-muted-foreground hover:bg-muted"}`} onClick={() => setTab(t)}>
-              {TAB_LABEL[t]}{tabCount[t]}
-            </button>
-          ))}
-        </div>
+        <Tabs value={tab} onValueChange={(v) => setTab(v as TabId)}>
+          <TabsList aria-label="Разделы secure-bb">
+            {(["status", "quarantine", "trust", "more"] as const).map((t) => (
+              <TabsTrigger key={t} value={t}>
+                {TAB_LABEL[t]}
+                {tabCount[t] > 0 ? <Badge variant="secondary" className="px-1.5 py-0">{tabCount[t]}</Badge> : null}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+        </Tabs>
         {tab === "status" ? (
-          <div className="space-y-4">
+          <div className="space-y-6">
             {!wizardDone && wizardNeeded({ hasTrust: ov.guard?.trust != null, mySources: ov.guard?.trust?.mySources.length ?? 0, done: false }) ? <Wizard ov={ov} rpc={rpc} refetch={refetch} onClose={closeWizard} /> : null}
-            <PendingTrust entries={pending} ov={ov} rpc={rpc} refetch={refetch} onDone={(e) => setPending((p) => p.filter((x) => x.entry !== e))} />
-            <AwayCard ov={ov} since={since} onSeen={seen} canReview={status.first !== null} onReview={() => status.first && showProblem(status.first)} kept={keptIds} alarms={alarms} onShowAlarm={showProblem} />
-            <SkillsLine ov={ov} onOpen={() => showProblem({ anchor: "sbb-skills", tab: "more", text: "" })} />
-            <SessionBar ov={ov} rpc={rpc} session={approval.session} open={open} lock={lock} closed={sessionClosed} />
+            <StatusHeader line={header} more={headerMore} onAction={header.target ? () => showProblem(header.target!) : null} session={<SessionBar ov={ov} rpc={rpc} session={approval.session} open={open} lock={lock} closed={sessionClosed} />} />
             {ov.totp.blockedUntil > 0 ? (
-              <p className="rounded-md border border-destructive p-2 text-destructive">Слишком много неверных кодов: коды заблокированы до {when(ov.totp.blockedUntil)}.{(ov.guard?.passkey?.keys.length ?? 0) > 0 ? " Касание ключом работает: подпись не подобрать, поэтому её это не касается." : ""}</p>
+              <p className="rounded-md border border-destructive p-2 text-sm text-destructive">Слишком много неверных кодов: коды заблокированы до {when(ov.totp.blockedUntil)}.{(ov.guard?.passkey?.keys.length ?? 0) > 0 ? " Касание ключом работает: подпись не подобрать, поэтому её это не касается." : ""}</p>
             ) : null}
-            <div id="sbb-alarms" className="space-y-2">
+            <PendingTrust entries={pending} ov={ov} rpc={rpc} refetch={refetch} onDone={(e) => setPending((p) => p.filter((x) => x.entry !== e))} />
+            <div id="sbb-alarms" className="space-y-2 empty:hidden">
               <JournalAlarm ov={ov} rpc={rpc} refetch={refetch} />
               <AliveAlarm ov={ov} />
             </div>
-            <div id="sbb-guard-alarm"><GuardAlarm ov={ov} /></div>
+            <div id="sbb-guard-alarm" className="empty:hidden"><GuardAlarm ov={ov} /></div>
             <AgentsAlarm ov={ov} onShow={() => showProblem({ anchor: "sbb-agents", tab: agentsTab, text: "" })} />
             <WindowRows windows={ov.windows} cfgWindows={ov.watch.windows} rpc={rpc} refetch={refetch} />
             <Section title={`Ждут решения вас${counts.waiting > 0 ? ` (${counts.waiting})` : ""}`}>
-              {activeItems.length === 0 ? <div className={`${card} ${muted}`}>Сейчас решать нечего.</div> : activeItems.map((it) => {
+              {activeItems.length === 0 ? <EmptyState message="Сейчас решать нечего — всё под защитой" className="py-2" /> : activeItems.map((it) => {
                 if (it.stub) {
                   const st = it.stub;
                   return (
-                    <div key={`stub:${st.key}`} className="flex items-center justify-between gap-2 rounded-lg border-2 border-green-600/50 bg-green-50 p-4 text-sm font-semibold text-green-900 dark:bg-green-950/40 dark:text-green-100" style={{ minHeight: st.height }} data-secure-bb-stub>
+                    <Card key={`stub:${st.key}`} className="flex items-center justify-between gap-2 border-dashed p-4 text-sm font-medium" style={{ minHeight: st.height }} data-secure-bb-stub>
                       <span>{st.text}</span>
                       {st.restore ? (
-                        <button type="button" className={btn} onClick={() => { const r = st.restore!; const e = heldAll.find((x) => x.id === r.id); if (e) onDefer(e, false); else setStubs((l) => l.filter((x) => x.key !== st.key)); }}>{DEFER_STUB_RESTORE}</button>
+                        <Button size="sm" variant="outline" onClick={() => { const r = st.restore!; const e = heldAll.find((x) => x.id === r.id); if (e) onDefer(e, false); else setStubs((l) => l.filter((x) => x.key !== st.key)); }}>{DEFER_STUB_RESTORE}</Button>
                       ) : (
-                        <button type="button" className={btn} onClick={() => setStubs((l) => l.filter((x) => x.key !== st.key))}>Скрыть</button>
+                        <Button size="sm" variant="outline" onClick={() => setStubs((l) => l.filter((x) => x.key !== st.key))}>Скрыть</Button>
                       )}
-                    </div>
+                    </Card>
                   );
                 }
                 const c = plan.active.find((x) => x.pluginId === it.key)!;
@@ -287,11 +301,13 @@ export function GatePage() {
               })}
             </Section>
             {plan.later.length > 0 ? (
-              <Fold id="deferred" summaryClassName="cursor-pointer font-semibold" summary={`Отложено (${counts.deferred})`}>
-                <p className={`mt-1 text-xs ${muted}`}>Вы отложили эти карточки кнопкой «Решить позже». Плагины остаются в карантине и не запущены.</p>
-                <div className="mt-2 space-y-2">{laterOrder.order.map((k) => plan.later.find((c) => c.pluginId === k)).filter((c): c is NonNullable<typeof c> => c !== undefined).map((c) => renderCard(c, true))}</div>
-              </Fold>
+              <FoldAccordion id="deferred" title={`Отложено (${counts.deferred})`}>
+                <p className={`text-xs ${muted}`}>Вы отложили эти карточки кнопкой «Решить позже». Плагины остаются в карантине и не запущены.</p>
+                <div className="mt-2 space-y-3">{laterOrder.order.map((k) => plan.later.find((c) => c.pluginId === k)).filter((c): c is NonNullable<typeof c> => c !== undefined).map((c) => renderCard(c, true))}</div>
+              </FoldAccordion>
             ) : null}
+            <AwayCard ov={ov} since={since} onSeen={seen} kept={keptIds} calmAlarms={calmAlarms} onShowAlarm={showProblem} />
+            <SkillsLine ov={ov} onOpen={() => showProblem({ anchor: "sbb-skills", tab: "more", text: "" })} />
             <ProtectedSection ov={ov} waiting={new Set(plan.active.map((c) => c.pluginId))} />
             {plan.kept.length > 0 ? <p className={`text-xs ${muted}`}>Оставлено вами в карантине: {plan.kept.map((q) => `${q.pluginId} ${q.version}`).join(", ")}. Они не запущены; вернуть решение можно на вкладке «Карантин».</p> : null}
             {launchFailed.length > 0 ? (
@@ -337,6 +353,8 @@ export function GatePage() {
         ) : null}
       </div>
     </div>
+    </ConfirmHost>
+    </TooltipProvider>
     </ApprovalContext.Provider>
     </DoneContext.Provider>
   );
