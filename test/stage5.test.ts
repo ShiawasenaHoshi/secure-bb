@@ -3,11 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { beforeEach, describe, expect, it } from "vitest";
-import { Gate, GateError, type HookCtx, UNSAFE_DIR_REASON } from "../src/gate.js";
+import { Gate, type HookCtx, UNSAFE_DIR_REASON } from "../src/gate.js";
+import { GateError } from "../src/errors.js";
 import { agentLine, fileAnchor, GENESIS, entryHash } from "../src/journal.js";
 import { agentStatusDetail } from "../src/propose.js";
 import { MIGRATIONS, Store } from "../src/store.js";
-import { base32Decode, hotp, stepAt } from "../src/totp.js";
+import { base32Decode, hotp, stepAt } from "../guard/src/totp.ts";
 import { writableByOthers, serverIds, type PermIssue } from "../src/perms.js";
 import { NETWORKED, CLEAN, withFindings } from "./support/checks.js";
 

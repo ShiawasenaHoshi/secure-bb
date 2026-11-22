@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
-import { encodeQr } from "../src/qr.js";
+import { encodeQr } from "../guard/src/qr.ts";
 
 function reference(text: string): boolean[][] | null {
   try {

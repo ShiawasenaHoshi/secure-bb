@@ -7,7 +7,7 @@ import { SkillReader } from "../../src/skills/reader.js";
 import { SkillStore } from "../../src/skills/store.js";
 import type { SkillFileSource, SkillRef } from "../../src/skills/types.js";
 import { MIGRATIONS, Store } from "../../src/store.js";
-import { base32Decode, hotp, stepAt } from "../../src/totp.js";
+import { base32Decode, hotp, stepAt } from "../../guard/src/totp.ts";
 import type { SkillLite } from "../../src/watch/collect.js";
 import { Watchdog } from "../../src/watch/watchdog.js";
 import { NETWORKED } from "./checks.js";

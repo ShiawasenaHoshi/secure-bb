@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { Gate, GateError } from "../src/gate.js";
+import { Gate } from "../src/gate.js";
+import { GateError } from "../src/errors.js";
 import { propose } from "../src/propose.js";
 import { Publisher } from "../src/publish/publisher.js";
 import { PUBLISH_TOKEN_FILE_ENV } from "../src/publish/types.js";
@@ -14,7 +15,7 @@ import { checkBranch, checkRepoUrl } from "../src/publish/validate.js";
 import { runProcess } from "../src/scan/process.js";
 import type { CommandSpec, ProcessRunner } from "../src/scan/commands.js";
 import { MIGRATIONS, Store } from "../src/store.js";
-import { base32Decode, hotp, stepAt } from "../src/totp.js";
+import { base32Decode, hotp, stepAt } from "../guard/src/totp.ts";
 import { hashTree } from "../src/tree.js";
 import { NETWORKED } from "./support/checks.js";
 

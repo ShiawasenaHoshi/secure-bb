@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { CheckResult } from "../../src/checks/index.js";
 import { Gate, type HookCtx } from "../../src/gate.js";
 import { MIGRATIONS, Store } from "../../src/store.js";
-import { base32Decode, hotp, stepAt } from "../../src/totp.js";
+import { base32Decode, hotp, stepAt } from "../../guard/src/totp.ts";
 import { hashTree } from "../../src/tree.js";
 import { capabilityTokens, rightsOf, windowAllows } from "../../guard/src/trust.ts";
 import { CLEAN, withFindings } from "../support/checks.js";

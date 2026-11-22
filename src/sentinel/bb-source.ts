@@ -1,6 +1,6 @@
 // The sentinel's window onto bb: real SDK calls only (`threads.events.list`, `threads.interactions.get`).
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
-import type { ThreadTree } from "../gate.js";
+import type { ThreadTree } from "../thread-tree.js";
 import { humanTaskFromEvents, pendingActionFromEvents } from "./state.js";
 import type { SentinelSource } from "./sentinel.js";
 

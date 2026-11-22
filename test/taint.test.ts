@@ -9,7 +9,7 @@ import { MIGRATIONS, Store } from "../src/store.js";
 import { classifyEvent, classifyItem, NOT_OBSERVED } from "../src/taint/classify.js";
 import { ENV_SETUP_SEQ, TaintMonitor, type TaintSource } from "../src/taint/monitor.js";
 import { Watchdog } from "../src/watch/watchdog.js";
-import { base32Decode, hotp, stepAt } from "../src/totp.js";
+import { base32Decode, hotp, stepAt } from "../guard/src/totp.ts";
 import { NETWORKED } from "./support/checks.js";
 import { FakeBb } from "./support/watch.js";
 

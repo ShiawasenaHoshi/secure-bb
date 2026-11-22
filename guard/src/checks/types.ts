@@ -1,7 +1,7 @@
 // Result shapes of the deterministic plugin checks (spec §5.1).
 
 import type { Finding, Severity } from "../text-rules.ts";
-import type { FlowSummary, Purpose } from "./flow.ts";
+import type { FlowSummary, Purpose } from "./flow-types.ts";
 export type { Finding, Severity };
 
 export type CapabilityKind =

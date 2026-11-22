@@ -1,5 +1,5 @@
 // The skills module's tables (stage 6) in secure-bb's own database.
-import type { Db } from "../store.js";
+import type { Db } from "../db-types.js";
 import { SKILL_RULES_VERSION } from "./inspect.js";
 import type { SkillCheck, SkillPinRow, SkillQueueRow, SkillState } from "./types.js";
 

@@ -1,6 +1,6 @@
 // The sentinel's tables in secure-bb's own database. Settings are here, not in plugin settings (anyone can change those).
 // Nothing secret is stored: the feed holds masked, shortened text and numbers.
-import type { Db } from "../store.js";
+import type { Db } from "../db-types.js";
 import { CATEGORY_IDS, DEFAULT_SETTINGS } from "./questions.js";
 import type { CategoryScore, FeedRow, NotScoredReason, Outcome, SentinelSettings } from "./types.js";
 

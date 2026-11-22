@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { beforeEach, describe, expect, it } from "vitest";
-import { Gate, GateError } from "../src/gate.js";
+import { Gate } from "../src/gate.js";
+import { GateError } from "../src/errors.js";
 import { claudeCommand, cursorCommand, DENIED_TOOLS, interpret, readToken, validateSecondModel, type CommandSpec, type ProcessRunner, type RawRun } from "../src/scan/commands.js";
 import { collectForScan, removeComments } from "../src/scan/collect.js";
 import { buildPrompt, isFlag, parseReport } from "../src/scan/prompt.js";
@@ -13,7 +14,7 @@ import { scanLine, scanView } from "../src/scan/view.js";
 import type { ScanReport } from "../src/scan/types.js";
 import type { HookCtx } from "../src/gate.js";
 import { MIGRATIONS, Store } from "../src/store.js";
-import { base32Decode, hotp, stepAt } from "../src/totp.js";
+import { base32Decode, hotp, stepAt } from "../guard/src/totp.ts";
 import { hashTree } from "../src/tree.js";
 import { CLEAN } from "./support/checks.js";
 

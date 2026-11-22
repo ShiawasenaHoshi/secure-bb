@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EXPORT_FORMAT as GUARD_EXPORT_FORMAT, importCmd, type Io } from "../../guard/src/cli.ts";
 import { EXPORT_FORMAT } from "../../src/export.js";
-import { base32Decode, hotp, stepAt } from "../../src/totp.js";
+import { base32Decode, hotp, stepAt } from "../../guard/src/totp.ts";
 import { bootPlugin, core, hookCtx, plugDir, startGuardOnDate, type Booted, type TestGuard } from "./support.ts";
 
 let g: TestGuard | null = null;

@@ -3,10 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { beforeEach, describe, expect, it } from "vitest";
-import { Gate, GateError, type HookCtx, type ThreadTree } from "../src/gate.js";
+import { Gate, type HookCtx } from "../src/gate.js";
+import { GateError } from "../src/errors.js";
+import type { ThreadTree } from "../src/thread-tree.js";
 import { NETWORKED } from "./support/checks.js";
 import { MIGRATIONS, Store } from "../src/store.js";
-import { base32Decode, base32Encode, hotp, stepAt, verifyTotp } from "../src/totp.js";
+import { base32Decode, base32Encode, hotp, stepAt, verifyTotp } from "../guard/src/totp.ts";
 import { findEscapingSymlinks, hashTree, isInside, isInsideSnapshots } from "../src/tree.js";
 
 class Harness {

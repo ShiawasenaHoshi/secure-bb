@@ -13,13 +13,14 @@ import { SessionProof } from "../src/approval.js";
 import { checkPathRefusal, checkSummary } from "../src/checkpath.js";
 import { runChecks } from "../src/checks/index.js";
 import { assess, type Probe } from "../src/detect.js";
-import { Gate, GateError, type HookCtx } from "../src/gate.js";
+import { Gate, type HookCtx } from "../src/gate.js";
+import { GateError } from "../src/errors.js";
 import { cursorCommand } from "../src/scan/commands.js";
 import { MIGRATIONS, Store } from "../src/store.js";
 import { classifyItem } from "../src/taint/classify.js";
 import { githubSlug } from "../src/taint/repos.js";
 import { T } from "../src/text.js";
-import { base32Decode, hotp, stepAt } from "../src/totp.js";
+import { base32Decode, hotp, stepAt } from "../guard/src/totp.ts";
 import { hashTree } from "../src/tree.js";
 import { CLEAN } from "./support/checks.js";
 
