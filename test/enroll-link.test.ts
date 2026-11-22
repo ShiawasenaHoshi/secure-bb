@@ -3,6 +3,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { appSource } from "./support/app-source";
 import { clearFragment, parseEnrollFragment, takeEnrollToken, type HistoryLike, type LocationLike } from "../src/enroll-link.js";
 
 const fakeBrowser = (path: string, search: string, hash: string) => {
@@ -68,7 +69,7 @@ describe("cleaning the address bar", () => {
 });
 
 describe("the token goes nowhere but the guard", () => {
-  const app = readFileSync(fileURLToPath(new URL("../app.tsx", import.meta.url)), "utf8");
+  const app = appSource();
   const lines = app.split("\n");
   const sinks = /\b(fetch|XMLHttpRequest|sendBeacon|localStorage|sessionStorage|lsSet|console\.\w+|document\.cookie|window\.open|location\.(href|assign|replace)|navigate|useBbNavigate)\b/;
 
@@ -80,7 +81,7 @@ describe("the token goes nowhere but the guard", () => {
 
   it("no line that touches the token (or the field it is put into) sends it to a network, storage, console or the router", () => {
     // the names the token has on the page: enrollToken (from the link) and token (the field); look at the lines of PasskeyCard and the one place that reads the link
-    const start = lines.findIndex((l) => l.startsWith("function PasskeyCard"));
+    const start = lines.findIndex((l) => /^(export )?function PasskeyCard/.test(l));
     const end = lines.findIndex((l, i) => i > start && l.startsWith("}"));
     const card = lines.slice(start, end + 1);
     const touching = [...card, ...lines.filter((l) => /enrollToken|enrollSeen|enrollTokenOnce/.test(l))].filter((l) => /\btoken\b|enrollToken|enrollSeen/.test(l));
@@ -89,7 +90,7 @@ describe("the token goes nowhere but the guard", () => {
   });
 
   it("inside PasskeyCard the token is an argument of passkey.register and of nothing else", () => {
-    const start = lines.findIndex((l) => l.startsWith("function PasskeyCard"));
+    const start = lines.findIndex((l) => /^(export )?function PasskeyCard/.test(l));
     const end = lines.findIndex((l, i) => i > start && l.startsWith("}"));
     const card = lines.slice(start, end + 1).join("\n");
     const calls = [...card.matchAll(/rpc\.call\("([^"]+)"([^\n]*)/g)];
