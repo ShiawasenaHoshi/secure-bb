@@ -27,6 +27,8 @@ export const rpcContract = defineRpcContract({
   "journal.verify": { input: s.nullValue(), output: s.json<JournalReport>() },
   // «Понятно» on the calm line about a stop of the plugin (guard mode, nothing opened): sets aside only such lines; a red alarm is not hidden by it.
   "alive.ack": { input: s.nullValue(), output: s.json<{ ok: true }>() },
+  // «Я проверил» on the red alarm about a pause of the plugin: hides the named pauses (by their `at`) from the page after a code or a touch. The pauses stay in the journal.
+  "alive.review": { input: s.object({ ats: s.array(s.integer({ min: 0 }), { max: 50 }), ...factor }), output: s.json<{ ok: true; reviewed: number }>() },
   "guard.verify": { input: s.nullValue(), output: s.json<GuardJournalReport | { error: string }>() },
   // Guard mode: the test touch of `sbb-guard setup` («Проверить касание»). Changes nothing: the guard writes "touch setup-check" into its journal, the console sees it.
   "setup-check": { input: s.object({ ...factor }), output: s.json<{ ok: true }>() },

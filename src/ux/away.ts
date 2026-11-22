@@ -368,3 +368,86 @@ export function gapAlarmText(gap: GapLike, ctx: GapContext, e: PluginDownEffects
 
 /** The gaps that are still to be shown: not set aside with «Понятно». */
 export const unackedGaps = <G extends { at: number }>(gaps: G[], ackedAt: number | null): G[] => gaps.filter((g) => ackedAt === null || g.at > ackedAt);
+
+// ---- a pause of the plugin during an update the owner declared ----------------------------------------------------------------------
+/**
+ * A window of planned maintenance, as the guard keeps it (declared at its console, never over the socket): from `beganAt` to `endedAt` if the owner closed it,
+ * else to `until` (20 minutes by default, 60 at most).
+ */
+export interface MaintenanceWindow {
+  beganAt: number;
+  until: number;
+  endedAt: number | null;
+  reason?: string;
+}
+/** The plugin writes its mark of life every 15 s, so the last mark of a pause can come this much before the moment the owner declared the window. */
+export const GAP_START_SLACK_MS = 15_000;
+
+/**
+ * Was the pause the owner's planned update?
+ *  - `planned`: it began and ended inside one declared window: a calm line;
+ *  - `overrun`: it began inside a window and ended after the window did («во время обновления, но дольше окна»): still an alarm, with that note;
+ *  - `outside`: no window, or it began before the window, or after it: an alarm, as it always was.
+ * Pure: the windows and the pause are the only inputs, and nothing but a window the guard recorded can make an alarm calm.
+ */
+export function gapPlan(gap: { from: number; to: number }, windows: MaintenanceWindow[]): "planned" | "overrun" | "outside" {
+  let overrun = false;
+  for (const w of windows) {
+    const end = Math.min(w.endedAt ?? w.until, w.until);
+    const beganInside = gap.from >= w.beganAt - GAP_START_SLACK_MS && gap.from <= end;
+    if (!beganInside) continue;
+    if (gap.to <= end) return "planned";
+    overrun = true;
+  }
+  return overrun ? "overrun" : "outside";
+}
+
+export type GapPlan = ReturnType<typeof gapPlan>;
+export interface GapView extends GapText {
+  plan: GapPlan;
+}
+/**
+ * The text of one pause, with the owner's declared maintenance taken into account. A planned pause is a calm line («Обновление secure-bb: страница не работала 3 мин
+ * (с … по …), сторож работал»; what did not work is for «Подробнее»); one that ran past the window is an alarm with a note; the rest is `gapAlarmText` as before.
+ */
+export function gapView(gap: GapLike, ctx: GapContext, windows: MaintenanceWindow[], fmt: (t: number) => string): GapView {
+  const base = gapAlarmText(gap, ctx);
+  const plan = base.mode === "guard" ? gapPlan(gap, windows) : "outside";
+  if (plan === "planned") return { ...base, severity: "calm", plan, opens: [], headline: `Обновление secure-bb: страница не работала ${minutesOf(gap.ms)} (с ${fmt(gap.from)} по ${fmt(gap.to)}), сторож работал` };
+  if (plan === "overrun") return { ...base, plan, headline: `${base.headline} — во время обновления, но дольше окна` };
+  return { ...base, plan };
+}
+
+export interface GapGroup {
+  mode: "guard" | "hook";
+  /** One line: «Страница защиты не работала 2 раза: 3 мин и 13 мин». */
+  summary: string;
+  /** One line per pause, for «Подробнее». */
+  items: string[];
+  /** What worked and what did not: the same for every pause of the mode, said once. */
+  works: string;
+  notWorking: string;
+  count: number;
+}
+const listAnd = (xs: string[]): string => (xs.length <= 1 ? (xs[0] ?? "") : `${xs.slice(0, -1).join(", ")} и ${xs[xs.length - 1]}`);
+/** Pauses of one kind are told together: a line of the point and the list under «Подробнее» (one paragraph for «что работало / что нет», not one per pause). */
+export function groupGaps(lines: Array<{ gap: GapLike; text: GapView }>, fmt: (t: number) => string): GapGroup[] {
+  const out: GapGroup[] = [];
+  for (const mode of ["guard", "hook"] as const) {
+    const mine = lines.filter((l) => l.text.mode === mode);
+    if (mine.length === 0) continue;
+    const first = mine[0]!;
+    const noun = mode === "guard" ? "Страница защиты не работала" : "Гейт не работал";
+    const over = mine.some((l) => l.text.plan === "overrun");
+    const summary =
+      mine.length === 1
+        ? `${first.text.headline} (с ${fmt(first.gap.from)} по ${fmt(first.gap.to)})`
+        : `${noun} ${mine.length} ${plural(mine.length, "раз", "раза", "раз")}: ${listAnd(mine.map((l) => minutesOf(l.gap.ms)))}${over ? " (в том числе во время обновления, но дольше окна)" : ""}`;
+    const items = mine.map((l) => {
+      const cause = gapCauseText(l.gap);
+      return `${fmt(l.gap.from)} — ${fmt(l.gap.to)}: ${minutesOf(l.gap.ms)}${cause ? ` (${cause})` : ""}${l.text.plan === "overrun" ? " — во время обновления, но дольше окна" : ""}`;
+    });
+    out.push({ mode, summary, items, works: first.text.works, notWorking: first.text.notWorking, count: mine.length });
+  }
+  return out;
+}

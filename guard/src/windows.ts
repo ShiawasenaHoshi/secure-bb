@@ -1,7 +1,7 @@
 // Trust windows (open, close, expire, sweep), the window policy and the troubleshooting mode: everything about time that other layers read.
 // Whether a version passes by a window is decide.ts (`windowRefuses`); here a window only exists, slides and ends.
 import { guardPolicyWidens } from "./policy.ts";
-import { GuardError, MAX_TROUBLESHOOT_MIN, type Policy, type WindowRow, type Raw, windowOf, pluginIdOf, intOf, type Proof, factorDetail } from "./guard-types.ts";
+import { GuardError, MAINTENANCE_DEFAULT_MIN, MAINTENANCE_MAX_MIN, MAX_TROUBLESHOOT_MIN, str, type MaintenanceRow, type Policy, type WindowRow, type Raw, windowOf, pluginIdOf, intOf, type Proof, factorDetail } from "./guard-types.ts";
 import { FactorGuard } from "./factor.ts";
 
 export class WindowGuard extends FactorGuard {
@@ -38,6 +38,12 @@ export class WindowGuard extends FactorGuard {
     if (until > 0 && until <= now) {
       this.setMeta("troubleshoot_until", "0");
       this.log("troubleshoot.end", null, null, { reason: "expired", at: until });
+      n++;
+    }
+    // A planned maintenance window ends by itself.
+    for (const m of this.db.prepare(`SELECT id, until FROM maintenance WHERE ended_at IS NULL AND until <= ?`).all(now) as Array<{ id: number; until: number }>) {
+      this.db.prepare(`UPDATE maintenance SET ended_at = ?, ended_how = 'expired' WHERE id = ?`).run(Number(m.until), Number(m.id));
+      this.log("maintenance.end", null, null, { id: Number(m.id), how: "expired", at: Number(m.until) });
       n++;
     }
     return n;
@@ -135,6 +141,50 @@ export class WindowGuard extends FactorGuard {
       this.setMeta("troubleshoot_until", "0");
       this.log("troubleshoot.end", null, null, { reason: "stopped", via: "console" });
       return true;
+    });
+  }
+
+  // ---- planned maintenance (console only: there is no op for it on the socket, so neither bb nor an agent nor a plugin can declare one) ------------------
+  /** The newest windows, newest first. A window that ran out (`until` passed) counts as ended at `until` even before the sweep wrote it down. */
+  maintenanceWindows(limit = 30): MaintenanceRow[] {
+    return (this.db.prepare(`SELECT id, began_at, until, ended_at, reason FROM maintenance ORDER BY id DESC LIMIT ?`).all(limit) as Raw[]).map((r) => ({
+      id: Number(r.id),
+      beganAt: Number(r.began_at),
+      until: Number(r.until),
+      endedAt: r.ended_at === null ? null : Number(r.ended_at),
+      reason: String(r.reason),
+    }));
+  }
+  /**
+   * Declares that an update is going on: a pause of the plugin inside the window is a calm line on the page, not an alarm. At most `MAINTENANCE_MAX_MIN` minutes,
+   * `MAINTENANCE_DEFAULT_MIN` by default; one at a time (a new one ends the open one). Needs the guard's data directory, like `totp-register`; no code.
+   */
+  maintenanceBegin(reasonIn: unknown, minutes: unknown = MAINTENANCE_DEFAULT_MIN): MaintenanceRow {
+    const reason = str(reasonIn ?? "update", "reason", 100, 1).replace(/\s+/g, " ").trim();
+    const m = intOf(minutes, "minutes", 1, MAINTENANCE_MAX_MIN);
+    return this.tx(() => {
+      const now = this.now();
+      for (const o of this.db.prepare(`SELECT id FROM maintenance WHERE ended_at IS NULL AND until > ?`).all(now) as Array<{ id: number }>) {
+        this.db.prepare(`UPDATE maintenance SET ended_at = ?, ended_how = 'replaced' WHERE id = ?`).run(now, Number(o.id));
+        this.log("maintenance.end", null, null, { id: Number(o.id), how: "replaced", via: "console" });
+      }
+      const until = now + m * 60_000;
+      const info = this.db.prepare(`INSERT INTO maintenance (began_at, until, reason) VALUES (?, ?, ?)`).run(now, until, reason);
+      const id = Number(info.lastInsertRowid);
+      this.log("maintenance.begin", null, null, { id, reason, minutes: m, until, via: "console" });
+      return { id, beganAt: now, until, endedAt: null, reason };
+    });
+  }
+  /** Console only: the update is over. Tightening, so no code. False when none was open. */
+  maintenanceEnd(): boolean {
+    return this.tx(() => {
+      const now = this.now();
+      const open = this.db.prepare(`SELECT id FROM maintenance WHERE ended_at IS NULL AND until > ?`).all(now) as Array<{ id: number }>;
+      for (const o of open) {
+        this.db.prepare(`UPDATE maintenance SET ended_at = ?, ended_how = 'console' WHERE id = ?`).run(now, Number(o.id));
+        this.log("maintenance.end", null, null, { id: Number(o.id), how: "console", via: "console" });
+      }
+      return open.length > 0;
     });
   }
 }

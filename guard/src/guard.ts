@@ -40,6 +40,7 @@ export class Guard extends AgentsApplyGuard {
       totp: { registered: this.totpRegistered(), disabled: this.totpDisabled(), blockedUntil },
       sessions: this.openSessions().map((r) => ({ id: Number(r.id), openedAt: Number(r.opened_at), expiresAt: Number(r.expires_at), hardExpiresAt: Number(r.hard_expires_at), uses: Number(r.uses) })),
       troubleshoot: this.troubleshootUntil() > 0 ? { until: this.troubleshootUntil() } : null,
+      maintenance: this.maintenanceWindows(),
       passkeys: {
         rpId: this.rp.rpId,
         origin: this.rp.origin,

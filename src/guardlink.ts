@@ -199,6 +199,15 @@ export interface AgentsState {
   throttled?: boolean;
 }
 
+/** A planned maintenance window the owner declared at the guard's console (an update). It ends at `endedAt` if closed earlier, else at `until`. */
+export interface GuardMaintenance {
+  id: number;
+  beganAt: number;
+  until: number;
+  endedAt: number | null;
+  reason: string;
+}
+
 export interface GuardState {
   now: number;
   totp: { registered: boolean; disabled?: boolean; blockedUntil: number };
@@ -206,6 +215,8 @@ export interface GuardState {
   sessions?: Array<{ id: number; openedAt: number; expiresAt: number; hardExpiresAt: number; uses: number }>;
   /** Troubleshooting mode: the guard passes everything until this time and writes every decision down. Null or absent: off. */
   troubleshoot?: { until: number } | null;
+  /** The planned maintenance windows, newest first. Absent in a guard that predates them. */
+  maintenance?: GuardMaintenance[];
   /** Absent in a guard that predates passkeys. */
   passkeys?: { rpId: string; origin: string; keys: Array<{ id: number; label: string; createdAt: number; lastUsedAt: number | null; aaguid?: string }>; enrollmentOpen: boolean };
   policy: GuardPolicy;

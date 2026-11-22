@@ -3,7 +3,7 @@ import type { Overview } from "../src/overview";
 import { skillsSummary, awayInfoEvents, cardColor, groupAway, awaySeenMark } from "../src/ux";
 import { AWAY_HIDE_LABEL } from "../src/ux";
 import type { AwayEvent, HeldNow, ProblemRef } from "../src/ux";
-import { muted, when, useOverview, FoldAccordion } from "./ui";
+import { muted, when, useOverview, FoldAccordion, Fold } from "./ui";
 import { Button } from "../components/ui/button";
 import { Card } from "../components/ui/card";
 import { quietAwayGroups } from "../src/pageview";
@@ -54,7 +54,7 @@ export function AwayCard({ ov, since, onSeen, kept }: { ov: Overview; since: num
   const calm = gapsBySeverity(ov).calm;
   if (groups.length === 0 && calm.length === 0) return null;
   const lines = groups.slice(0, 12);
-  const brief = [...lines.slice(0, 2).map((g) => g.text)].join("; ");
+  const brief = [...calm.map((c) => c.text.headline), ...lines.map((g) => g.text)].slice(0, 2).join("; ");
   const more = lines.length + calm.length > 2;
   return (
     <div data-secure-bb-away>
@@ -71,7 +71,13 @@ export function AwayCard({ ov, since, onSeen, kept }: { ov: Overview; since: num
         {calm.length > 0 ? (
           <div className={`mb-2 space-y-1 text-xs ${muted}`} data-secure-bb-gap-calm>
             {calm.map(({ gap: g, text }) => (
-              <p key={g.at}>{text.headline}. {text.works} {text.notWorking}</p>
+              <div key={g.at}>
+                <p>{text.headline}.</p>
+                <Fold id={`gap-${g.at}`} summary="Подробнее" summaryClassName="cursor-pointer underline">
+                  <p>{text.works}</p>
+                  <p>{text.notWorking}</p>
+                </Fold>
+              </div>
             ))}
             <Button size="sm" variant="outline" onClick={() => void rpc.call("alive.ack", null).then(refetch)}>Понятно</Button>
           </div>
