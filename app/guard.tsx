@@ -5,7 +5,8 @@ import type { Overview } from "../src/overview";
 import { createCredential, type CreationOptions } from "../src/webauthn";
 import type { PasskeyAssertion } from "../src/guardlink";
 import { MODE_DESCRIPTIONS, MODE_NAMES, SAVED_NARROWING, aaguidName, isPasswordManager } from "../src/ux";
-import { useCodeAction, CodeField, type Rpc, usePasskey, TouchNote, touchFor } from "./code";
+import { useCodeAction, CodeField, TouchNote } from "./code";
+import { type Rpc, usePasskey, touchFor } from "./touch";
 import { card, btn, btnPrimary, input, muted, when, Fold, Msg } from "./ui";
 
 export function GuardAlarm({ ov }: { ov: Overview }) {

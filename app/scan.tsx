@@ -3,7 +3,8 @@ import type { Overview } from "../src/overview";
 import type { ScanView } from "../src/scan/view";
 import { defined } from "../src/rpc-input";
 import { aiScanEmptyText } from "../src/ux";
-import { useCodeAction, CodeField, type Rpc } from "./code";
+import { useCodeAction, CodeField } from "./code";
+import { type Rpc } from "./touch";
 import { card, btn, input, muted, when, Fold, Msg } from "./ui";
 
 export const MODEL_STATUS: Record<string, string> = { clean: "чисто", flag: "флаг", refusal: "отказ", invalid: "невалидный ответ", timeout: "таймаут", error: "ошибка", unavailable: "недоступна" };

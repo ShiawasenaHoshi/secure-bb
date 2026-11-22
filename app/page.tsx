@@ -9,10 +9,12 @@ import { emptySnapshot, makeNote, restoreView, snapshotView, type ViewSnapshot }
 import { openFold } from "../src/fold";
 import type { ProblemRef, TabId } from "../src/ux";
 import { AgentsAlarm, AgentsSection } from "./agents";
-import { ApprovalContext, useApprovalSession, SessionBar } from "./approval";
+import { ApprovalContext, useApprovalSession } from "./approval";
+import { SessionBar } from "./session-bar";
 import { SkillsLine, AwayCard } from "./away";
 import { BatchCard } from "./batch";
-import { press, enrollTokenOnce } from "./code";
+import { enrollTokenOnce } from "./code";
+import { press } from "./press";
 import { lsGet, lsSet } from "./confirm";
 import { GuardAlarm, GuardCard, MigrationCard } from "./guard";
 import { TroubleshootBar, StatusHeader } from "./header";

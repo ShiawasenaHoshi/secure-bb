@@ -3,7 +3,8 @@
 import { act, createElement } from "react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { renderSlot } from "@get-bb/plugin-sdk/testing/app";
-import { ConfirmCancelled, ConfirmHost, ConfirmPanel, useAskConfirm, type ConfirmProof, type ConfirmRequest, type PanelParts, type PanelProps } from "../app/confirm-dialog";
+import { ConfirmHost, ConfirmPanel, useAskConfirm, type ConfirmProof, type ConfirmRequest, type PanelParts, type PanelProps } from "../app/confirm-dialog";
+import { ConfirmCancelled } from "../app/confirm-error";
 import type { Overview } from "../src/overview";
 
 beforeAll(() => {

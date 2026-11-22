@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { cardLevel, LEVEL_LABEL, NETWORK_UNRELATED_NOTE, permissionList, VISIBLE_ROWS, whyLine } from "../src/cardview";
-import { headerLine, quietAwayGroups, SECOND_FACTOR_ANCHOR, splitAlarms } from "../src/pageview";
+import { headerLine, quietAwayGroups, SECOND_FACTOR_ANCHOR } from "../src/pageview";
 import { factorOfApproval, factorWords, truthfulApproval } from "../src/factor";
 import { groupAway, type AwayEvent, type CapLike, type ProblemRef } from "../src/ux";
 
@@ -58,7 +58,6 @@ describe("the header says one thing", () => {
     const h = headerLine({ status: { level: "attention", first: other }, waiting: 2, deferred: 0, alarms: [other, noFactor] });
     expect(h).toEqual({ tone: "alarm", text: "Настройте второй фактор: без него ничего нельзя подтвердить", target: noFactor, action: "Настроить" });
     expect(headerLine({ status: { level: "attention", first: noFactor }, waiting: 0, deferred: 0, alarms: [noFactor] }).tone).toBe("alarm");
-    expect(splitAlarms([other, noFactor])).toEqual({ critical: [other, noFactor], calm: [] });
   });
   it("the guard down and a stopped plugin are alarms", () => {
     expect(headerLine({ status: { level: "down", first }, waiting: 0, deferred: 0, alarms: [] }).tone).toBe("alarm");

@@ -5,7 +5,8 @@ import type { Overview } from "../src/overview";
 import { T } from "../src/text";
 import { buildPolicyChange, buildPolicySetInput, buildPolicyTouchQuery } from "../src/rpc-input";
 import { useCodeAction, CodeField } from "./code";
-import { useProof, ProofField } from "./confirm";
+import { ProofField } from "./confirm";
+import { useProof } from "./proof";
 import { card, btn, btnPrimary, input, muted, Msg } from "./ui";
 
 export function PolicyCard({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void }) {
