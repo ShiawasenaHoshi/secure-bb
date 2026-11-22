@@ -33,6 +33,8 @@ export const press = typeof document !== "undefined" ? pressTracker(document) : 
 
 export const PRESS_MAX_AGE_MS = 120_000;
 
+export const SETTLE_REFETCH_MS = [1_500, 4_000];
+
 /** A one-shot action that needs a fresh TOTP code. `done` (a short phrase: «удалён плагин X 1.0») is announced as «Готово: …» where the cards are. */
 export function useCodeAction(refetch: () => void, opts: { pin?: boolean; slot?: { key: string; elId: string } } = {}) {
   const [busy, setBusy] = useState(false);
@@ -65,6 +67,8 @@ export function useCodeAction(refetch: () => void, opts: { pin?: boolean; slot?:
         window.setTimeout(() => { if (alive.current) setLocked(false); }, LOCK_MS);
       }
       refetch();
+      // The core takes a moment to start or stop what was decided: asked again, so the statuses on the page are the settled ones, not those of the first instant.
+      for (const ms of SETTLE_REFETCH_MS) window.setTimeout(refetch, ms);
     } catch (e) {
       // The person closed the confirmation dialog: they changed their mind, nothing went wrong.
       if (e instanceof ConfirmCancelled) return;

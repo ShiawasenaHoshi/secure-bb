@@ -182,4 +182,45 @@ describe("the page, drawn", () => {
       expect(r.textContent).not.toMatch(/Откуда|версия не одобрена/);
     }
   });
+
+  it("«Под защитой»: the status of a plugin is the one of ITS id in the newest data, whatever order the rows come in between two draws", async () => {
+    const ov = await overviewWithThreeWaiting();
+    const plugin = (id: string, status: string, statusDetail: string | null, pinned: boolean) => ({ id, version: "0.1.0", status, statusDetail, enabled: status === "running", source: `github.com/someone/bb-plugin-${id}`, pin: pinned ? { id: 1, via: "touch", version: "0.1.0", approvedAt: ov.now, why: null } : null, history: [], window: null, frozenPin: false, unreviewedBaseline: false, threadId: null });
+    const held = "held by activation guard";
+    // before: both wait. after the decision on chime: chime runs, auto-answer is held; the plugins come back in the OTHER order
+    const before = { ...ov, queue: ov.queue.filter((q) => q.pluginId !== "notify"), plugins: [plugin("auto-answer", "disabled", held, false), plugin("chime", "disabled", held, false)] };
+    const after = { ...ov, queue: ov.queue.filter((q) => q.pluginId === "auto-answer"), plugins: [plugin("chime", "running", null, true), plugin("auto-answer", "disabled", held, false)] };
+    let current: Overview = before as unknown as Overview;
+    const slot = await drawPage(() => current, "Ждут вашего решения: 2");
+    const pairs = () => Object.fromEntries(Array.from(document.body.querySelectorAll("[data-protected-plugin]")).map((r) => [r.getAttribute("data-protected-plugin"), r.querySelector("[data-secure-bb-standing]")?.textContent]));
+    expect(pairs()).toEqual({ "auto-answer": "ждёт вашего решения", chime: "ждёт вашего решения" });
+    current = after as unknown as Overview;
+    await act(async () => void (await slot.behavior.emitRealtime("changed", null)));
+    await flush(300);
+    expect(pairs()).toEqual({ chime: "работает", "auto-answer": "ждёт вашего решения" });
+    // and back to the first order, a third draw: the pair name → status follows the data, not the place
+    current = { ...after, plugins: [...(after.plugins as unknown[]).reverse()] } as unknown as Overview;
+    await act(async () => void (await slot.behavior.emitRealtime("changed", null)));
+    await flush(300);
+    expect(pairs()).toEqual({ chime: "работает", "auto-answer": "ждёт вашего решения" });
+  });
+
+  it("an older overview that arrives late never replaces a newer one", async () => {
+    const ov = await overviewWithThreeWaiting();
+    const newer = { ...ov, queue: ov.queue.slice(0, 2), ux: ov.ux } as Overview;
+    let calls = 0;
+    const app = await loadPluginApp(() => import("../app"));
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "" }, {
+      rpc: {
+        // the first answer (3 waiting) is slow; the second one (2 waiting) is quick
+        overview: async () => (++calls === 1 ? (await new Promise((r) => setTimeout(r, 600)), ov) : newer),
+        "page.ping": () => null,
+      } as never,
+    });
+    mounted.push(slot);
+    await act(async () => void (await slot.behavior.emitRealtime("changed", null)));
+    await flush(1000);
+    expect(document.body.textContent).toContain("Ждут вашего решения: 2");
+    expect(document.body.textContent).not.toContain("Ждут вашего решения: 3");
+  });
 });

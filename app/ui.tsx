@@ -40,14 +40,23 @@ export function useOverview() {
   // draw), so the call goes through a ref.
   const rpcRef = useRef(rpc);
   rpcRef.current = rpc;
+  // Answers can come in another order than they were asked for (a poll, a «changed» signal and the refetch after an action are in flight together): only an answer
+  // newer than the one on the screen is taken, so an older overview never replaces a newer one.
+  const asked = useRef(0);
+  const shown = useRef(0);
   const refetch = useCallback(() => {
+    const mine = ++asked.current;
     rpcRef.current.call("overview").then(
       (ov) => {
+        if (mine < shown.current) return;
+        shown.current = mine;
         // Data that differs only by the server's clock changes nothing: the old object stays, nothing is drawn again, nothing jumps.
         setData((cur) => (cur !== null && sameData(cur, ov) ? cur : ov));
         setError(null);
       },
-      (e: unknown) => setError(e instanceof Error ? e.message : String(e)),
+      (e: unknown) => {
+        if (mine >= shown.current) setError(e instanceof Error ? e.message : String(e));
+      },
     );
   }, []);
   useEffect(() => {

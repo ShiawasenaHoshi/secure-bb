@@ -31,7 +31,7 @@ export function ProtectedSection({ ov, waiting, onShowCard }: { ov: Overview; wa
             <div key={r.id} className="space-y-1 p-3 text-sm" data-protected-plugin={r.id}>
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="min-w-0 break-all font-medium">{r.id} <span className={`text-xs font-normal ${muted}`}>{r.version}</span></span>
-                <Badge variant={STANDING_BADGE[r.standing]}>{r.standingLabel}</Badge>
+                <Badge variant={STANDING_BADGE[r.standing]} data-secure-bb-standing={r.id}>{r.standingLabel}</Badge>
               </div>
               {r.standing === "waits" ? (
                 // The card above says everything (the source, the rights); here it is one line with the way to it.
