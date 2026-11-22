@@ -16,8 +16,8 @@ export function ScanResultView({ scan, other, enabled }: { scan: ScanView | unde
     scan.status === "running" ? "идёт…" : scan.status === "clean" ? `чисто (${when(scan.finishedAt ?? scan.startedAt)}, ${asked})` : scan.status === "suspect" ? `ПОДОЗРЕНИЕ (${when(scan.finishedAt ?? scan.startedAt)})` : `недоступен${scan.note ? `: ${scan.note}` : ""}`;
   return (
     <div className="mt-1">
-      <p className={scan.status === "suspect" ? "font-semibold text-red-600" : muted}>ИИ-скан #{scan.id}, версия {scan.version}: {head}{other ? ` · ${other}` : ""}</p>
-      {scan.flags.length > 0 ? <ul className="list-disc pl-5 text-red-600">{scan.flags.map((f, i) => <li key={i}>{f}</li>)}</ul> : null}
+      <p className={scan.status === "suspect" ? "font-semibold text-destructive" : muted}>ИИ-скан #{scan.id}, версия {scan.version}: {head}{other ? ` · ${other}` : ""}</p>
+      {scan.flags.length > 0 ? <ul className="list-disc pl-5 text-destructive">{scan.flags.map((f, i) => <li key={i}>{f}</li>)}</ul> : null}
       {scan.models.some((m) => m.status === "unavailable") ? <p className={muted}>Не отвечала: {scan.models.filter((m) => m.status === "unavailable").map((m) => `${m.label} (${m.detail})`).join("; ")}</p> : null}
       {scan.models.some((m) => m.report) ? (
         <Fold id={`scan-${scan.id}-models`} className="mt-1" summary="Что нашли модели">

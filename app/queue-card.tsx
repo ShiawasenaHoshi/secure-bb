@@ -50,7 +50,7 @@ export function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; 
         <h3 className="font-semibold">
           {queueLabel(q.id)} · {q.pluginId} <span className={muted}>{q.version}</span>
         </h3>
-        <span className={blocked && held ? "font-semibold text-red-700 dark:text-red-400" : muted}>
+        <span className={blocked && held ? "font-semibold text-destructive" : muted}>
           {held ? (blocked ? "заблокировано" : "держится") : q.status === "approved" ? "одобрено" : q.status === "stale" ? "устарело" : "отклонено"} · {when(q.firstSeen)}
         </span>
       </div>
@@ -61,8 +61,8 @@ export function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; 
         {q.kind === "proposal" && !q.contentHash ? " · предложен агентом, окно было закрыто" : ""}
       </p>
       {q.contentHash ? <p className={`break-all font-mono text-xs ${muted}`}>{q.contentHash}</p> : null}
-      {q.reason ? <p className={`mt-1 ${blocked || unsafeDir ? "font-semibold text-red-700 dark:text-red-400" : muted}`}>{q.reason}</p> : null}
-      {unsafeDir && held ? <p className="mt-1 text-red-600">Одобрить нельзя: пока в каталоге или выше может писать кто-то кроме пользователя сервера, его содержимое может измениться после проверки. Исправьте права (владелец — пользователь сервера, без записи для группы и остальных) или предложите плагин через <span className="font-mono">bb secure-bb propose</span>: снимок гейт хранит у себя.</p> : null}
+      {q.reason ? <p className={`mt-1 ${blocked || unsafeDir ? "font-semibold text-destructive" : muted}`}>{q.reason}</p> : null}
+      {unsafeDir && held ? <p className="mt-1 text-destructive">Одобрить нельзя: пока в каталоге или выше может писать кто-то кроме пользователя сервера, его содержимое может измениться после проверки. Исправьте права (владелец — пользователь сервера, без записи для группы и остальных) или предложите плагин через <span className="font-mono">bb secure-bb propose</span>: снимок гейт хранит у себя.</p> : null}
       <ChecksView id={cardFoldId(q, "checks-q")} result={ov.queueChecks[q.id] ?? (q.contentHash ? ov.checks[q.contentHash] : undefined)} />
       <ScanResultView scan={ov.ai.queueScans[q.id]} enabled={ov.ai.settings.enabled} />
       {held ? (
@@ -76,7 +76,7 @@ export function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; 
                 <span className={muted}>Без кода: отклонение только ужесточает.</span>
                 <ScanButton ov={ov} target={{ queueId: q.id }} rpc={rpc} refetch={refetch} />
               </div>
-              {isMismatch(q.reason) ? <p className={muted}>{MISMATCH_HINT}</p> : <Fold id={cardFoldId(q, "force")} className="rounded-md border border-red-300 p-2 dark:border-red-900" summaryClassName="cursor-pointer text-red-700 dark:text-red-400" summary="Всё равно одобрить (опасно)…">
+              {isMismatch(q.reason) ? <p className={muted}>{MISMATCH_HINT}</p> : <Fold id={cardFoldId(q, "force")} className="rounded-md border border-destructive p-2" summaryClassName="cursor-pointer text-destructive" summary="Всё равно одобрить (опасно)…">
                 <div className="mt-2 flex flex-wrap items-center gap-2">
                   {pk.keyOnly ? null : <RoutineCode value={code} onChange={setCode} dangerous />}
                   <label className="flex items-center gap-1 text-xs">

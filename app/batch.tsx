@@ -22,7 +22,7 @@ export function BatchCard({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; refetc
   const prep = prepared as null | { batchId: string; setHash: string; expiresAt: number; items: Array<{ kind: string; id: number; label: string; detail: string }>; skipped: Array<{ kind: string; id: number; reason: string }> };
   if (candidates.length < 2 && !prep && !results) return null;
   const toggle = (k: string) => setPicked((cur) => (cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k]));
-  const reset = () => { setPrepared(null); proof.setCode(""); };
+  const reset = () => { setPrepared(null); proof.clearDraft(); };
   return (
     <div className={card}>
       <h3 className="font-semibold">Пакетное одобрение</h3>
@@ -75,7 +75,7 @@ export function BatchCard({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; refetc
           <ProofNotes proof={proof} />
         </>
       )}
-      {results ? <ul className="mt-2 list-disc pl-5 text-xs">{results.map((r) => <li key={`${r.kind}${r.id}`} className={r.ok ? muted : "text-red-600"}>{r.label}: {r.ok ? "одобрено" : "не одобрено"} — {r.note}</li>)}</ul> : null}
+      {results ? <ul className="mt-2 list-disc pl-5 text-xs">{results.map((r) => <li key={`${r.kind}${r.id}`} className={r.ok ? muted : "text-destructive"}>{r.label}: {r.ok ? "одобрено" : "не одобрено"} — {r.note}</li>)}</ul> : null}
       <Msg error={act.error} ok={act.ok} />
     </div>
   );

@@ -5,8 +5,8 @@ import type { AgentDrift, SettingsPart } from "../src/guardlink";
 import { humanError, clockText, agentAlarmText, PARTS_HEADLINE, PARTS_HELP, PART_BACK, PART_BACK_FRESH_NOTE, PART_FRESH_NOTE, PART_KEEP, PART_NO_BACK, drawableParts, isStalePart, partBackNote, partKeptNote, partNeedsFresh, partTitle, agentAcceptProblem, criticalAcceptTitle, manualRollback, criticalMeanings, isCriticalDrift, reconcileSelection, selectableDriftIds, toggleId } from "../src/ux";
 import { restoreNote } from "../src/ux";
 import { useApproval } from "./approval";
-import { useDraftCode, useCodeAction, CodeField, type Rpc, type PasskeyState, usePasskey, TouchNote, touchFor } from "./code";
-import { CodeHint, Rich } from "./confirm";
+import { useCodeAction, type Rpc } from "./code";
+import { Rich, useProof } from "./confirm";
 import { card, btn, btnPrimary, input, muted, cardBlocked, btnDanger, when, useSticky, Fold, Msg } from "./ui";
 
 // Guard mode. The guard reads the agents' files (settings, rules, memory, MCP) and compares them with the baseline a human accepted;
@@ -15,8 +15,8 @@ import { card, btn, btnPrimary, input, muted, cardBlocked, btnDanger, when, useS
 export const CLASS_LABEL: Record<string, string> = { critical: "критично", instructions: "инструкции", other: "прочее" };
 
 export const CLASS_STYLE: Record<string, string> = {
-  critical: "border-red-600 bg-red-50 text-red-950 dark:border-red-500 dark:bg-red-950/40 dark:text-red-100",
-  instructions: "border-yellow-500/70",
+  critical: "border-destructive bg-destructive/10 text-destructive",
+  instructions: "border-border",
   other: "border-border",
 };
 
@@ -25,7 +25,7 @@ export const alarmText = (x: { kind: string; error: string }): string => (x.kind
 
 export const CHANGE_LABEL: Record<string, string> = { added: "новый файл", changed: "изменён", removed: "удалён" };
 
-export const SEVERITY_STYLE: Record<string, string> = { block: "font-semibold text-red-700 dark:text-red-400", review: "text-yellow-700 dark:text-yellow-400", info: muted };
+export const SEVERITY_STYLE: Record<string, string> = { block: "font-semibold text-destructive", review: "text-foreground", info: muted };
 
 /** The alarms of the watch: always on top of the page, not only in its section. */
 export function AgentsAlarm({ ov, onShow }: { ov: Overview; onShow: () => void }) {
@@ -111,11 +111,9 @@ export function DriftCard({ d, picked, onPick, threads, marked, accept }: { d: A
  * the agent more dangerous) and «Вернуть» (theirs: only this goes out of the file, no code). A file that changed between the showing and the action is refused
  * by the guard and the page draws again.
  */
-export function PartsPanel({ d, ov, rpc, refetch, canCode, pk }: { d: AgentDrift; ov: Overview; rpc: Rpc; refetch: () => void; canCode: boolean; pk: PasskeyState }) {
+export function PartsPanel({ d, ov, rpc, refetch }: { d: AgentDrift; ov: Overview; rpc: Rpc; refetch: () => void }) {
   const parts = drawableParts(d.parts);
-  const [code, setCode] = useDraftCode(`parts:${d.path}`);
-  const [touching, setTouching] = useState<string | null>(null);
-  const ap = useApproval();
+  const proof = useProof(ov, rpc, `parts:${d.path}`);
   const act = useCodeAction(refetch);
   const fileSha = d.newSha;
   if (parts.length === 0 || !fileSha) return null;
@@ -128,44 +126,23 @@ export function PartsPanel({ d, ov, rpc, refetch, canCode, pk }: { d: AgentDrift
       throw e;
     }
   };
-  const keep = (p: SettingsPart, by: "passkey" | "code") => {
+  const keep = (p: SettingsPart) => {
     const fresh = partNeedsFresh(p);
     void act.run(
-      guarded(async () => {
-        setTouching(null);
-        if (by === "passkey") {
-          const t = await touchFor(rpc, { kind: "agents.keepPart", ids: [d.id], partId: p.id, fileSha, danger: fresh }, setTouching);
-          if (!t) throw new Error("касание не требуется");
-          const r = await rpc.call("agents.keepPart", { id: d.id, partId: p.id, fileSha, danger: fresh, passkey: t.passkey });
-          setTouching(null);
-          return r;
-        }
-        const r = await ap.routine(code, (proof) => rpc.call("agents.keepPart", { id: d.id, partId: p.id, fileSha, danger: fresh, ...proof }), fresh);
-        setCode("");
-        return r;
-      }),
+      guarded(() => proof.run({ kind: "agents.keepPart", ids: [d.id], partId: p.id, fileSha, danger: fresh }, (pr) => rpc.call("agents.keepPart", { id: d.id, partId: p.id, fileSha, danger: fresh, ...pr } as never), { routine: true, dangerous: fresh, what: `${PART_KEEP}: ${partTitle(p)}`, ...(fresh && p.danger ? { detail: `${PART_FRESH_NOTE} ${p.danger}` } : {}) })),
       partKeptNote(p, parts.length - 1),
     );
   };
   // Without a code only a tightening; a return that makes the agent more dangerous (a rule the person removed, a ban) is asked the way «Оставить» is.
-  const back = (p: SettingsPart, by: "passkey" | "code" | "none") =>
+  const back = (p: SettingsPart, asks: boolean) =>
     void act.run(
-      guarded(async () => {
-        setTouching(null);
-        if (by === "passkey") {
-          const t = await touchFor(rpc, { kind: "agents.rollbackPart", ids: [d.id], partId: p.id, fileSha }, setTouching);
-          if (!t) throw new Error("касание не требуется");
-          const r = await rpc.call("agents.rollbackPart", { id: d.id, partId: p.id, fileSha, passkey: t.passkey });
-          setTouching(null);
-          return r;
-        }
-        const r = await rpc.call("agents.rollbackPart", { id: d.id, partId: p.id, fileSha, ...(by === "code" ? { code } : {}) });
-        if (by === "code") setCode("");
-        return r;
-      }),
+      guarded(() =>
+        asks
+          ? proof.run({ kind: "agents.rollbackPart", ids: [d.id], partId: p.id, fileSha }, (pr) => rpc.call("agents.rollbackPart", { id: d.id, partId: p.id, fileSha, ...pr } as never), { what: `${PART_BACK}: ${partTitle(p)}`, ...(p.backDanger ? { detail: `${PART_BACK_FRESH_NOTE} ${p.backDanger}` } : {}) })
+          : rpc.call("agents.rollbackPart", { id: d.id, partId: p.id, fileSha }),
+      ),
       partBackNote(p),
     );
-  const anyFresh = parts.some((p) => partNeedsFresh(p) || p.backDanger !== null);
   return (
     <div className="mt-2 rounded-md border border-border p-2" data-agent-parts={d.id}>
       <p className="font-semibold">{PARTS_HEADLINE}</p>
@@ -176,78 +153,35 @@ export function PartsPanel({ d, ov, rpc, refetch, canCode, pk }: { d: AgentDrift
           return (
             <li key={p.id} className="rounded-md border border-border p-2" data-agent-part={p.id}>
               <p className="break-all">{partTitle(p)}</p>
-              {fresh ? <p className="text-xs font-semibold text-red-800 dark:text-red-300">{PART_FRESH_NOTE} {p.danger}</p> : null}
-              {p.restorable && p.backDanger !== null ? <p className="text-xs font-semibold text-red-800 dark:text-red-300">{PART_BACK_FRESH_NOTE} {p.backDanger}</p> : null}
+              {fresh ? <p className="text-xs font-semibold text-destructive">{PART_FRESH_NOTE} {p.danger}</p> : null}
+              {p.restorable && p.backDanger !== null ? <p className="text-xs font-semibold text-destructive">{PART_BACK_FRESH_NOTE} {p.backDanger}</p> : null}
               <div className="mt-1 flex flex-wrap items-center gap-2">
-                {fresh && pk.has ? (
-                  <button className={btnDanger} disabled={act.busy || pk.problem !== null} onClick={() => keep(p, "passkey")}>{PART_KEEP}: касанием</button>
-                ) : null}
-                {fresh && !canCode ? null : (
-                  <button className={fresh ? btnDanger : btn} disabled={act.busy || !ap.ready(code, fresh)} onClick={() => keep(p, "code")}>{PART_KEEP}{fresh && pk.has ? " кодом" : ""}</button>
-                )}
-                {!p.restorable ? <span className={`text-xs ${muted}`}>{PART_NO_BACK}</span> : p.backDanger === null ? (
-                  <button className={btnPrimary} disabled={act.busy} onClick={() => back(p, "none")} data-agent-part-back>{PART_BACK}</button>
-                ) : (
-                  <>
-                    {pk.has ? <button className={btnDanger} disabled={act.busy || pk.problem !== null} onClick={() => back(p, "passkey")} data-agent-part-back>{PART_BACK}: касанием</button> : null}
-                    {canCode ? <button className={pk.has ? btn : btnDanger} disabled={act.busy || code.length !== 6} onClick={() => back(p, "code")} data-agent-part-back>{PART_BACK}{pk.has ? " кодом" : ""}</button> : null}
-                  </>
+                <button className={fresh ? btnDanger : btn} disabled={act.busy || !proof.ready()} onClick={() => keep(p)}>{PART_KEEP}</button>
+                {!p.restorable ? <span className={`text-xs ${muted}`}>{PART_NO_BACK}</span> : (
+                  <button className={p.backDanger === null ? btnPrimary : btnDanger} disabled={act.busy || (p.backDanger !== null && !proof.ready())} onClick={() => back(p, p.backDanger !== null)} data-agent-part-back>{PART_BACK}</button>
                 )}
               </div>
             </li>
           );
         })}
       </ul>
-      {canCode ? (
-        <div className="mt-2 flex flex-wrap items-center gap-2">
-          <CodeField value={code} onChange={setCode} />
-          <CodeHint ov={ov} />
-          <span className={`text-xs ${muted}`}>{anyFresh ? "код нужен только там, где написано; остальные «Вернуть» кода не требуют" : ap.session ? "или сессия подтверждения" : "для «Оставить»"}</span>
-        </div>
-      ) : null}
-      <TouchNote text={touching} />
       <Msg error={act.error} ok={act.ok} reserve />
     </div>
   );
 }
 
 /** One critical difference: what accepting it lets the agent do, and its own fresh touch (a session does not cover it, and neither does a pack). */
-export function CriticalAccept({ d, ov, rpc, refetch, canCode, pk }: { d: AgentDrift; ov: Overview; rpc: Rpc; refetch: () => void; canCode: boolean; pk: PasskeyState }) {
-  const [code, setCode] = useDraftCode(`drift:${d.id}`);
+export function CriticalAccept({ d, ov, rpc, refetch }: { d: AgentDrift; ov: Overview; rpc: Rpc; refetch: () => void }) {
+  const proof = useProof(ov, rpc, `drift:${d.id}`);
   const ap = useApproval();
-  const [touching, setTouching] = useState<string | null>(null);
   const act = useCodeAction(refetch);
   const title = criticalAcceptTitle(d.reasons);
   const restorable = d.restorable?.ok === true ? d.restorable : null;
   // «Вернуть как было»: the guard writes its own approved copy back through its helper; the touch is for exactly this difference.
-  const restore = (by: "passkey" | "code") =>
-    void act.run(async () => {
-      setTouching(null);
-      if (by === "passkey") {
-        const t = await touchFor(rpc, { kind: "agents.restore", ids: [d.id] }, setTouching);
-        if (!t) throw new Error("касание не требуется");
-        const r = await rpc.call("agents.restore", { id: d.id, passkey: t.passkey });
-        setTouching(null);
-        return r;
-      }
-      const r = await rpc.call("agents.restore", { id: d.id, code });
-      setCode("");
-      return r;
-    }, "Готово: настройки агента возвращены, тревога снята");
-  const accept = (by: "passkey" | "code") =>
-    void act.run(async () => {
-      setTouching(null);
-      if (by === "passkey") {
-        const t = await touchFor(rpc, { kind: "agents.accept", ids: [d.id] }, setTouching);
-        if (!t) throw new Error("касание не требуется");
-        const r = await rpc.call("agents.accept", { ids: [d.id], passkey: t.passkey });
-        setTouching(null);
-        return { note: `${r.note}. Сторож описал действие так: «${t.description}».` };
-      }
-      const r = await rpc.call("agents.accept", { ids: [d.id], code });
-      setCode("");
-      return r;
-    }, `принято изменение в ${d.rel}`);
+  const restore = () =>
+    void act.run(async () => proof.run({ kind: "agents.restore", ids: [d.id] }, (p) => rpc.call("agents.restore", { id: d.id, ...p } as never), { what: `Вернуть как было: ${d.rel}`, detail: "Файл будет записан в том виде, в каком вы его одобряли." }), "Готово: настройки агента возвращены, тревога снята");
+  const accept = () =>
+    void act.run(async () => proof.run({ kind: "agents.accept", ids: [d.id] }, (p) => rpc.call("agents.accept", { ids: [d.id], ...p } as never), { what: `Принять изменение в ${d.rel}`, detail: title }), `принято изменение в ${d.rel}`);
   const reject = () =>
     void act.run(async () => {
       const r = await rpc.call("agents.reject", { ids: [d.id] });
@@ -256,37 +190,21 @@ export function CriticalAccept({ d, ov, rpc, refetch, canCode, pk }: { d: AgentD
   const acceptControls = (
     <>
       <div className="mt-2 flex flex-wrap items-center gap-2">
-        {pk.has ? <button className={btnDanger} disabled={act.busy || pk.problem !== null} onClick={() => accept("passkey")}>Принять только это: касанием</button> : null}
-        {canCode ? (
-          <>
-            {pk.has ? <span className={muted}>запасной путь — код:</span> : null}
-            <CodeField value={code} onChange={setCode} />
-            <button className={btnDanger} disabled={act.busy || code.length !== 6} onClick={() => accept("code")}>Принять только это{pk.has ? " кодом" : ""}</button>
-          </>
-        ) : null}
-        <CodeHint ov={ov} />
+        <button className={btnDanger} disabled={act.busy || !proof.ready()} onClick={accept}>Принять только это</button>
       </div>
-      <p className={`mt-1 text-xs ${muted}`}>Нужен свежий {pk.has ? "код или касание" : "код"} именно на это изменение: сессия и «выбрать все» его не принимают.</p>
+      <p className={`mt-1 text-xs ${muted}`}>Нужен свежий {proof.pk.has ? "код или касание" : "код"} именно на это изменение: сессия и «выбрать все» его не принимают.</p>
     </>
   );
   const stop = ov.agents?.stop;
   return (
-    <div className="mt-2 rounded-md border border-red-400 p-2 dark:border-red-700" data-agent-critical-accept={d.id}>
-      <p className="font-semibold text-red-800 dark:text-red-300"><Rich text={title} /></p>
+    <div className="mt-2 rounded-md border border-destructive p-2" data-agent-critical-accept={d.id}>
+      <p className="font-semibold text-destructive"><Rich text={title} /></p>
       {d.rejected ? <p className="mt-1 text-xs">Вы отклонили это изменение{d.rejectedAt ? ` (${clockText(d.rejectedAt, Date.now())}, кнопкой «Это не я»)` : ""}: в одобренные настройки оно не попало. Но в самом файле оно всё ещё есть, поэтому тревога и пометка «под подозрением» остаются.</p> : null}
       {restorable ? (
         <div className="mt-2" data-agent-restore={d.id}>
           <p>Агент работает с этим изменением прямо сейчас. {restorable.action === "delete" ? "Этого файла в одобренных настройках не было — он будет удалён." : restorable.action === "json" ? "В общем файле настроек агента будут возвращены только списки MCP-серверов, как вы их одобряли; всё остальное в файле останется как есть." : "Файл будет записан в том виде, в каком вы его одобряли."} После этого защита сама перечитает файл и снимет тревогу.</p>
           <div className="mt-2 flex flex-wrap items-center gap-2">
-            {pk.has ? <button className={btnPrimary} disabled={act.busy || pk.problem !== null} onClick={() => restore("passkey")}>Вернуть как было — касанием</button> : null}
-            {canCode ? (
-              <>
-                {pk.has ? <span className={muted}>запасной путь — код:</span> : null}
-                <CodeField value={code} onChange={setCode} />
-                <button className={pk.has ? btn : btnPrimary} disabled={act.busy || code.length !== 6} onClick={() => restore("code")}>Вернуть как было{pk.has ? " кодом" : ""}</button>
-              </>
-            ) : null}
-            <CodeHint ov={ov} />
+            <button className={btnPrimary} disabled={act.busy || !proof.ready()} onClick={restore}>Вернуть как было</button>
           </div>
           {restoreNote(ap.session !== null) ? <p className="mt-1 text-xs font-semibold" data-agent-restore-fresh={d.id}>{restoreNote(ap.session !== null)}</p> : null}
         </div>
@@ -306,7 +224,6 @@ export function CriticalAccept({ d, ov, rpc, refetch, canCode, pk }: { d: AgentD
           {acceptControls}
         </Fold>
       </Fold>
-      <TouchNote text={touching} />
       <Msg error={act.error} ok={act.ok} reserve />
     </div>
   );
@@ -338,10 +255,8 @@ export function StopAgents({ rpc, refetch, stop }: { rpc: Rpc; refetch: () => vo
 export function AgentsSection({ ov, rpc, refetch, showDone }: { ov: Overview; rpc: Rpc; refetch: () => void; showDone: boolean }) {
   const ag = ov.agents;
   const [pickedIds, setPickedIds] = useSticky<number[]>("agents-picked", []);
-  const [code, setCode] = useState("");
-  const [touching, setTouching] = useState<string | null>(null);
   const act = useCodeAction(refetch);
-  const pk = usePasskey(ov);
+  const proof = useProof(ov, rpc, "agents-accept");
   if (!ag) return <div className={`${card} ${muted}`}>Наблюдатель работает внутри сторожа решений; здесь его нет (режим сторожа выключен).</div>;
   const st = ag.state;
   if (!st) return <div className={card}><Msg error={ag.error ?? "сторож не ответил"} /></div>;
@@ -354,43 +269,18 @@ export function AgentsSection({ ov, rpc, refetch, showDone }: { ov: Overview; rp
   const toggle = (id: number, on: boolean) => setPickedIds((p) => toggleId(reconcileSelection(p, drifts), id, on));
   const criticalCount = drifts.filter(isCriticalDrift).length;
   const plain = selectableDriftIds(drifts);
-  const accept = (ids: number[], by: "passkey" | "code") =>
+  const accept = (ids: number[]) =>
     void act.run(async () => {
       const problem = agentAcceptProblem(ids, drifts);
       if (problem) throw new Error(problem);
-      setTouching(null);
-      if (by === "passkey") {
-        const t = await touchFor(rpc, { kind: "agents.accept", ids }, setTouching);
-        if (!t) throw new Error("касание не требуется");
-        const r = await rpc.call("agents.accept", { ids, passkey: t.passkey });
-        setTouching(null);
-        setPickedIds([]);
-        return { note: `${r.note}. Сторож описал действие так: «${t.description}» (точное действие записано в его журнале).` };
-      }
-      const r = await rpc.call("agents.accept", { ids, code });
-      setCode("");
+      const r = (await proof.run({ kind: "agents.accept", ids }, (p) => rpc.call("agents.accept", { ids, ...p } as never), { what: ids.length === 1 ? "Принять одно изменение в настройках агентов" : `Принять изменения в настройках агентов: ${ids.length}` })) as { note: string };
       setPickedIds([]);
       return r;
     }, ids.length === 1 ? "принято одно изменение" : `приняты изменения: ${ids.length}`);
-  const canCode = !pk.keyOnly;
   const buttons = (ids: number[], label: string) =>
     ids.length === 0 ? null : (
       <div className="flex flex-wrap items-center gap-2">
-        {pk.has ? (
-          <button className={btnPrimary} disabled={act.busy || pk.problem !== null} onClick={() => accept(ids, "passkey")}>
-            {label} касанием
-          </button>
-        ) : null}
-        {canCode ? (
-          <>
-            {pk.has ? <span className={muted}>запасной путь — код:</span> : null}
-            <CodeField value={code} onChange={setCode} />
-            <button className={pk.has ? btn : btnPrimary} disabled={act.busy || code.length !== 6} onClick={() => accept(ids, "code")}>
-              {label}{pk.has ? " кодом" : ""}
-            </button>
-          </>
-        ) : null}
-        <CodeHint ov={ov} />
+        <button className={btnPrimary} disabled={act.busy || !proof.ready()} onClick={() => accept(ids)}>{label}</button>
       </div>
     );
   return (
@@ -422,7 +312,7 @@ export function AgentsSection({ ov, rpc, refetch, showDone }: { ov: Overview; rp
         <ul className={`list-disc pl-5 text-xs ${muted}`}>{st.notes!.map((n, i) => <li key={i} className="break-all">{n.text}</li>)}</ul>
       ) : null}
       {firstBaseline ? (
-        <div className={`${card} space-y-2 border-yellow-500/70`}>
+        <div className={`${card} space-y-2 border-border`}>
           <h3 className="font-semibold">Первые одобренные настройки</h3>
           <p>Первый просмотр нашёл {pending} файлов. Если всё это — как должно быть, примите их как есть одним касанием; дальше каждое расхождение будет ждать решения.{criticalCount > 0 ? ` Критичных среди них ${criticalCount}: каждое принимается отдельно, ниже, со своим касанием и своим объяснением, что именно вы разрешаете.` : ""}</p>
           {buttons(plain, "Принять всё как есть")}
@@ -430,7 +320,7 @@ export function AgentsSection({ ov, rpc, refetch, showDone }: { ov: Overview; rp
       ) : null}
       {drifts.length === 0 ? <div className={`${card} ${muted}`}>Расхождений с одобренными настройками нет.</div> : null}
       {drifts.map((d) => (
-        <DriftCard key={d.id} d={d} picked={chosen.includes(d.id)} onPick={(on) => toggle(d.id, on)} threads={ag.threads[d.root] ?? []} marked={(ag.threads[d.root] ?? []).some((t) => ag.marked[t]?.includes(d.id))} accept={<>{drawableParts(d.parts).length > 0 ? <PartsPanel d={d} ov={ov} rpc={rpc} refetch={refetch} canCode={canCode} pk={pk} /> : null}{isCriticalDrift(d) ? <CriticalAccept d={d} ov={ov} rpc={rpc} refetch={refetch} canCode={canCode} pk={pk} /> : null}</>} />
+        <DriftCard key={d.id} d={d} picked={chosen.includes(d.id)} onPick={(on) => toggle(d.id, on)} threads={ag.threads[d.root] ?? []} marked={(ag.threads[d.root] ?? []).some((t) => ag.marked[t]?.includes(d.id))} accept={<>{drawableParts(d.parts).length > 0 ? <PartsPanel d={d} ov={ov} rpc={rpc} refetch={refetch} /> : null}{isCriticalDrift(d) ? <CriticalAccept d={d} ov={ov} rpc={rpc} refetch={refetch} /> : null}</>} />
       ))}
       {plain.length > 0 && !firstBaseline ? (
         <div className={`${card} space-y-2`}>
@@ -443,7 +333,6 @@ export function AgentsSection({ ov, rpc, refetch, showDone }: { ov: Overview; rp
           <p className={`text-xs ${muted}`}>Критичные изменения ({criticalCount}) в «выбрать все» не входят: у каждого свой блок с кнопкой выше. «Оставить» — ничего не нажимать: расхождение видно, пока его не примут или пока файл не вернут как был.</p>
         </div>
       ) : null}
-      <TouchNote text={touching} />
       <Msg error={act.error} ok={act.ok} reserve />
       {(st.recent ?? []).length > 0 ? (
         <Fold id="agents-recent" summaryClassName={`cursor-pointer ${muted}`} summary={`Недавно закрытые (${st.recent!.length})`}>

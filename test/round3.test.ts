@@ -156,7 +156,7 @@ describe("5. the same sentence once; no dead button", () => {
   });
   it("a button that would add nothing is not shown", () => {
     expect(trustButton({ entry: "path:/x", level: "own", queueId: 4 }).enabled).toBe(false);
-    expect(app).toMatch(/\{trust\.enabled \? <button/);
+    expect(app).toMatch(/\{trust\.enabled \? \(?\s*<(Tip|Button|button)/);
   });
 });
 
@@ -191,8 +191,8 @@ describe("7. the session", () => {
     expect(firstButtonAfter(d.getElementById("code")!)).toBeNull();
     expect(app).toMatch(/e\.key !== "Enter"/);
   });
-  it("«Открыть на 1 час» exists and reaches the server as `hour`", () => {
-    expect(app).toContain("Открыть на 1 час");
+  it("the one-hour session exists («на 1 час» next to «Открыть» in the header) and reaches the server as `hour`", () => {
+    expect(app).toContain("на 1 час");
     expect(readFileSync(new URL("../src/contract.ts", import.meta.url), "utf8")).toMatch(/"session\.open": \{ input: s\.object\(\{ \.\.\.factor, hour: s\.optional\(s\.boolean\(\)\) \}\)/);
   });
 });

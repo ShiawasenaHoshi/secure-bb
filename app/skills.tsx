@@ -25,7 +25,7 @@ export function SkillRow({ q, registered, rpc, refetch }: { q: SkillQueueView; r
   const canApprove = isOpen || q.state === "removed";
   const findings = (q.check?.findings ?? []).filter((f) => f.severity !== "info");
   return (
-    <div className={`${card} ${isOpen ? (q.decision === "block" ? "border-destructive" : "border-yellow-500/60") : ""}`}>
+    <div className={`${card} ${isOpen ? (q.decision === "block" ? "border-destructive" : "border-border") : ""}`}>
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h3 className="font-semibold">{q.name} <span className={`text-xs font-normal ${muted}`}>({q.scope})</span></h3>
         <span className={muted}>{skillState[q.state]} · {when(q.firstSeen)}</span>
@@ -127,7 +127,7 @@ export function SkillsSection({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnT
         <Msg error={act.error} />
       </div>
       {k.unchecked.length > 0 ? (
-        <div className={`${card} border-yellow-500/60`}>
+        <div className={`${card} border-border`}>
           <h4 className="font-medium">Не удалось прочитать (проверка не проводилась, в окне не принимаются)</h4>
           <ul className="list-disc pl-5 font-mono text-xs">{k.unchecked.map((u) => <li key={u} className="break-all">{u}</li>)}</ul>
         </div>

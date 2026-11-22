@@ -8,6 +8,7 @@ import type { PasskeyAssertion } from "../src/guardlink";
 import { humanError, firstButtonAfter, startTouchNote } from "../src/ux";
 import { createDrafts } from "../src/drafts";
 import { pressTracker } from "../src/stable-view";
+import { ConfirmCancelled } from "./confirm-dialog";
 import { card, input, muted, DoneContext, LOCK_MS } from "./ui";
 
 // What was typed in a code field lives OUTSIDE the components, by the id of the card: a refresh of the data, or a card that is built again, does not take it away.
@@ -32,6 +33,8 @@ export const press = typeof document !== "undefined" ? pressTracker(document) : 
 
 export const PRESS_MAX_AGE_MS = 120_000;
 
+export const SETTLE_REFETCH_MS = [1_500, 4_000];
+
 /** A one-shot action that needs a fresh TOTP code. `done` (a short phrase: «удалён плагин X 1.0») is announced as «Готово: …» where the cards are. */
 export function useCodeAction(refetch: () => void, opts: { pin?: boolean; slot?: { key: string; elId: string } } = {}) {
   const [busy, setBusy] = useState(false);
@@ -50,8 +53,11 @@ export function useCodeAction(refetch: () => void, opts: { pin?: boolean; slot?:
     setOk(null);
     try {
       const res = (await fn()) as { note?: string } | undefined;
+      // A card that leaves a line of its own («Готово: …») says the result there: a second plate with the same news is not shown.
+      const leavesLine = done !== undefined && opts.slot !== undefined;
       if (res?.note) {
-        if (opts.pin) announce(res.note, { kind: "info", anchor });
+        if (leavesLine) undefined;
+        else if (opts.pin) announce(res.note, { kind: "info", anchor });
         else setOk(res.note);
       }
       if (done) {
@@ -61,7 +67,11 @@ export function useCodeAction(refetch: () => void, opts: { pin?: boolean; slot?:
         window.setTimeout(() => { if (alive.current) setLocked(false); }, LOCK_MS);
       }
       refetch();
+      // The core takes a moment to start or stop what was decided: asked again, so the statuses on the page are the settled ones, not those of the first instant.
+      for (const ms of SETTLE_REFETCH_MS) window.setTimeout(refetch, ms);
     } catch (e) {
+      // The person closed the confirmation dialog: they changed their mind, nothing went wrong.
+      if (e instanceof ConfirmCancelled) return;
       // The server's words are English and have inner names in them: the person reads a Russian sentence; the original goes to the console for whoever looks.
       const raw = e instanceof Error ? e.message : String(e);
       console.error("[secure-bb]", raw);

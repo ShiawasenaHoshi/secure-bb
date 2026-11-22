@@ -4,6 +4,7 @@ import type { SecureBbRpc } from "../server";
 import type { Overview, PluginView } from "../src/overview";
 import type { CheckResult } from "../src/checks/types";
 import { approvedByText, launchProblem } from "../src/ux";
+import { truthfulApproval } from "../src/factor";
 import { useApproval } from "./approval";
 import { ChecksView } from "./checks";
 import { useCodeAction, CodeField, type Rpc } from "./code";
@@ -34,6 +35,7 @@ export function PluginWindowOpen({ p, ov, rpc, refetch }: { p: PluginView; ov: O
 
 export function PluginRow({ p, ov, rpc, refetch, registered, checks }: { p: PluginView; ov: Overview; checks: Record<string, CheckResult>; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void; registered: boolean }) {
   const now = useNow();
+  const factorCtx = { guardMode: ov.guard?.connected === true, recent: ov.guard?.recent ?? [] };
   const ap = useApproval();
   const [code, setCode] = useState("");
   const act = useCodeAction(refetch);
@@ -43,10 +45,10 @@ export function PluginRow({ p, ov, rpc, refetch, registered, checks }: { p: Plug
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h3 className="font-semibold">{p.id} <span className={muted}>{p.version} · {p.status}</span></h3>
         <span className={muted}>
-          {p.pin ? `${p.frozenPin ? "закреплена при заморозке" : "пин"}: ${p.pin.version} (${approvedByText(p.pin, now)})` : p.unreviewedBaseline ? "стоял до secure-bb, не проверялся" : "не одобрен"}
+          {p.pin ? `${p.frozenPin ? "закреплена при заморозке" : "пин"}: ${p.pin.version} (${approvedByText(truthfulApproval(p.pin, factorCtx), now)})` : p.unreviewedBaseline ? "стоял до secure-bb, не проверялся" : "не одобрен"}
         </span>
       </div>
-      {launchProblem(p) && p.pin ? <p className="mt-1 font-semibold text-red-700 dark:text-red-400" role="alert">{launchProblem(p)}</p> : null}
+      {launchProblem(p) && p.pin ? <p className="mt-1 font-semibold text-destructive" role="alert">{launchProblem(p)}</p> : null}
       <p className={muted}>{p.window ? windowLine(p.window, remaining) : "окно закрыто"}</p>
       {!p.window ? <PluginWindowOpen p={p} ov={ov} rpc={rpc} refetch={refetch} /> : null}
       {p.pin ? <ChecksView id={`plugin-${p.id}`} result={checks[p.pin.contentHash]} /> : null}
@@ -66,7 +68,7 @@ export function PluginRow({ p, ov, rpc, refetch, registered, checks }: { p: Plug
         <Fold id={`plugin-${p.id}-history`} className="mt-1" summary={`История (${p.history.length})`}>
           <ul className="mt-1 list-disc pl-5">
             {p.history.map((h) => (
-              <li key={h.id}>{h.version} · {approvedByText(h, now)}</li>
+              <li key={h.id}>{h.version} · {approvedByText(truthfulApproval(h, factorCtx), now)}</li>
             ))}
           </ul>
         </Fold>

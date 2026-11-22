@@ -8,22 +8,25 @@ import { doneMessage, sameData } from "../src/ux";
 import { splitNotes, toastPosition, type Box } from "../src/stable-view";
 import { isFoldOpen, toggleFold } from "../src/fold";
 import { press } from "./code";
+import { buttonVariants } from "../components/ui/button";
+import { Accordion } from "../components/ui/accordion";
+import { cn } from "../lib/utils";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/tooltip";
 
 export const card = "rounded-lg border border-border bg-card p-4 text-sm text-card-foreground";
 
-export const btn =
-  "rounded-md border border-border px-3 py-1.5 text-sm font-medium hover:bg-muted disabled:opacity-50";
+/** The bb button look for the buttons that are plain <button>s (the rest of the page uses <Button>); the theme's tokens only. */
+export const btn = buttonVariants({ variant: "outline", size: "sm" });
 
-export const btnPrimary =
-  "rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50";
+export const btnPrimary = buttonVariants({ size: "sm" });
 
-export const input = "w-28 rounded-md border border-border bg-background px-2 py-1.5 font-mono text-sm tracking-widest";
+export const input = "w-28 rounded-md border border-input bg-background px-2 py-1.5 font-mono text-sm tracking-widest";
 
 export const muted = "text-muted-foreground";
 
-export const cardBlocked = "rounded-lg border-2 border-red-600 bg-red-50 p-4 text-sm text-red-950 dark:border-red-500 dark:bg-red-950/40 dark:text-red-100";
+export const cardBlocked = "rounded-lg border border-l-4 border-border border-l-destructive bg-card p-4 text-sm text-card-foreground";
 
-export const btnDanger = "rounded-md border border-red-600 bg-transparent px-3 py-1.5 text-sm text-red-700 hover:bg-red-100 disabled:opacity-50 dark:border-red-400 dark:text-red-300 dark:hover:bg-red-950";
+export const btnDanger = cn(buttonVariants({ variant: "outline", size: "sm" }), "border-destructive text-destructive hover:bg-destructive/10 hover:text-destructive");
 
 export const minutes = (sec: number): string => (sec < 60 ? `${sec} с` : `${Math.ceil(sec / 60)} мин`);
 
@@ -37,14 +40,23 @@ export function useOverview() {
   // draw), so the call goes through a ref.
   const rpcRef = useRef(rpc);
   rpcRef.current = rpc;
+  // Answers can come in another order than they were asked for (a poll, a «changed» signal and the refetch after an action are in flight together): only an answer
+  // newer than the one on the screen is taken, so an older overview never replaces a newer one.
+  const asked = useRef(0);
+  const shown = useRef(0);
   const refetch = useCallback(() => {
+    const mine = ++asked.current;
     rpcRef.current.call("overview").then(
       (ov) => {
+        if (mine < shown.current) return;
+        shown.current = mine;
         // Data that differs only by the server's clock changes nothing: the old object stays, nothing is drawn again, nothing jumps.
         setData((cur) => (cur !== null && sameData(cur, ov) ? cur : ov));
         setError(null);
       },
-      (e: unknown) => setError(e instanceof Error ? e.message : String(e)),
+      (e: unknown) => {
+        if (mine >= shown.current) setError(e instanceof Error ? e.message : String(e));
+      },
     );
   }, []);
   useEffect(() => {
@@ -98,6 +110,37 @@ export function Fold({ id, summary, children, defaultOpen = false, className, su
   );
 }
 
+/** A hint on hover and on keyboard focus (a disabled button gets none of its own, so the wrapper is a span that takes it). */
+export function Tip({ tip, children, className }: { tip: ReactNode; children: ReactNode; className?: string }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className={cn("inline-flex", className)}>{children}</span>
+      </TooltipTrigger>
+      <TooltipContent>{tip}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+/** The disclosure of the bb look (Accordion) whose state is kept the way Fold's is: by id, outside the component, so a redraw does not close it. */
+export function FoldAccordion({ id, title, children, defaultOpen = false, className }: { id: string; title: ReactNode; children: ReactNode; defaultOpen?: boolean; className?: string }) {
+  const [, redraw] = useReducer((n: number) => n + 1, 0);
+  return (
+    <Accordion
+      id={`fold-${id}`}
+      className={className}
+      title={title}
+      open={isFoldOpen(id, defaultOpen)}
+      onOpenChange={() => {
+        toggleFold(id, defaultOpen);
+        redraw();
+      }}
+    >
+      {children}
+    </Accordion>
+  );
+}
+
 /** Counts down locally between refetches. */
 export function useNow(): number {
   const [now, setNow] = useState(Date.now());
@@ -148,7 +191,7 @@ export function AnchoredNotes() {
       {placed.map((n, i) => {
         const pos = toastPosition(n.anchor!, viewport, { ...TOAST_SIZE, height: TOAST_SIZE.height * (i + 1) });
         return (
-          <p key={n.id} role="status" aria-live="polite" data-secure-bb-toast style={{ position: "fixed", left: pos.left, top: pos.top + i * TOAST_SIZE.height, maxWidth: TOAST_SIZE.width }} className={`z-30 flex items-start justify-between gap-2 rounded-md border px-3 py-2 text-sm font-semibold shadow ${n.kind === "error" ? "border-red-600/60 bg-red-50 text-red-900 dark:bg-red-950 dark:text-red-100" : "border-green-600/50 bg-green-50 text-green-900 dark:bg-green-950 dark:text-green-100"}`}>
+          <p key={n.id} role="status" aria-live="polite" data-secure-bb-toast style={{ position: "fixed", left: pos.left, top: pos.top + i * TOAST_SIZE.height, maxWidth: TOAST_SIZE.width }} className={`z-30 flex items-start justify-between gap-2 rounded-md border px-3 py-2 text-sm font-semibold shadow ${n.kind === "error" ? "border-destructive bg-card text-destructive" : "border-border bg-card text-card-foreground"}`}>
             <span>{n.kind === "done" ? doneMessage(n.text) : n.text}</span>
             {n.kind === "error" ? <button type="button" className="underline" onClick={() => dismiss(n.id)}>Закрыть</button> : null}
           </p>
@@ -171,7 +214,7 @@ export function PinnedNotes() {
     <div className="pointer-events-none fixed inset-x-0 top-2 z-30 mx-auto w-full max-w-3xl px-4" data-secure-bb-pinned>
       <div className="space-y-1" role="status" aria-live="polite">
         {notes.map((n) => (
-          <p key={n.id} className={`pointer-events-auto flex items-start justify-between gap-2 rounded-md border px-3 py-2 text-sm font-semibold shadow ${n.kind === "error" ? "border-red-600/60 bg-red-50 text-red-900 dark:bg-red-950 dark:text-red-100" : "border-green-600/50 bg-green-50 text-green-900 dark:bg-green-950 dark:text-green-100"}`}>
+          <p key={n.id} className={`pointer-events-auto flex items-start justify-between gap-2 rounded-md border px-3 py-2 text-sm font-semibold shadow ${n.kind === "error" ? "border-destructive bg-card text-destructive" : "border-border bg-card text-card-foreground"}`}>
             <span>{n.kind === "done" ? doneMessage(n.text) : n.text}</span>
             {n.kind === "error" ? <button type="button" className="underline" onClick={() => dismiss(n.id)}>Закрыть</button> : null}
           </p>

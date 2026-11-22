@@ -65,7 +65,7 @@ export function PasskeyCard({ ov, rpc, refetch, enrollToken }: { ov: Overview; r
         Ключи: {pk.keys.length === 0 ? "нет" : pk.keys.map((k) => `${k.label} — хранится: ${aaguidName(k.aaguid)}${k.lastUsedAt ? ` (последний раз ${when(k.lastUsedAt)})` : ""}`).join("; ")}.
         {pk.totpOff ? " Коды (TOTP) у сторожа выключены: подтверждает только ключ." : " Код остаётся запасным путём."}
       </p>
-      {pk.keys.some((k) => isPasswordManager(aaguidName(k.aaguid))) ? <p className="mt-2 text-yellow-700 dark:text-yellow-400">Ключ сохранён в менеджере паролей, а не в системе. Его расширение в браузере может перехватить запрос на касание: если «ничего не происходит», посмотрите его окно.</p> : null}
+      {pk.keys.some((k) => isPasswordManager(aaguidName(k.aaguid))) ? <p className="mt-2 text-foreground">Ключ сохранён в менеджере паролей, а не в системе. Его расширение в браузере может перехватить запрос на касание: если «ничего не происходит», посмотрите его окно.</p> : null}
       {state.problem ? <p className="mt-2 text-destructive">{state.problem}</p> : null}
       <div className="mt-2 flex flex-wrap items-center gap-2">
         <input className="w-52 rounded-md border border-border bg-background px-2 py-1.5 font-mono text-sm" placeholder="XXXX-XXXX-XXXX" aria-label="Токен с консоли сторожа" value={token} onChange={(e) => setToken(e.target.value.slice(0, 40))} />
@@ -93,79 +93,6 @@ export const whyOf = (detail: unknown): string | null => {
   const why = (detail as { why?: unknown } | null)?.why;
   return typeof why === "string" ? why : null;
 };
-
-export const MODE_RANK_UI = { simple: 0, detailed: 1, strict: 2 } as const;
-
-/** Trust by source and rights: the mode and "my sources". Both are the guard's; the guard checks every touch itself. */
-export function TrustCard({ ov, rpc, refetch }: { ov: Overview; rpc: Rpc; refetch: () => void }) {
-  const t = ov.guard?.trust ?? null;
-  const [entry, setEntry] = useState("");
-  const [code, setCode] = useState("");
-  const [touching, setTouching] = useState<string | null>(null);
-  const act = useCodeAction(refetch);
-  const pk = usePasskey(ov);
-  if (!t) return <div className={card}><p className={muted}>Этот сторож не знает «доверия по источнику» (старая версия): версии проходят только по одобрению или окну.</p></div>;
-  /** Runs one action that may take a touch: a key if there is one and no code was typed, else the code. A narrowing needs none (the guard says so). */
-  const touch = (query: Record<string, unknown>, send: (proof: { code?: string; passkey?: PasskeyAssertion }) => Promise<unknown>) =>
-    void act.run(async () => {
-      const k = pk.has && code.length !== 6 ? await touchFor(rpc, query, setTouching) : null;
-      await send(k ? { passkey: k.passkey } : code.length === 6 ? { code } : {});
-      setCode("");
-      setTouching(null);
-      if (k) return { note: `Сохранено касанием. Сторож описал действие так: «${k.description}».` };
-      return code.length === 6 ? undefined : { note: SAVED_NARROWING };
-    });
-  const mine = t.mySources;
-  const oldRepos = ov.trustedRepos.map((r) => `github:${r}`).filter((r) => !mine.includes(r));
-  return (
-    <div className={card}>
-      <h3 className="font-semibold">Доверие по источнику и правам</h3>
-      <p className={muted}>
-        Новая версия плагина проходит сама, только если её источник «свой» (список ниже) или «известный» (официальный каталог, который назвал владелец сторожу), у плагина есть одобренная версия из того же источника, <b>права не выросли</b> и жёстких флагов нет. Права сторож считает сам, по каталогу плагина; слова плагина о себе не учитываются. Остальное идёт в очередь.
-      </p>
-      <div className="mt-2 flex flex-wrap items-center gap-2">
-        <span>Режим:</span>
-        {(["simple", "detailed", "strict"] as const).map((m) => (
-          <button key={m} className={m === t.mode ? btnPrimary : btn} disabled={act.busy || m === t.mode || (MODE_RANK_UI[m] < MODE_RANK_UI[t.mode] && pk.has && pk.keyOnly && pk.problem !== null)} onClick={() => touch({ kind: "trust.mode", trustMode: m }, (proof) => rpc.call("trust.mode", { mode: m, ...proof } as never))}>
-            {MODE_NAMES[m]}
-          </button>
-        ))}
-        <span className={muted}>{MODE_DESCRIPTIONS[t.mode]}</span>
-      </div>
-      <p className={`mt-1 ${muted}`}>Усилить режим — без касания; ослабить — касанием или кодом.</p>
-      <h4 className="mt-3 font-medium">Мои источники ({mine.length})</h4>
-      {mine.length === 0 ? <p className={muted}>Список пуст: ничего не проходит само (кроме окон доверия и одобренных версий).</p> : (
-        <ul className="mt-1 space-y-1 font-mono text-xs">
-          {mine.map((e) => (
-            <li key={e} className="flex items-center gap-2">
-              {e}
-              <button className={btn} disabled={act.busy} onClick={() => void act.run(async () => { await rpc.call("trust.remove", { entry: e } as never); return { note: SAVED_NARROWING }; })}>Убрать</button>
-            </li>
-          ))}
-        </ul>
-      )}
-      <p className={`mt-1 ${muted}`}>Убрать — без касания. Уже одобренные версии остаются одобренными; следующие версии из этого источника сторож спросит.</p>
-      {t.known.length > 0 ? <p className={`mt-2 ${muted}`}>Известные источники (названы при запуске сторожа): <span className="font-mono">{t.known.join(", ")}</span></p> : null}
-      {t.pluginsRoots === 0 ? <p className="mt-2 text-destructive">У сторожа не задан каталог плагинов ядра (<span className="font-mono">--plugins-root</span>): плагины из git сами не пройдут. Плагины с диска (<span className="font-mono">path:</span>) читаются по своему пути.</p> : null}
-      <div className="mt-2 flex flex-wrap items-center gap-2">
-        <input className="rounded border border-border bg-transparent px-2 py-1 font-mono text-xs" placeholder="owner/name, owner/* или path:/каталог" value={entry} onChange={(e) => setEntry(e.target.value)} />
-        {pk.has ? <span className={muted}>касание или код:</span> : null}
-        {pk.keyOnly ? null : <CodeField value={code} onChange={setCode} />}
-        <button className={btnPrimary} disabled={act.busy || entry.trim() === "" || (!pk.has && code.length !== 6)} onClick={() => touch({ kind: "trust.add", entries: [entry.trim()] }, (proof) => rpc.call("trust.add", { entries: [entry.trim()], ...proof } as never).then(() => setEntry("")))}>
-          Добавить (касание)
-        </button>
-        {oldRepos.length > 0 ? (
-          <button className={btn} disabled={act.busy || (!pk.has && code.length !== 6)} onClick={() => touch({ kind: "trust.migrate" }, (proof) => rpc.call("trust.migrate", proof as never))}>
-            Перенести из «доверенных репозиториев» ({oldRepos.length})
-          </button>
-        ) : null}
-      </div>
-      {pk.has && pk.problem ? <p className="mt-1 text-destructive">{pk.problem}</p> : null}
-      <TouchNote text={touching} />
-      <Msg error={act.error} ok={act.ok} />
-    </div>
-  );
-}
 
 export function GuardCard({ ov, rpc, refetch, enrollToken }: { ov: Overview; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void; enrollToken: string | null }) {
   const g = ov.guard;

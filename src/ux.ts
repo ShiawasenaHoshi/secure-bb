@@ -1252,7 +1252,7 @@ export function manualRollback(path: string, reasons: string[]): string {
   return `Откройте файл ${path} и: ${what}. Через минуту защита перечитает файл; когда всё вернётся к одобренным настройкам, тревога уйдёт сама.`;
 }
 
-/** Where the card of the agents' differences is shown: on the «Статус» tab while something critical or an alarm waits there, else in «Подробно». */
+/** Where the card of the agents' differences is shown: on the «Обзор» tab while something critical or an alarm waits there, else in «Журнал». */
 export function agentsSectionTab(i: { critical: number; alarms: number }): TabId {
   return i.critical > 0 || i.alarms > 0 ? "status" : "more";
 }
@@ -1982,7 +1982,7 @@ export interface ProtectedRow {
   version: string;
   approved: string;
 }
-export const AI_SCAN_OFF_TEXT = "ИИ-скан выключен: включить его можно на вкладке «Подробно», в разделе «Гейт плагинов — ИИ-скан».";
+export const AI_SCAN_OFF_TEXT = "ИИ-скан выключен: включить его можно на вкладке «Журнал», в разделе «Гейт плагинов — ИИ-скан».";
 export const AI_SCAN_NOT_YET_TEXT = "ИИ-скан: ещё не запускался (кнопка запуска — рядом).";
 export const aiScanEmptyText = (enabled: boolean): string => (enabled ? AI_SCAN_NOT_YET_TEXT : AI_SCAN_OFF_TEXT);
 export const NO_RIGHTS_TEXT = "права не определены (версию ещё не проверяли)";

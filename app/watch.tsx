@@ -24,7 +24,7 @@ export function DriftRow({ d, registered, rpc, refetch }: { d: Drift; registered
   const isOpen = d.status === "open" || d.status === "rollback-failed";
   const change = d.kind === "added" ? `новое: ${d.after}` : d.kind === "removed" ? `пропало (было: ${d.before})` : `${d.before} → ${d.after}`;
   return (
-    <div className={`${card} ${isOpen ? "border-yellow-500/60" : ""}`}>
+    <div className={`${card} ${isOpen ? "border-border" : ""}`}>
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h3 className="font-semibold">{d.label}</h3>
         <span className={muted}>{driftStatus[d.status]} · {when(d.firstSeen)}</span>
@@ -133,7 +133,7 @@ export function WatchSection({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnTy
       ) : null}
 
       {w.failed.length > 0 ? (
-        <div className={`${card} border-yellow-500/60`}>
+        <div className={`${card} border-border`}>
           <h4 className="font-medium">Не удалось прочитать сейчас (здесь расхождения не оцениваются)</h4>
           <ul className="list-disc pl-5">{w.failed.map((f) => <li key={f.source} className="break-all"><span className="font-mono">{f.source}</span>: {f.reason}</li>)}</ul>
         </div>
