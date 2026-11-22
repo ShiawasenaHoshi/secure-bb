@@ -14,6 +14,10 @@ sbb-guard import FILE    [--data DIR] [--yes] [--digest SHA256]
 
 Пути — из аргументов или окружения, не из кода: `--data` / `SBB_GUARD_DATA` (по умолчанию `/var/sbb-guard`), `--socket` / `SBB_GUARD_SOCKET` (по умолчанию `/var/run/sbb-guard/guard.sock` — **вне** каталога данных), `--socket-gid` / `SBB_GUARD_SOCKET_GID` (группа сокета: в ней должен быть только пользователь bb). Для тестов — временный каталог.
 
+## Из чего собран `Guard`
+
+Класс `Guard` (`guard/src/guard.ts`) — фасад над цепочкой слоёв, по файлу на слой; слой зовёт только то, что ниже него (импорты идут в одну сторону, `test/dependency-rules.test.ts` ловит цикл): `guard-base.ts` (база данных, часы, журнал, чтение политики и режима) → `agents-plan.ts` (что известно о возврате файла агента) → `guard-actions.ts` (какое действие и какими словами подтверждается) → `factor.ts` (TOTP, сессия, passkey, `verifyFactor`) → `windows.ts` (окна, политика окон, режим отладки) → `queue.ts` (очередь, одобрения, пакеты, списки источников) → `decide.ts` (`decide`, `hold`, `evaluate`, `windowRefuses`, `sourceVerdict`) → `agents-watch.ts` (скан файлов агентов, расхождения) → `agents-apply.ts` (вернуть файл, части настроек). Слова и строки таблиц — в `guard-types.ts`. Публичный API класса и экспорты `guard.ts` прежние.
+
 ## Что где лежит
 
 | Путь | Что | Права |
