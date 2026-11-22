@@ -16,6 +16,8 @@ const META_ALIVE = "alive_at";
 const META_STOP = "alive_stop";
 const META_SAFE = "alive_safe_mode";
 const META_GAP_ACK = "alive_gap_ack";
+const META_REVIEWED = "alive_reviewed";
+const MAX_REVIEWED = 100;
 
 export interface GapAlarm {
   from: number;
@@ -44,6 +46,8 @@ export interface AliveView {
   safeModeSeen: boolean;
   /** The newest gap was set aside with «Понятно». */
   gapsAckedAt: number | null;
+  /** The gaps (by their `at`) the owner looked at and confirmed with a code or a touch («Я проверил»): not shown red any more; they stay in the journal. */
+  reviewedAts: number[];
   /** The core holds the unvetted plugins while the gate plugin is down (now, from the environment). */
   coreHolds: boolean;
 }
@@ -124,7 +128,31 @@ export class Alive {
     const gaps = store.listLogKinds(["gate.gap"], since, 5).map((r) => r.detail as unknown as GapAlarm);
     const safeModeSeen = store.listLogKinds(["safe-mode.on"], since, 1).length > 0;
     const ack = store.getMeta(META_GAP_ACK);
-    return { lastBeat: beat === null ? null : Number(beat), gaps, safeMode: this.safeModeNow, safeModeSeen, gapsAckedAt: ack === null ? null : Number(ack), coreHolds: this.d.coreHolds === true };
+    return { lastBeat: beat === null ? null : Number(beat), gaps, safeMode: this.safeModeNow, safeModeSeen, gapsAckedAt: ack === null ? null : Number(ack), reviewedAts: this.reviewedAts(), coreHolds: this.d.coreHolds === true };
+  }
+
+  private reviewedAts(): number[] {
+    try {
+      const j = JSON.parse(this.d.store.getMeta(META_REVIEWED) ?? "[]") as unknown;
+      return Array.isArray(j) ? j.filter((x): x is number => typeof x === "number") : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * «Я проверил»: the owner looked at THESE gaps (named by their `at`) and confirmed it with a code or a touch (the caller has checked the factor). They are not shown red
+   * any more; the journal records the gaps themselves and this confirmation, with what confirmed it. A gap that comes later is a different `at` and is red again.
+   * Only gaps the journal really has can be confirmed. Returns how many were confirmed now.
+   */
+  reviewGaps(ats: number[], via: "code" | "passkey"): number {
+    const known = new Set(this.d.store.listLogKinds(["gate.gap"], this.d.now() - ALARM_KEEP_MS, 100).map((r) => (r.detail as unknown as GapAlarm).at));
+    const have = new Set(this.reviewedAts());
+    const fresh = [...new Set(ats)].filter((at) => known.has(at) && !have.has(at));
+    if (fresh.length === 0) return 0;
+    this.d.store.setMeta(META_REVIEWED, JSON.stringify([...have, ...fresh].slice(-MAX_REVIEWED)));
+    this.d.store.log("gate.gap.review", null, null, { ats: fresh, via, at: this.d.now() });
+    return fresh.length;
   }
 
   /** «Понятно»: the gaps up to now are set aside (the journal keeps them). */

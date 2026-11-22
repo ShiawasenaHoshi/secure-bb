@@ -191,7 +191,7 @@ export function createGuardHelpers(c: Core & Services) {
    * In guard mode a code that arrives with any RPC is checked by the guard first (it consumes the code there: the secret is not here),
    * and the handler then runs with the mark that says so. RPCs that need more than that (they act at the guard) do it themselves.
    */
-  const OWN_GUARD_PATH = new Set(["queue.approve", "queue.approveTrust", "batch.approve", "window.open", "policy.set", "session.open", "totp.begin", "totp.confirm", "agents.accept", "agents.restore", "agents.keepPart", "agents.rollbackPart", "agents.revokeKept", "trust.mode", "trust.add", "trust.migrate"]);
+  const OWN_GUARD_PATH = new Set(["queue.approve", "queue.approveTrust", "batch.approve", "window.open", "policy.set", "alive.review", "session.open", "totp.begin", "totp.confirm", "agents.accept", "agents.restore", "agents.keepPart", "agents.rollbackPart", "agents.revokeKept", "trust.mode", "trust.add", "trust.migrate"]);
   const withGuardTouch = <T extends object>(handlers: T): T => {
     const out: Record<string, unknown> = {};
     if (!guardLink) {

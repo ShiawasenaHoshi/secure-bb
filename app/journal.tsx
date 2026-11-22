@@ -37,6 +37,7 @@ export function logExtra(l: Overview["log"][number]): string {
     return ` · окно закрыто: загрязнение (${((d.kinds as string[] | undefined) ?? []).map((k) => TAINT_LABEL[k as TaintKind] ?? k).join(", ")}); ${((d.lines as string[] | undefined) ?? []).join("; ")}`;
   if (l.kind === "trusted.add" || l.kind === "trusted.remove") return ` · ${(d.pattern as string | undefined) ?? ""}`;
   if (l.kind === "journal.alarm") return ` · цепочка нарушена: ${((d.problems as Array<{ kind: string; id: number | null }> | undefined) ?? []).map((p) => `${p.kind}${p.id ? ` #${p.id}` : ""}`).join(", ")}`;
+  if (l.kind === "gate.gap.review") return ` · тревогу о простое проверили: ${((d.ats as number[] | undefined) ?? []).length} перерыв(ов), подтверждено ${d.via === "passkey" ? "касанием" : "кодом"}`;
   return "";
 }
 

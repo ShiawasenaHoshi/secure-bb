@@ -4,7 +4,7 @@ import type { CheckResult } from "./checks/types.js";
 import { assess, type Assessment, type Probe } from "./detect.js";
 import type { Gate, TotpState } from "./gate.js";
 import type { AgentsView } from "./agents.js";
-import type { GuardApproval, GuardJournalReport, GuardPort, GuardState, GuardTrust } from "./guardlink.js";
+import type { GuardApproval, GuardJournalReport, GuardMaintenance, GuardPort, GuardState, GuardTrust } from "./guardlink.js";
 import { realpath } from "node:fs/promises";
 import type { JournalReport } from "./journal.js";
 import type { InstalledPluginLite } from "./probe.js";
@@ -88,6 +88,8 @@ export interface GuardView {
   trust: GuardTrust | null;
   /** Troubleshooting mode (the owner switched it on at the guard's console): until when the guard passes everything and writes each decision down; 0: off. */
   troubleshootUntil: number;
+  /** The planned maintenance windows the owner declared at the console (an update): a pause of this plugin inside one is a calm line, not an alarm. */
+  maintenance: GuardMaintenance[];
   passkey: { rpId: string; origin: string; keys: Array<{ id: number; label: string; createdAt: number; lastUsedAt: number | null; aaguid?: string }>; enrollmentOpen: boolean; totpOff: boolean } | null;
 }
 export interface Overview {
@@ -222,7 +224,7 @@ async function guardOverlay(d: OverviewDeps, port: GuardPort): Promise<{ view: G
   try {
     state = await port.state();
   } catch (err) {
-    return { view: { connected: false, error: err instanceof Error ? err.message : String(err), journal: null, recent: [], revoked: [], trust: null, troubleshootUntil: 0, passkey: null }, state: null };
+    return { view: { connected: false, error: err instanceof Error ? err.message : String(err), journal: null, recent: [], revoked: [], trust: null, troubleshootUntil: 0, maintenance: [], passkey: null }, state: null };
   }
   // A second factor exists if either kind does: a guard with passkeys only (codes switched off) is as registered as one with a TOTP secret.
   const keys = state.passkeys?.keys ?? [];
@@ -247,6 +249,7 @@ async function guardOverlay(d: OverviewDeps, port: GuardPort): Promise<{ view: G
       revoked: state.revoked,
       trust: state.trust ?? null,
       troubleshootUntil: state.troubleshoot?.until ?? 0,
+      maintenance: state.maintenance ?? [],
       passkey: state.passkeys ? { rpId: state.passkeys.rpId, origin: state.passkeys.origin, keys, enrollmentOpen: state.passkeys.enrollmentOpen, totpOff: state.totp.disabled === true } : null,
     },
     state,
@@ -425,7 +428,7 @@ export async function buildOverview(d: OverviewDeps): Promise<Overview> {
     tainted: d.taintedThreads?.() ?? [],
     trustedRepos: d.store.trustedRepos(),
     sentinel: sentinelView(d),
-    alive: d.alive?.view() ?? { lastBeat: null, gaps: [], safeMode: null, safeModeSeen: false, gapsAckedAt: null, coreHolds: false },
+    alive: d.alive?.view() ?? { lastBeat: null, gaps: [], safeMode: null, safeModeSeen: false, gapsAckedAt: null, reviewedAts: [], coreHolds: false },
     ux,
     sourceSuggestions: suggestSources(plugins.filter(isThirdParty).map((p) => ({ source: p.source, rootDir: p.rootDir })), (k, src, dir) => identityOf(k, src, dir)?.id ?? null),
   };

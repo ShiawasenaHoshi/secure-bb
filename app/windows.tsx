@@ -4,9 +4,11 @@ import type { SecureBbRpc } from "../server";
 import type { Overview, WindowView } from "../src/overview";
 import type { ConfigWindowView } from "../src/watch/watchdog";
 import { gapsBySeverity, OVERLAY_COLLAPSE_KEY, overlayView } from "../src/pageview";
+import { groupGaps } from "../src/ux";
+import { useProof } from "./proof";
 import { useApproval } from "./approval";
 import { useCodeAction } from "./code";
-import { card, btn, muted, minutes, when, useOverview, useNow, Msg } from "./ui";
+import { card, btn, muted, minutes, when, useOverview, useNow, Msg, Fold } from "./ui";
 
 export function windowLine(w: WindowView, remainingSec: number): string {
   const subs = w.scope === "tree" && w.subthreads > 0 ? ` и ${w.subthreads} вложенных чатов` : "";
@@ -70,30 +72,54 @@ export function JournalAlarm({ ov, rpc, refetch }: { ov: Overview; rpc: ReturnTy
   );
 }
 
-/** Threat model X3: the gate was off for a while (when it opened something), or bb's safe-mode is (or was) on. Shown on the page and in the strip, for a week. */
+/**
+ * Threat model X3: the gate was off for a while (when it opened something), or bb's safe-mode is (or was) on. On the page of secure-bb only (the strip over bb has one line).
+ * One line says it; «Подробнее» has the pauses and, once, what worked and what did not. «Я проверил» hides the named pauses after a code or a touch (it hides a real alarm);
+ * a pause that comes later is red again, and the journal keeps them all.
+ */
 export function AliveAlarm({ ov }: { ov: Overview }) {
+  const { rpc, refetch } = useOverview();
+  const proof = useProof(ov, rpc, "alive-review");
+  const act = useCodeAction(refetch);
   const a = ov.alive;
   const { critical } = gapsBySeverity(ov);
   if (critical.length === 0 && a.safeMode !== true && !a.safeModeSeen) return null;
   const at = (t: number) => new Date(t).toLocaleString();
-  const guardOnly = critical.length > 0 && critical.every((g) => g.text.mode === "guard");
+  const groups = groupGaps(critical, at);
+  const head = [...groups.map((g) => g.summary), ...(a.safeMode === true ? ["safe-mode bb включён сейчас"] : [])].join("; ");
+  const review = () =>
+    void act.run(async () => {
+      await proof.run({ kind: "touch", purpose: "alive.review" } as never, (p) => rpc.call("alive.review", { ats: critical.map((g) => g.gap.at), ...p } as never), { dangerous: true, what: "Я проверил: убрать тревогу о простое плагина", detail: REVIEW_DETAIL });
+      return { note: "Тревога о простое отмечена как проверенная; перерывы остались в журнале" };
+    });
   return (
     <div className="rounded-md border-2 border-destructive bg-destructive/10 p-2 text-destructive" role="alert" data-secure-bb-alarm>
-      <p className="font-semibold">{critical.length > 0 ? (guardOnly ? "ТРЕВОГА: плагин secure-bb не работал, часть защиты была закрыта" : "ТРЕВОГА: гейт не всегда работал") : "ТРЕВОГА: safe-mode bb"}</p>
-      <ul className="mt-1 list-disc pl-5 text-xs">
-        {critical.map(({ gap: g, text }, i) => (
-          <li key={i}>
-            {text.headline} ({at(g.from)} — {at(g.to)}){g.safeMode ? "; safe-mode bb был включён" : ""}.
-            {text.works ? <> {text.works}</> : null} {text.notWorking}
-          </li>
-        ))}
-        {a.safeMode === true ? <li>safe-mode bb включён сейчас: сторонние плагины не работают.</li> : null}
-        {a.safeMode !== true && a.safeModeSeen ? <li>За последнюю неделю safe-mode bb включался (см. журнал).</li> : null}
-      </ul>
-      {critical.length > 0 ? <p className="mt-1 text-xs">Проверьте {guardOnly ? "перечисленное" : "конфигурацию и плагины"} вручную.</p> : null}
+      <p className="font-semibold">{head ? `ТРЕВОГА: ${head}` : "Safe-mode bb включался на этой неделе"}</p>
+      <Fold id="alive-details" summary="Подробнее" summaryClassName="cursor-pointer text-xs underline">
+        <div className="mt-1 space-y-1 text-xs">
+          {groups.map((g) => (
+            <div key={g.mode}>
+              <ul className="list-disc pl-5">{g.items.map((it, i) => <li key={i}>{it}</li>)}</ul>
+              {g.works ? <p className="mt-1">{g.works}</p> : null}
+              <p>{g.notWorking}</p>
+            </div>
+          ))}
+          {a.safeMode === true ? <p>safe-mode bb включён сейчас: сторонние плагины не работают.</p> : null}
+          {a.safeMode !== true && a.safeModeSeen ? <p>За последнюю неделю safe-mode bb включался (см. журнал).</p> : null}
+          {critical.length > 0 ? <p>Проверьте {groups.every((g) => g.mode === "guard") ? "перечисленное" : "конфигурацию и плагины"} вручную; когда проверите, нажмите «Я проверил».</p> : null}
+        </div>
+      </Fold>
+      {critical.length > 0 ? (
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <button type="button" className={btn} disabled={act.busy || !proof.registered} onClick={review}>Я проверил</button>
+          <span className="text-xs">Нужен код или касание: это убирает настоящую тревогу.</span>
+        </div>
+      ) : null}
+      <Msg error={act.error} ok={act.ok} />
     </div>
   );
 }
+const REVIEW_DETAIL = "Тревога о простое плагина уберётся с «Обзора» и из плашки. Сами перерывы останутся в журнале. Если плагин остановится ещё раз, тревога появится снова.";
 
 /** Where the folded state is kept: the key of the alarm that was folded. A private mode or a full disk must not break the strip. */
 function readCollapsed(): string | null {

@@ -3,7 +3,7 @@
 import type { Overview } from "./overview";
 import type { QueueRow } from "./store";
 import type { SkillQueueView } from "./skills/guard";
-import { agentsSectionTab, alarmCount, awayText, cardColor, GUARD_DOWN_TEXT, STOPPED_EXPLAIN, gapAlarmText, pageCounts, plural, pageStatus, unackedGaps, type AwayGroup, type CardPlan, type GapContext, type PageCounts, type PluginCard, type ProblemRef, type Status, type TabId } from "./ux";
+import { agentsSectionTab, alarmCount, awayText, cardColor, GUARD_DOWN_TEXT, STOPPED_EXPLAIN, gapView, pageCounts, plural, pageStatus, unackedGaps, type AwayGroup, type CardPlan, type GapContext, type GapView, type PageCounts, type PluginCard, type ProblemRef, type Status, type TabId } from "./ux";
 
 /** The anchor of the alarm «Второй фактор не настроен»: without a second factor nothing can be approved, so it is the first thing to do, not a calm line. */
 export const SECOND_FACTOR_ANCHOR = "sbb-registration";
@@ -61,14 +61,23 @@ export function gapContext(ov: Overview): GapContext {
   return { guardModeNow: ov.guard !== undefined, coreHoldsNow: ov.alive.coreHolds, configWatch: ov.watch.baselineAt !== null };
 }
 
-type GapLine = { gap: Overview["alive"]["gaps"][number]; text: ReturnType<typeof gapAlarmText> };
+export type GapLine = { gap: Overview["alive"]["gaps"][number]; text: GapView };
 
-/** The gaps shown as a red alarm: all that opened something, and every one in a mode without a guard. A calm one is a line in «Пока вас не было». */
-export function gapsBySeverity(ov: Overview): { critical: GapLine[]; calm: GapLine[] } {
+const defaultTime = (t: number): string => new Date(t).toLocaleString();
+
+/**
+ * The pauses of the plugin, sorted by what they are:
+ *  - `critical`: a red alarm — a pause that opened something, outside the owner's declared maintenance (or past its window), and not yet confirmed with «Я проверил»;
+ *  - `calm`: a line in «Пока вас не было» — a pause that opened nothing, or the owner's own planned update (begun and ended inside a window declared at the guard's console).
+ * Whatever is an alarm without a declared window stays an alarm: only a window the guard recorded can make one calm, and only a code or a touch can hide one.
+ */
+export function gapsBySeverity(ov: Overview, fmt: (t: number) => string = defaultTime): { critical: GapLine[]; calm: GapLine[] } {
   const ctx = gapContext(ov);
-  const all = ov.alive.gaps.map((gap) => ({ gap, text: gapAlarmText(gap, ctx) }));
+  const windows = ov.guard?.maintenance ?? [];
+  const reviewed = new Set(ov.alive.reviewedAts ?? []);
+  const all = ov.alive.gaps.map((gap) => ({ gap, text: gapView(gap, ctx, windows, fmt) }));
   const calm = unackedGaps(all.filter((g) => g.text.severity === "calm").map((g) => ({ ...g, at: g.gap.at })), ov.alive.gapsAckedAt);
-  return { critical: all.filter((g) => g.text.severity === "critical"), calm };
+  return { critical: all.filter((g) => g.text.severity === "critical" && !reviewed.has(g.gap.at)), calm };
 }
 
 // ---- the floating strip over the whole of bb --------------------------------------------------------------------------------------

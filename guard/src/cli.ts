@@ -1,4 +1,4 @@
-// sbb-guard: serve | totp-register | totp-disable | passkey-enroll | passkey-list | passkey-remove | troubleshoot | status | journal-verify | import
+// sbb-guard: serve | totp-register | totp-disable | passkey-enroll | passkey-list | passkey-remove | troubleshoot | maintenance | status | journal-verify | import
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import net from "node:net";
@@ -50,6 +50,7 @@ const USAGE = `sbb-guard ${VERSION} — decision guard for secure-bb
   sbb-guard passkey-list [--data DIR]
   sbb-guard passkey-remove ID [--data DIR] [--yes]
   sbb-guard troubleshoot MINUTES|off [--data DIR] [--code CODE]
+  sbb-guard maintenance begin|end|status [--data DIR] [--reason WORDS] [--minutes N]
   sbb-guard status [--data DIR] [--socket PATH]
   sbb-guard journal-verify [--data DIR]
   sbb-guard import FILE [--data DIR] [--yes] [--digest SHA256]
@@ -63,6 +64,9 @@ Trust by source (serve): --plugins-root DIR (repeatable) / SBB_GUARD_PLUGINS_ROO
 only from there (the guard's user needs read access: the installer's ACL), and without it nothing from git passes by itself. --known-source ENTRY (repeatable) /
 SBB_GUARD_KNOWN_SOURCES: sources of the official catalog (github:owner/name or github:owner/*), the level "known". The owner's own sources are kept by the guard (a touch adds one).
 Offline (serve): --offline / SBB_GUARD_OFFLINE=1: the checks make no network requests; node_modules is not compared with the npm registry and every package is scanned in full, as before registry verification existed.
+Maintenance (console only; needs the guard's data directory, like "totp-register"; there is no socket op for it): "maintenance begin --reason update" declares that an update is going on
+for at most 20 minutes ("--minutes N", up to 60); "maintenance end" closes it. A pause of the secure-bb plugin that began and ended inside the window is shown on the page as a calm
+line, not as an alarm; one that began before it, ended after it, or happened without it stays an alarm. Both are written to the journal ("from the console").
 Troubleshooting (console only, with a code): "troubleshoot 30" (or "30m") makes the guard pass everything for that long (at most 240 minutes), write every
 decision into the journal and return by itself; the page shows a red bar with the time left. It is not an off switch: the guard has none. "troubleshoot off" ends it earlier.
 Setup: a step-by-step wizard in Russian (a code from an app, a passkey with a link to the page, a test touch); run again, it does only what is missing.
@@ -580,6 +584,38 @@ export async function troubleshoot(paths: GuardPaths, io: Io, arg: string, opts:
   }
 }
 
+/** `maintenance begin|end|status`: the owner's declaration that an update is going on (console only; no code, the data directory's permission is the proof, as for `totp-register`). */
+export async function maintenance(paths: GuardPaths, io: Io, what: string, opts: Opts, now: () => number = Date.now): Promise<number> {
+  const { guard, close } = open(paths, now);
+  try {
+    if (what === "begin") {
+      const minutesRaw = optStr(opts, "minutes");
+      const w = guard.maintenanceBegin(optStr(opts, "reason") ?? "update", minutesRaw === undefined ? undefined : Number(minutesRaw));
+      io.out(`Maintenance window until ${new Date(w.until).toISOString()} (${Math.round((w.until - w.beganAt) / 60_000)} min, reason: ${w.reason}). \`sbb-guard maintenance end\` closes it earlier.`);
+      return 0;
+    }
+    if (what === "end") {
+      io.out(guard.maintenanceEnd() ? "Maintenance window closed." : "No maintenance window was open.");
+      return 0;
+    }
+    if (what === "status") {
+      const open = guard.maintenanceWindows(5).find((w) => w.endedAt === null && w.until > now());
+      io.out(open ? `Maintenance window open until ${new Date(open.until).toISOString()} (reason: ${open.reason}).` : "No maintenance window is open.");
+      return 0;
+    }
+    io.err("maintenance needs `begin`, `end` or `status`");
+    return 64;
+  } catch (err) {
+    if (err instanceof GuardError) {
+      io.err(err.message);
+      return 1;
+    }
+    throw err;
+  } finally {
+    close();
+  }
+}
+
 export async function status(paths: GuardPaths, io: Io, now: () => number = Date.now): Promise<number> {
   io.out(`data:    ${paths.dataDir}`);
   io.out(`socket:  ${paths.socket}`);
@@ -811,6 +847,12 @@ export async function main(argv: string[], io: Io = terminalIo): Promise<number>
           return 64;
         }
         return await troubleshoot(paths, io, positionals[0]!, opts);
+      case "maintenance":
+        if (positionals.length !== 1) {
+          io.err("maintenance needs `begin`, `end` or `status`");
+          return 64;
+        }
+        return await maintenance(paths, io, positionals[0]!, opts);
       case "status":
         return await status(paths, io);
       case "journal-verify":
