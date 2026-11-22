@@ -1,9 +1,8 @@
 // The page's card of a critical change (app.tsx): buttons instead of a manual instruction (principle «автоматически по умолчанию, подробности по кнопке»).
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { appFile } from "./support/app-source";
 
-const app = readFileSync(fileURLToPath(new URL("../app.tsx", import.meta.url)), "utf8");
+const app = appFile("agents.tsx");
 const card = app.slice(app.indexOf("function CriticalAccept("), app.indexOf("function AgentsSection("));
 
 describe("the card of a critical change", () => {

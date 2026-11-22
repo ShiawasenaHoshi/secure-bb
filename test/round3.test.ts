@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { appSource } from "./support/app-source";
 import { foldState, isFoldOpen, openFold, toggleFold } from "../src/fold.js";
 import {
   alarmCount,
@@ -33,7 +34,7 @@ import { join } from "node:path";
 // @ts-expect-error jsdom ships no types in this tree
 import { JSDOM } from "jsdom";
 
-const app = readFileSync(new URL("../app.tsx", import.meta.url), "utf8");
+const app = appSource();
 
 describe("1. every fold is a Fold with a stable id", () => {
   it("app.tsx has no bare <details> except the one inside Fold itself", () => {

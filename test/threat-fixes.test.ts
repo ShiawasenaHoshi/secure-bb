@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
+import { appSource } from "./support/app-source";
 import plugin from "../server.js";
 import { ALIVE_INTERVAL_MS, Alive, GAP_THRESHOLD_MS } from "../src/alive.js";
 import { SessionProof } from "../src/approval.js";
@@ -180,7 +181,7 @@ describe("2. F7: automatic pass of the safe class is off by default and turned o
 
   it("the page warns when it is switched on (the warning text says the server code runs in the gate's process)", () => {
     expect(T.autoSafeWarning).toMatch(/процесс/);
-    expect(readFileSync(join(here, "..", "app.tsx"), "utf8")).toContain("T.autoSafeWarning");
+    expect(appSource()).toContain("T.autoSafeWarning");
   });
 });
 
@@ -223,7 +224,7 @@ describe("3. F6: registering from the page is flagged; from stage 3 the missing 
   it("the registration card on the page carries the warning and names the file variable", () => {
     expect(T.totpFile.registerWarning).toContain("BB_SECURE_BB_TOTP_FILE");
     expect(T.totpFile.registerWarning).toMatch(/Любой из них/);
-    expect(readFileSync(join(here, "..", "app.tsx"), "utf8")).toContain("T.totpFile.registerWarning");
+    expect(appSource()).toContain("T.totpFile.registerWarning");
   });
 });
 
@@ -488,7 +489,7 @@ describe("7. X3: the gate leaves a trace when it was off", () => {
     const ov = (await harness.behavior.callRpc("overview", null)) as { alive: { lastBeat: number | null; gaps: unknown[] } };
     expect(ov.alive.lastBeat).toBeTypeOf("number");
     expect(ov.alive.gaps).toEqual([]);
-    expect(readFileSync(join(here, "..", "app.tsx"), "utf8")).toContain("<AliveAlarm");
+    expect(appSource()).toContain("<AliveAlarm");
   });
 });
 
