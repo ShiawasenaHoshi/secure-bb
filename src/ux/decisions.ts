@@ -176,3 +176,10 @@ export function approvedByText(a: { via: string; why?: string | null; approvedAt
 
 /** The buttons of «Удалить плагин …?», in the order they are always drawn, on their own line under the question. */
 export const DELETE_CONFIRM_BUTTONS = ["Да, удалить", "Нет"] as const;
+
+/** The marks the owner can give a decision afterwards, in the page's words. The keys are the guard's (`MARKS`). */
+export const MARK_LABEL = { false_alarm: "ложная тревога", was_dangerous: "правда было опасно", unknown: "не знаю" } as const;
+export type MarkKey = keyof typeof MARK_LABEL;
+export const MARK_REVOKE_REASON = "Почему отозвали (одной строкой, можно пропустить)";
+/** Journal kinds of the guard that are decisions: the ones that can be marked. Same list as the guard's `DECISION_KINDS`. */
+export const MARKABLE_KINDS = ["approved.touch", "approved.trust", "approved.window", "approved.source", "approved.import", "dismissed", "revoked", "window.open"];

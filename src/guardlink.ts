@@ -280,6 +280,16 @@ export interface GuardHoldRequest {
 }
 
 /** What the gate and the server use. A test double implements it too. */
+/** What the page tells the guard about a card: the event, and (for `shown`) what the card showed. */
+export interface GuardCardView {
+  event: "shown" | "details" | "later";
+  level?: string;
+  findings?: Array<{ rule: string; file?: string; line?: number }>;
+  ai?: Array<{ model: string; status: string }>;
+  textsVersion?: number;
+  detailsOpen?: boolean;
+}
+
 export interface GuardPort {
   state(): Promise<GuardState>;
   lookup(pluginId: string, contentHash: string): Promise<GuardLookup>;
@@ -304,7 +314,10 @@ export interface GuardPort {
   dismiss(requestId: number): Promise<void>;
   openWindow(pluginId: string, minutes: number | undefined, proof: GuardProof, scope?: "tree" | "thread"): Promise<GuardWindow>;
   closeWindow(target: { windowId?: number; pluginId?: string }): Promise<void>;
-  revoke(target: { approvalId?: number; pluginId?: string }): Promise<number>;
+  revoke(target: { approvalId?: number; pluginId?: string; reason?: string }): Promise<number>;
+  /** The journal for learning: what the page showed on a card, and the owner's mark on a decision. Advisory both: nothing is decided by them. */
+  view(requestId: number, report: GuardCardView): Promise<void>;
+  mark(record: number, mark: string, reason?: string): Promise<void>;
   policy(patch?: Partial<GuardPolicy>, proof?: GuardProof): Promise<GuardPolicy>;
   touch(purpose: string, proof: GuardProof): Promise<void>;
   /** The mode of trust by source: weakening it takes a touch (the guard checks), the same or a stricter one does not. */
@@ -431,8 +444,14 @@ export class GuardLink implements GuardPort {
   async closeWindow(target: { windowId?: number; pluginId?: string }): Promise<void> {
     await this.call({ op: "close-window", ...target });
   }
-  async revoke(target: { approvalId?: number; pluginId?: string }): Promise<number> {
+  async revoke(target: { approvalId?: number; pluginId?: string; reason?: string }): Promise<number> {
     return Number((await this.call({ op: "revoke", ...target })).revoked);
+  }
+  async view(requestId: number, report: GuardCardView): Promise<void> {
+    await this.call({ op: "view", requestId, ...report });
+  }
+  async mark(record: number, mark: string, reason?: string): Promise<void> {
+    await this.call({ op: "mark", record, mark, ...(reason ? { reason } : {}) });
   }
   async policy(patch?: Partial<GuardPolicy>, proof?: GuardProof): Promise<GuardPolicy> {
     const r = await this.call({ op: "policy", ...(patch === undefined ? {} : { patch }), ...(proof === undefined ? {} : proofFields(proof)) });

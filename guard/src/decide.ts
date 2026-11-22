@@ -130,7 +130,7 @@ export class DecideGuard extends QueueGuard {
           if (next > w.expiresAt) this.db.prepare(`UPDATE windows SET expires_at = ? WHERE id = ?`).run(next, w.id);
         }
         this.resolveQueue(req.pluginId, req.contentHash, "approved");
-        this.log("approved.window", req.pluginId, req.contentHash, { approval: a.id, windowId: w.id, version: req.version, source: req.source, sourceKind: req.sourceKind });
+        this.log("approved.window", req.pluginId, req.contentHash, { approval: a.id, windowId: w.id, version: req.version, source: req.source, sourceKind: req.sourceKind, ...this.learning({ rights: a.rights }) });
         return { action: "proceed", via: "window" } as const;
       }
 
@@ -138,7 +138,7 @@ export class DecideGuard extends QueueGuard {
       if (verdict.pass) {
         const a = this.addApproval({ contentHash: req.contentHash, pluginId: req.pluginId, version: req.version, source: req.source, sourceKind: req.sourceKind, rootDir: req.rootDir, gitCommit: null, npmIntegrity: null, via: "source", windowId: null, rights: verdict.rights, why: String(verdict.detail.why ?? "прошла сама: источник и права те же") });
         this.resolveQueue(req.pluginId, req.contentHash, "approved");
-        this.log("approved.source", req.pluginId, req.contentHash, { approval: a.id, version: req.version, source: req.source, sourceKind: req.sourceKind, ...verdict.detail });
+        this.log("approved.source", req.pluginId, req.contentHash, { approval: a.id, version: req.version, source: req.source, sourceKind: req.sourceKind, ...verdict.detail, ...this.learning({ rights: a.rights }) });
         return { action: "proceed", via: "source" } as const;
       }
 

@@ -9,6 +9,7 @@ import { Card } from "../components/ui/card";
 import { DELETE_CONFIRM_BUTTONS, hasNoGuardRecord, NO_RECORD_FIX, NO_RECORD_HEADLINE, NO_RECORD_LINE } from "../src/ux";
 import { ChecksView } from "./checks";
 import { useCodeAction } from "./code";
+import { useCardLog } from "./card-log";
 import { type Rpc } from "./touch";
 import { ProofField, Emph, ProofNotes } from "./confirm";
 import { useProof, type ProofHook } from "./proof";
@@ -126,6 +127,8 @@ interface Ctl extends ReviewProps {
   /** The name of the plugin typed under «Всё равно разрешить…». */
   typed: string;
   setTyped: (v: string) => void;
+  /** The journal for learning: «Подробнее» opened, «Решить позже» pressed. */
+  log: (event: "details" | "later") => void;
 }
 
 function useReviewCtl(p: ReviewProps): Ctl {
@@ -137,6 +140,8 @@ function useReviewCtl(p: ReviewProps): Ctl {
   const found = ov.queueChecks[q.id] ?? (q.contentHash ? ov.checks[q.contentHash] : undefined);
   const ux = ov.ux[q.id];
   const v = reviewView({ q, found, ux, flowDowngrade: ov.policy.flowDowngrade });
+  const mode = detailLevel(ov.guard?.trust?.mode ?? null);
+  const log = useCardLog(q, ov, rpc, v.level, found, mode.expanded || v.risk.look === true);
   const approve = (acknowledgeBlock: boolean) =>
     proof.run({ kind: "approve", queueId: q.id, acknowledgeBlock }, (x) => rpc.call("queue.approve", { id: q.id, ...x, acknowledgeBlock } as never), { routine: true, dangerous: acknowledgeBlock, what: acknowledgeBlock ? `Всё равно разрешить ${q.pluginId} ${q.version}` : v.approveWhat, detail: acknowledgeBlock ? "Так ведут себя вредоносные плагины. Разрешайте, только если вы сами написали этот плагин." : v.risk.text });
   const approveNow = () => void act.run(async () => { await approve(false); return { note: approvedNote(q.pluginId, q.version) }; }, v.allowedWhat);
@@ -153,7 +158,7 @@ function useReviewCtl(p: ReviewProps): Ctl {
       setConfirmDelete(false);
       return { note: deletedNote(q.pluginId, q.version) };
     }, `удалён плагин ${q.pluginId} ${q.version}`);
-  return { ...p, v, found, ux, act, proof, mode: detailLevel(ov.guard?.trust?.mode ?? null), blockedApprove: v.unsafeDir || !proof.ready({ routine: true }), approve, approveNow, openWindowNow, approveTrustNow, del, confirmDelete, setConfirmDelete, typed, setTyped };
+  return { ...p, v, found, ux, act, proof, mode, log, blockedApprove: v.unsafeDir || !proof.ready({ routine: true }), approve, approveNow, openWindowNow, approveTrustNow, del, confirmDelete, setConfirmDelete, typed, setTyped };
 }
 
 function CardHead({ c }: { c: Ctl }) {
@@ -238,7 +243,7 @@ function FreqHintBox({ c }: { c: Ctl }) {
 function LaterButton({ c }: { c: Ctl }) {
   const { q, v, act, deferred } = c;
   if (v.red) return <Tip tip="Плагин остаётся в карантине, не запущен; карточка уходит из «Ждут решения», красный статус снимается"><Button size="sm" variant="ghost" disabled={act.busy} onClick={() => c.onKeep(q)}>Оставить в карантине</Button></Tip>;
-  return <Button size="sm" variant="ghost" disabled={act.busy} onClick={() => c.onDefer(q, !deferred)}>{deferred ? "Вернуть в список" : "Решить позже"}</Button>;
+  return <Button size="sm" variant="ghost" disabled={act.busy} onClick={() => (!deferred && c.log("later"), c.onDefer(q, !deferred))}>{deferred ? "Вернуть в список" : "Решить позже"}</Button>;
 }
 
 function CardButtons({ c }: { c: Ctl }) {
@@ -349,7 +354,7 @@ function Details({ c }: { c: Ctl }) {
   const { q, v, mode } = c;
   const [tab, setTab] = useState<DetailTab>("code");
   return (
-    <FoldAccordion id={cardFoldId(q, "more")} className="mt-4" defaultOpen={mode.expanded || v.risk.look === true} title="Подробнее">
+    <FoldAccordion id={cardFoldId(q, "more")} className="mt-4" defaultOpen={mode.expanded || v.risk.look === true} onToggle={(open) => open && c.log("details")} title="Подробнее">
       <Tabs value={tab} onValueChange={(x) => setTab(x as DetailTab)}>
         <TabsList>
           <TabsTrigger value="code">Где это в коде</TabsTrigger>

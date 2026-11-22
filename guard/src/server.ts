@@ -55,6 +55,11 @@ export function dispatch(guard: Guard, req: unknown, version: string): Record<st
       return guard.closeWindow(r);
     case "revoke":
       return guard.revoke(r);
+    // The journal for learning: the page says what it showed; the owner marks a decision afterwards. Neither decides anything. The export is console only.
+    case "view":
+      return guard.view(r);
+    case "mark":
+      return guard.mark(r);
     case "approve": {
       const { approval } = guard.approve(r);
       return { approval };

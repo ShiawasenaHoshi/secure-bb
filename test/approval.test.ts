@@ -24,6 +24,8 @@ const EXPECTED: Record<string, RpcGroup> = {
   "window.open": "routine",
   "window.close": "free", // tightening: no code (threat model F8)
   "approval.revoke": "free",
+  "card.view": "free",
+  "decision.mark": "free",
   "watch.accept": "routine",
   "watch.acceptAll": "routine",
   "watch.rollback": "routine",
