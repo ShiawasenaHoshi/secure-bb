@@ -5,7 +5,11 @@ import { readFileSync } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
 import { CHECKS_VERSION, runChecks as defaultRunChecks, type CheckResult } from "./checks/index.js";
 import { SESSION_CAP_MS, SESSION_IDLE_MS, groupOf, hashToken, mintListProof, mintSessionProof, newToken, SessionProof, ListProof, type Proof, type RpcName } from "./approval.js";
-import { BLOCKED_REASON, bySeverity, capabilityTokens, localCheckKey, newTokens, summarize } from "./decision.js";
+import { BLOCKED_REASON, bySeverity, localCheckKey, summarize } from "./decision.js";
+import { capabilityTokens, grown, rightsOf, windowAllows, type Rights } from "../guard/src/trust.ts";
+
+/** The rights of a result for a comparison here: `rightsOf` stores at most 400 tokens (the guard's database), a comparison must see all of them, as it always did in the hook. */
+const fullRights = (r: Parameters<typeof rightsOf>[0]): Rights => ({ tokens: capabilityTokens(r), review: rightsOf(r).review });
 import { describeIssues, serverIds, writableByOthers, type PermIssue } from "./perms.js";
 import { validateSecondModel } from "./scan/commands.js";
 import type { TaintAssessment } from "./taint/monitor.js";
@@ -579,8 +583,10 @@ export class Gate {
         if (guard === "closed") windowOpen = false;
       }
       if (windowOpen && w) {
-        const fresh = newTokens(result, w.caps);
-        if (reviews.length === 0 && fresh.length === 0 && aiFlag === null) {
+        // The same rule as the guard's (`windowAllows`); the baseline is the window's own set of tokens (what it was opened on, and what was accepted since).
+        const verdict = windowAllows({ tokens: w.caps, review: [] }, fullRights(result));
+        const fresh = verdict.newTokens;
+        if (verdict.allowed && aiFlag === null) {
           this.recordApproval(ctx, "window", w.id, proposal);
           this.slide(w);
           return { action: "proceed" };
@@ -727,12 +733,9 @@ export class Gate {
       return hold("окно закрыто: в дереве тредов читали недоверенное", summary);
     }
     if (taint === "unknown") return hold("не удалось проверить загрязнение дерева тредов", summary);
-    const reviews = bySeverity(result, "review");
-    const fresh = newTokens(result, w.caps);
-    if (reviews.length > 0 || fresh.length > 0 || aiFlag !== null) {
-      const why = fresh.length > 0 ? `новая возможность в окне: ${fresh.slice(0, 6).join(", ")}${fresh.length > 6 ? "…" : ""}` : reviews.length > 0 ? `проверки требуют ревью: ${summarize(reviews)}` : aiFlag!;
-      return hold(why, summary); // the window stays open (spec §0, §6)
-    }
+    // Rights are the guard's to compare (`windowAllows`, in its own `windowRefuses`: it reads the version itself and holds with a stop); this hook adds
+    // only what the guard cannot see: the thread (above), a damaged snapshot, a polluted tree, and the AI scan's flag.
+    if (aiFlag !== null) return hold(aiFlag, summary); // the window stays open (spec §0, §6)
     return { action: "proceed" }; // the guard approves it by the window and journals that
   }
 
@@ -937,7 +940,7 @@ export class Gate {
     const w = proposal?.windowId == null ? null : this.store.getWindow(proposal.windowId);
     if (w && w.pluginId === q.pluginId && isOpen(w, this.now) && result) {
       this.store.setWindowCaps(w.id, [...new Set([...w.caps, ...capabilityTokens(result)])].sort());
-      this.store.log("window.caps", q.pluginId, q.contentHash, { windowId: w.id, added: newTokens(result, w.caps) });
+      this.store.log("window.caps", q.pluginId, q.contentHash, { windowId: w.id, added: grown({ tokens: w.caps, review: [] }, fullRights(result)).tokens });
     }
     if (q.contentHash) {
       this.store.addApproval({

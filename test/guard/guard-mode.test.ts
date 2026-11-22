@@ -220,19 +220,10 @@ describe("guard mode: windows", () => {
     const rec = (await g.send({ op: "state" })).journal.recent.find((j: any) => j.kind === "approved.window");
     expect(rec).toMatchObject({ pluginId: "demo" });
 
-    // a new capability: this plugin holds it although the guard would let it pass; the window stays open
-    const v3 = await proposed(h, "demo", "fetch('https://x.example');\nfetch('https://new.example');\n");
-    expect((await g.send({ op: "lookup", pluginId: "demo", contentHash: v3.ctx.contentHash })).window).not.toBeNull();
-    expect(await h.hook(v3.ctx)).toMatchObject({ action: "wait" });
-    expect(await core(g, h, v3.ctx)).toBe("held"); // guard first: it approves by the window, the hook holds and withdraws that approval
-    expect((await g.send({ op: "lookup", pluginId: "demo", contentHash: v3.ctx.contentHash })).approved).toBe(false);
-    expect(await core(g, h, v3.ctx)).toBe("held"); // and it stays held on the next ask
-    expect(await core(g, h, v3.ctx, "hooks-first")).toBe("held"); // the other order: the guard is never asked
+    // A new capability is no longer this plugin's to compare: the guard holds it itself by the one rule (`windowAllows`), and the hook lets the version through
+    // to it. That needs the guard to read the version for real, which this harness (made-up core hashes) cannot give; it is tested in window-rule.test.ts
+    // (the guard and the hook decide alike) and window-checks.test.ts (the guard holds a new right with a stop).
     expect((await ov(h)).windows).toHaveLength(1);
-    // the human accepts it with a code: it joins the window's set
-    const held = (await ov(h)).queue.find((q: any) => q.contentHash === v3.ctx.contentHash && q.status === "held");
-    await h.rpc("queue.approve", { id: held.id, code: fresh(g) });
-    expect(await core(g, h, v3.ctx)).toBe("load");
 
     // closing needs no code
     await h.rpc("window.close", { windowId: (await ov(h)).windows[0].id });
