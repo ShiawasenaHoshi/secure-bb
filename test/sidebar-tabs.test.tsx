@@ -184,6 +184,33 @@ describe("the tabs", () => {
   });
 });
 
+describe("one state of the tab: the underline, the panel and the saved value agree", () => {
+  const state = () => ({
+    selected: tabButtons().filter((t) => t.getAttribute("aria-selected") === "true").map((t) => (t.textContent ?? "").replace(/\d+$/, "")),
+    underlined: tabButtons().filter((t) => t.className.includes("border-foreground")).map((t) => (t.textContent ?? "").replace(/\d+$/, "")),
+    active: tabButtons().filter((t) => t.dataset.state === "active").map((t) => (t.textContent ?? "").replace(/\d+$/, "")),
+    panel: ["journal", "settings"].filter((p) => document.body.querySelector(`[data-secure-bb-tabpanel="${p}"]`)),
+  });
+
+  it("after a click on «Настройки»: that tab alone is selected and underlined, the settings are drawn, the saved value is the same", async () => {
+    await drawPage(await baseOverview(), "Всё под защитой");
+    expect(state()).toMatchObject({ selected: ["Обзор"], underlined: ["Обзор"], active: ["Обзор"], panel: [] });
+    await openTab("Настройки");
+    expect(state()).toEqual({ selected: ["Настройки"], underlined: ["Настройки"], active: ["Настройки"], panel: ["settings"] });
+    expect(window.localStorage.getItem(TAB_KEY)).toBe("settings");
+    await openTab("Журнал");
+    expect(state()).toEqual({ selected: ["Журнал"], underlined: ["Журнал"], active: ["Журнал"], panel: ["journal"] });
+    expect(window.localStorage.getItem(TAB_KEY)).toBe("journal");
+  });
+
+  it("a jump of «Настроить» changes the tab, the underline and the saved value together", async () => {
+    await drawPage(await alarmOverview(), "Настройте второй фактор: без него ничего нельзя подтвердить");
+    await act(async () => Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent === "Настроить")!.click());
+    expect(state()).toEqual({ selected: ["Настройки"], underlined: ["Настройки"], active: ["Настройки"], panel: ["settings"] });
+    expect(window.localStorage.getItem(TAB_KEY)).toBe("settings");
+  });
+});
+
 describe("«Журнал» holds events only; behaviour is changed on «Настройки»", () => {
   const headings = (root: Element, sel: string) => Array.from(root.querySelectorAll(sel)).map((h) => h.textContent ?? "");
 

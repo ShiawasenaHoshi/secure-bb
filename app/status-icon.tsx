@@ -43,10 +43,12 @@ export function ProtectionStatus({ dismiss }: ExperimentalSidebarFooterDisclosur
   const v = useProtectionView();
   const nav = useBbNavigate();
   return (
-    <div className="flex items-center gap-2 p-3" role="status" data-secure-bb-sidebar-status={v?.tone ?? "unknown"}>
-      <ShieldIcon mark={v ? MARK[v.tone] : "none"} className={cn("size-5", SHIELD_TINT[v?.tone ?? "ok"])} />
-      <p className="min-w-0 flex-1 text-sm font-medium">{v ? v.text : "Состояние защиты ещё не получено"}</p>
-      <Button size="sm" variant={v?.tone === "alarm" ? "destructive" : "outline"} onClick={() => { nav.toPluginPanel("gate"); dismiss(); }}>Открыть {PAGE_TITLE}</Button>
+    <div className="flex min-w-[15rem] flex-col gap-2 p-3" role="status" data-secure-bb-sidebar-status={v?.tone ?? "unknown"}>
+      <div className="flex items-start gap-2">
+        <ShieldIcon mark={v ? MARK[v.tone] : "none"} className={cn("size-5", SHIELD_TINT[v?.tone ?? "ok"])} />
+        <p className="min-w-0 flex-1 text-sm font-medium">{v ? v.text : "Состояние защиты ещё не получено"}</p>
+      </div>
+      <Button size="sm" className="w-full" variant={v?.tone === "alarm" ? "destructive" : "outline"} onClick={() => { nav.toPluginPanel("gate"); dismiss(); }}>Открыть {PAGE_TITLE}</Button>
     </div>
   );
 }
