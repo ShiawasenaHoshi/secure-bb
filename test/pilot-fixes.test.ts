@@ -262,7 +262,7 @@ describe("1. critical agent changes are not accepted in a pack", () => {
   it("the section is shown on «Статус» while something critical or an alarm waits", () => {
     expect(agentsSectionTab({ critical: 2, alarms: 0 })).toBe("status");
     expect(agentsSectionTab({ critical: 0, alarms: 1 })).toBe("status");
-    expect(agentsSectionTab({ critical: 0, alarms: 0 })).toBe("more");
+    expect(agentsSectionTab({ critical: 0, alarms: 0 })).toBe("settings");
   });
 });
 

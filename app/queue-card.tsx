@@ -8,6 +8,7 @@ import { useApproval, RoutineCode } from "./approval";
 import { ChecksView } from "./checks";
 import { useCodeAction, TouchNote } from "./code";
 import { usePasskey, touchFor, type Rpc } from "./touch";
+import { KeyNote } from "./confirm-dialog";
 import { ScanResultView, ScanButton } from "./scan";
 import { card, btn, btnPrimary, input, muted, cardBlocked, btnDanger, when, Fold, Msg } from "./ui";
 
@@ -127,7 +128,7 @@ function LiftBlock({ c }: { c: Ctl }) {
         <label className="flex items-center gap-1 text-xs">
           <input type="checkbox" checked={ack} onChange={(e) => c.setAck(e.target.checked)} /> понимаю риск: проверки нашли жёсткий признак
         </label>
-        {pk.has ? <button className={btnDanger} disabled={act.busy || !ack || pk.problem !== null || !registered || facts.unsafeDir} onClick={() => c.touch("approve", true)}>Снять блок и одобрить касанием</button> : null}
+        {pk.plan.key !== "none" ? <button className={btnDanger} disabled={act.busy || !ack || pk.problem !== null || !registered || facts.unsafeDir} onClick={() => c.touch("approve", true)}>Снять блок и одобрить касанием</button> : null}
         {pk.keyOnly ? null : <button className={btnDanger} disabled={c.disabled || !ack} onClick={() => c.approveByCode(ack)}>{pk.has ? "Снять блок и одобрить кодом" : "Снять блок и одобрить"}</button>}
       </div>
     </Fold>
@@ -136,7 +137,7 @@ function LiftBlock({ c }: { c: Ctl }) {
 
 function TouchButtons({ c }: { c: Ctl }) {
   const { q, act, pk, registered, facts } = c;
-  if (!pk.has) return null;
+  if (pk.plan.key === "none") return null;
   return (
     <>
       <button className={btnPrimary} disabled={act.busy || pk.problem !== null || !registered || facts.unsafeDir} onClick={() => c.touch("approve")}>Одобрить касанием</button>
@@ -150,7 +151,7 @@ function CodeButtons({ c }: { c: Ctl }) {
   if (pk.keyOnly) return null;
   return (
     <>
-      {pk.has ? <span className={muted}>запасной путь — код:</span> : null}
+      {pk.plan.key === "first" ? <span className={muted}>запасной путь — код:</span> : null}
       <RoutineCode value={c.code} onChange={c.setCode} dangerous={false} />
       <ScanButton ov={c.ov} target={{ queueId: q.id }} rpc={c.rpc} refetch={c.refetch} />
       <button className={pk.has ? btn : btnPrimary} disabled={c.disabled} onClick={() => c.approveByCode(false)}>Одобрить версию{pk.has ? " кодом" : ""}</button>
@@ -181,7 +182,7 @@ export function QueueCard({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; 
       <QueueDetails c={c} />
       {facts.held ? <div className="mt-3 space-y-3">{facts.blocked ? <BlockedActions c={c} /> : <PlainActions c={c} />}</div> : null}
       {facts.held && !c.registered ? <p className={`mt-2 ${muted}`}>Сначала зарегистрируйте второй фактор.</p> : null}
-      {facts.held && pk.has && pk.problem ? <p className="mt-2 text-destructive">{pk.problem}</p> : null}
+      {facts.held && pk.plan.note ? <div className="mt-2"><KeyNote plan={pk.plan} /></div> : null}
       <TouchNote text={c.touching} />
       <Msg error={c.act.error} ok={c.act.ok} />
     </div>

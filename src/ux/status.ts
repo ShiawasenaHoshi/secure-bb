@@ -5,8 +5,18 @@ export type StatusLevel = "ok" | "attention" | "stopped" | "down";
 
 export type ProblemKind = "guard" | "red" | "yellow" | "alarm";
 
-/** The page's tabs; a problem says which one holds its element. */
-export type TabId = "status" | "quarantine" | "trust" | "more";
+/** The page's tabs; a problem says which one holds its element. «journal» holds only events; everything that changes behaviour is on «settings». */
+export type TabId = "status" | "quarantine" | "trust" | "journal" | "settings";
+
+/** The tabs in the order they are drawn, with their words: one list for the page, the tests and the saved tab. */
+export const TAB_ORDER: readonly TabId[] = ["status", "quarantine", "trust", "journal", "settings"];
+export const TAB_LABEL: Record<TabId, string> = { status: "Обзор", quarantine: "Карантин", trust: "Доверие и исключения", journal: "Журнал", settings: "Настройки" };
+
+/** Where the page remembers the last tab (this browser only: a convenience, not a security fact). */
+export const TAB_KEY = "secure-bb.tab";
+
+/** The saved tab, or «Обзор» when there is none or it is no longer a tab (an older page called one of them «more»). */
+export const parseTab = (raw: string | null): TabId => TAB_ORDER.find((t) => t === raw) ?? "status";
 
 export interface ProblemRef {
   /** The element the button scrolls to. */

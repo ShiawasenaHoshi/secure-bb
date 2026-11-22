@@ -10,7 +10,7 @@ import type { AwayEvent, PartLike, StatusInput } from "../src/ux.ts";
 import { NO_RECORD_HEADLINE, cardRisk, pluginRightsText, STOPPED_EXPLAIN, aiScanEmptyText, windowAvailability, PART_BACK_FRESH_NOTE, resetConfirmText, resetRows, EXCEPTIONS_EMPTY, EXCEPTIONS_HELP, RESET_NOTE, exceptionRows, exceptionsHeadline, FREQ_LIMIT, FREQ_QUIET_MS, FREQ_WINDOW_MS, approvalEventsOf, frequentHint, parseFreqAt, pickFrequent, FREQ_BUTTON, NO_RIGHTS_TEXT, STANDING_LABEL, protectedHeadline, protectedRow, sortProtected, standingOf, PARTS_HEADLINE, PARTS_HELP, PART_FRESH_NOTE, PART_NO_BACK, PART_STALE, drawableParts, humanError, isStalePart, partKeptNote, partNeedsFresh, partTitle } from "../src/ux.ts";
 
 const none: StatusInput = { guardDown: false, red: [], yellow: [], alarms: [] };
-const ref = (anchor: string, tab: "status" | "more" = "status") => ({ anchor, tab, text: anchor });
+const ref = (anchor: string, tab: "status" | "settings" = "status") => ({ anchor, tab, text: anchor });
 
 describe("status and the first problem", () => {
   it("nothing wrong: «Защищено», no button", () => {
@@ -29,7 +29,7 @@ describe("status and the first problem", () => {
     expect(s.first?.kind).toBe("guard");
     expect(pageStatus({ ...none, red: [ref("r1")], yellow: [ref("y1")], alarms: [ref("a1")] }).first?.anchor).toBe("r1");
     expect(pageStatus({ ...none, yellow: [ref("y1")], alarms: [ref("a1")] }).first?.anchor).toBe("y1");
-    expect(pageStatus({ ...none, alarms: [ref("a1", "more")] }).first).toMatchObject({ anchor: "a1", tab: "more", kind: "alarm" });
+    expect(pageStatus({ ...none, alarms: [ref("a1", "settings")] }).first).toMatchObject({ anchor: "a1", tab: "settings", kind: "alarm" });
   });
   it("the guard that does not answer is «Защита не работает» whatever else there is", () => {
     const s = pageStatus({ ...none, guardDown: true });

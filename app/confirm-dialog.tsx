@@ -2,7 +2,8 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState } f
 import type { ComponentType, ReactNode } from "react";
 import type { Overview } from "../src/overview";
 import type { PasskeyAssertion } from "../src/guardlink";
-import { humanError, proofHint } from "../src/ux";
+import { humanError, proofHint, OPEN_IN_BROWSER } from "../src/ux";
+import type { ProofPlan } from "../src/proofplan";
 import { Button } from "../components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../components/ui/dialog";
 import { ShieldIcon } from "../components/ui/shield-icon";
@@ -79,6 +80,20 @@ export interface PanelParts {
   Description: ComponentType<{ children: ReactNode }>;
 }
 
+/** Why there is no key button here, and the way to the page where it works. The link opens the browser's page at the guard's own origin. */
+export function KeyNote({ plan }: { plan: ProofPlan }) {
+  return (
+    <div className="space-y-2" data-secure-bb-key-note>
+      <p className="text-sm text-muted-foreground">{plan.note}</p>
+      {plan.openUrl ? (
+        <a className="text-sm underline" href={plan.openUrl} target="_blank" rel="noopener noreferrer">
+          {OPEN_IN_BROWSER}
+        </a>
+      ) : null}
+    </div>
+  );
+}
+
 /** What the dialog says and does: the action, the touch button, the code cells, the error under them. */
 export function ConfirmPanel({ ov, rpc, req, onDone, onCancel, parts }: PanelProps & { parts: PanelParts }) {
   const { Title, Description } = parts;
@@ -124,6 +139,14 @@ export function ConfirmPanel({ ov, rpc, req, onDone, onCancel, parts }: PanelPro
       return t ? { passkey: t.passkey } : {};
     }, false);
   const sendCode = (v: string) => void submit(async () => ({ code: v }), true);
+  const keyPart = (
+    <div className="space-y-2">
+      <Button className="w-full" variant={pk.plan.key === "second" ? "outline" : "default"} disabled={busy} onClick={touch}>
+        Приложить палец / ключ
+      </Button>
+      {touching ? <p className="text-sm text-muted-foreground" role="status">{touching}</p> : null}
+    </div>
+  );
   return (
     <>
       <DialogHeader>
@@ -134,22 +157,16 @@ export function ConfirmPanel({ ov, rpc, req, onDone, onCancel, parts }: PanelPro
         <Description>{req.detail ?? "Это действие требует подтверждения."}</Description>
       </DialogHeader>
       <div className="space-y-4">
-        {pk.has ? (
+        {pk.plan.note ? <KeyNote plan={pk.plan} /> : null}
+        {pk.plan.key === "first" ? keyPart : null}
+        {pk.plan.code ? (
           <div className="space-y-2">
-            <Button className="w-full" disabled={busy} onClick={touch}>
-              Приложить палец / ключ
-            </Button>
-            {pk.problem ? <p className="text-sm text-destructive">{pk.problem}</p> : null}
-            {touching ? <p className="text-sm text-muted-foreground" role="status">{touching}</p> : null}
+            {pk.plan.key === "first" ? <p className="text-sm text-muted-foreground">или код из приложения</p> : <p className="text-sm text-muted-foreground">Код из приложения на телефоне</p>}
+            <InputOTP value={code} onChange={setCode} onComplete={sendCode} disabled={busy} invalid={error !== null} autoFocus={pk.plan.key !== "first"} />
           </div>
         ) : null}
-        {pk.keyOnly ? null : (
-          <div className="space-y-2">
-            {pk.has ? <p className="text-sm text-muted-foreground">или код из приложения</p> : <p className="text-sm text-muted-foreground">Код из приложения на телефоне</p>}
-            <InputOTP value={code} onChange={setCode} onComplete={sendCode} disabled={busy} invalid={error !== null} autoFocus={!pk.has} />
-          </div>
-        )}
-        <p className="text-xs text-muted-foreground">{proofHint({ hasKey: pk.has, keyOnly: pk.keyOnly })}</p>
+        {pk.plan.key === "second" ? keyPart : null}
+        <p className="text-xs text-muted-foreground">{proofHint({ hasKey: pk.plan.key !== "none", keyOnly: pk.keyOnly && pk.plan.key !== "none" })}</p>
         <p className="min-h-5 text-sm text-destructive" role="alert" data-secure-bb-confirm-error>{error}</p>
       </div>
       <DialogFooter>

@@ -9,7 +9,7 @@
     "bbPluginSdk": ">=0.6.149"
   },
   "bb": {
-    "name": "Secure BB",
+    "name": "SecureBB",
     "description": "Gate for plugin code: decides whether other plugins may load, with one-time registration, TOTP approvals and trust windows. Guides you through the protection levels of your bb.",
     "branding": {
       "icon": "Shield"

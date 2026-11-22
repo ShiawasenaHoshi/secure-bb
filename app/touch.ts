@@ -5,6 +5,7 @@ import { useRpc } from "@get-bb/plugin-sdk/app";
 import type { SecureBbRpc } from "../server";
 import type { Overview } from "../src/overview";
 import { getAssertion, originProblem } from "../src/webauthn";
+import { isDesktopApp, proofPlan, type ProofPlan } from "../src/proofplan";
 import type { PasskeyAssertion } from "../src/guardlink";
 import { startTouchNote } from "../src/ux";
 import { createDrafts } from "../src/drafts";
@@ -38,14 +39,19 @@ export interface PasskeyState {
   keyOnly: boolean;
   /** Why a touch cannot be made from this page right now (wrong address, no WebAuthn), or null. */
   problem: string | null;
+  /** What this page offers: the key first, the code first, or only the code, and the link to the right address. */
+  plan: ProofPlan;
 }
 
 export function usePasskey(ov: Overview): PasskeyState {
   const pk = ov.guard?.passkey ?? null;
-  if (!pk) return { has: false, keyOnly: false, problem: null };
+  if (!pk) return { has: false, keyOnly: false, problem: null, plan: proofPlan({ currentOrigin: "", currentPath: "/", guardOrigin: "http://localhost", hasKey: false, keyOnly: false, webauthn: false, desktopApp: false }) };
   const supported = typeof navigator !== "undefined" && typeof navigator.credentials?.get === "function";
   const problem = !supported ? "В этом браузере нет WebAuthn." : originProblem(window.location.origin, pk.origin);
-  return { has: pk.keys.length > 0, keyOnly: pk.keys.length > 0 && pk.totpOff, problem };
+  const has = pk.keys.length > 0;
+  const keyOnly = has && pk.totpOff;
+  const plan = proofPlan({ currentOrigin: window.location.origin, currentPath: window.location.pathname, guardOrigin: pk.origin, hasKey: has, keyOnly, webauthn: supported, desktopApp: isDesktopApp(navigator.userAgent) });
+  return { has, keyOnly, problem, plan };
 }
 
 export type TouchQuery = Record<string, unknown>;
