@@ -368,5 +368,16 @@ export interface ImportItem {
 
 
 /** The approval to insert: the guard fills in the source id; the rights come from its own checks. */
-export type NewApproval = Omit<ApprovalRow, "id" | "approvedAt" | "revokedAt" | "sourceId" | "rights" | "why"> & { rights?: Rights | null; why?: string | null };
+export type NewApproval = Omit<ApprovalRow, "id" | "approvedAt" | "revokedAt" | "sourceId" | "rights" | "why"> & { rights?: Rights | null; why?: string | null; /** Where the version is loaded from: a git source is named by it too (`identityOf`). */ rootDir?: string | null };
 
+/** A planned maintenance window the owner declared at the console. Ends at `endedAt` if closed earlier, else at `until`. */
+export interface MaintenanceRow {
+  id: number;
+  beganAt: number;
+  until: number;
+  endedAt: number | null;
+  reason: string;
+}
+/** How long a window lasts when the console does not say (minutes), and the longest it may be. */
+export const MAINTENANCE_DEFAULT_MIN = 20;
+export const MAINTENANCE_MAX_MIN = 60;

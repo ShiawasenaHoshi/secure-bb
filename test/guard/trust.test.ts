@@ -32,6 +32,17 @@ function plugin(dir: string, name: string, server: string): string {
   writeFileSync(join(d, "server.ts"), server);
   return d;
 }
+const SHA = "a".repeat(40);
+/** Where the core files a git plugin: <data>/plugins/cache/git/github.com/<owner>/<name>/<commit>. */
+const gitDirOf = (repo: string): string => `/data/plugins/cache/git/github.com/${repo}/${SHA}`;
+/** A git plugin's directory as the core files it (under `root`), with a given server.ts. */
+function gitPlugin(root: string, repo: string, server: string): string {
+  const d = join(root, "plugins", "cache", "git", "github.com", ...repo.split("/"), SHA);
+  mkdirSync(d, { recursive: true });
+  writeFileSync(join(d, "package.json"), JSON.stringify({ name: "demo", version: "1.0.0", bb: { name: "demo", server: "./server.ts" } }));
+  writeFileSync(join(d, "server.ts"), server);
+  return d;
+}
 let n = 0;
 /** A hash of nothing real (for directories that do not exist). */
 const hash = (): string => `sha256:${String(++n).padStart(8, "0")}${"c".repeat(40)}`;
@@ -79,22 +90,23 @@ describe("sources: names and levels (decided from the core's data)", () => {
     for (const bad of ["path:rel/dir", "path:/a/../../etc", "path:/", "owner", "o/n/x", "https://evil.tld/o/n", "", "path:/a\n/b", 5]) expect(normalizeEntry(bad)).toBeNull();
   });
   it("reads the repository from the core's source: the host must be exactly github.com", () => {
-    expect(identityOf("git", "git:https://github.com/Me/Demo.git@main")?.id).toBe("github:me/demo");
-    expect(identityOf("git", "git:git@github.com:me/demo@v1#sub")?.id).toBe("github:me/demo");
-    expect(identityOf("git", "git:ssh://git@github.com/me/demo")?.id).toBe("github:me/demo");
-    for (const s of ["git:https://github.com.evil.tld/me/demo", "git:https://evil.tld/github.com/me/demo", "git:https://github.com@evil.tld/me/demo", "git:https://gitlab.com/me/demo"]) expect(identityOf("git", s)).toBeNull();
+    expect(identityOf("git", "git:https://github.com/Me/Demo.git@main", gitDirOf("me/demo"))?.id).toBe("github:me/demo");
+    // the core cannot install from an scp or ssh address (it makes https:// of them and fails), so they never arrive, and are not read
+    expect(identityOf("git", "git:git@github.com:me/demo@v1", gitDirOf("me/demo"))).toBeNull();
+    expect(identityOf("git", "git:ssh://git@github.com/me/demo", gitDirOf("me/demo"))).toBeNull();
+    for (const s of ["git:https://github.com.evil.tld/me/demo", "git:https://evil.tld/github.com/me/demo", "git:https://github.com@evil.tld/me/demo", "git:https://gitlab.com/me/demo"]) expect(identityOf("git", s, gitDirOf("me/demo"))).toBeNull();
     expect(identityOf("npm", "npm:left-pad")).toBeNull();
     expect(identityOf("path", "path:/a/../b")).toBeNull();
     expect(identityOf("git", "path:/a")).toBeNull(); // the kind and the source must agree
   });
   it("own, known, unknown; a directory entry covers the directory and what is under it, not a neighbour", () => {
     const own = ["github:me/*", "path:/dev/mine"];
-    expect(levelOf(identityOf("git", "git:https://github.com/me/x"), own, []).level).toBe("own");
-    expect(levelOf(identityOf("git", "git:https://github.com/other/x"), own, ["github:other/*"]).level).toBe("known");
-    expect(levelOf(identityOf("git", "git:https://github.com/other/x"), own, []).level).toBe("unknown");
+    expect(levelOf(identityOf("git", "git:https://github.com/me/x", gitDirOf("me/x")), own, []).level).toBe("own");
+    expect(levelOf(identityOf("git", "git:https://github.com/other/x", gitDirOf("other/x")), own, ["github:other/*"]).level).toBe("known");
+    expect(levelOf(identityOf("git", "git:https://github.com/other/x", gitDirOf("other/x")), own, []).level).toBe("unknown");
     expect(levelOf(identityOf("path", "path:/dev/mine/plug"), own, []).level).toBe("own");
     expect(levelOf(identityOf("path", "path:/dev/mine-evil/plug"), own, []).level).toBe("unknown");
-    expect(entryCovers("github:me/x", identityOf("git", "git:https://github.com/me/y")!)).toBe(false);
+    expect(entryCovers("github:me/x", identityOf("git", "git:https://github.com/me/y", gitDirOf("me/y"))!)).toBe(false);
   });
 });
 
@@ -115,7 +127,7 @@ describe("a version of an own source passes by itself when its rights did not gr
   it("git source from the core's plugins directory", async () => {
     const root = tmp();
     const g = await guard({ pluginsRoots: [root] });
-    const v = plugin(root, "demo-checkout", BASE);
+    const v = gitPlugin(root, "me/demo", BASE);
     const src = { source: "git:https://github.com/me/demo@main", sourceKind: "git" };
     await addMine(g, ["me/*"]);
     await approveFirst(g, decideOf(v, src));
@@ -125,7 +137,7 @@ describe("a version of an own source passes by itself when its rights did not gr
   it("a known source (the owner's catalog list) passes the same way, and says so", async () => {
     const root = tmp();
     const g = await guard({ pluginsRoots: [root], knownSources: ["github:catalog/*"] });
-    const v = plugin(root, "demo", BASE);
+    const v = gitPlugin(root, "catalog/demo", BASE);
     const src = { source: "git:https://github.com/catalog/demo@1", sourceKind: "git" };
     await approveFirst(g, decideOf(v, src));
     writeFileSync(join(v, "server.ts"), BASE + "// v2\n");
@@ -256,10 +268,10 @@ describe("what sends a version to the queue", () => {
     const root = tmp();
     const g = await guard({ pluginsRoots: [root] });
     await addMine(g, ["me/*"]);
-    const v = plugin(root, "demo", BASE);
+    const v = gitPlugin(root, "me/one", BASE);
     await approveFirst(g, decideOf(v, { source: "git:https://github.com/me/one@main", sourceKind: "git" }));
-    writeFileSync(join(v, "server.ts"), BASE + "// v2\n"); // other bytes: no approval of this hash covers it
-    const d = await g.send(decideOf(v, { source: "git:https://github.com/me/two@main", sourceKind: "git" }));
+    const w = gitPlugin(root, "me/two", BASE + "// v2\n"); // other bytes, another repository: no approval of the first covers it
+    const d = await g.send(decideOf(w, { source: "git:https://github.com/me/two@main", sourceKind: "git" }));
     expect(d).toMatchObject({ action: "wait" });
   });
   it("a revoked baseline is no baseline", async () => {
@@ -330,7 +342,7 @@ describe("the guard cannot read the directory, or the checks fail → the queue,
     for (const roots of [[], [root]]) {
       const g = await guard({ pluginsRoots: roots });
       await addMine(g, ["me/*"]);
-      const outside = plugin(tmp(), "demo", BASE);
+      const outside = gitPlugin(tmp(), "me/demo", BASE);
       const d = await g.send(decideOf(outside, src));
       expect(d).toMatchObject({ action: "wait" });
       expect(queueNote(g, d.requestId)).toMatch(/каталог/);

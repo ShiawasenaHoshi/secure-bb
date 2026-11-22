@@ -15,8 +15,9 @@ export class QueueGuard extends WindowGuard {
     const rows = this.db.prepare(`SELECT * FROM approvals WHERE content_hash = ? AND plugin_id = ? AND revoked_at IS NULL ORDER BY id DESC`).all(contentHash, pluginId) as Raw[];
     return rows.map(approvalOf).find((a) => a.via !== "source" || (source !== null && a.source === source)) ?? null;
   }
-  protected addApproval(i: NewApproval): ApprovalRow {
-    const sourceId = identityOf(i.sourceKind, i.source)?.id ?? null;
+  protected addApproval(input: NewApproval): ApprovalRow {
+    const { rootDir, ...i } = input;
+    const sourceId = identityOf(i.sourceKind, i.source, rootDir)?.id ?? null;
     const rights = i.rights ?? null;
     const info = this.db
       .prepare(`INSERT INTO approvals (content_hash, plugin_id, version, source, source_kind, git_commit, npm_integrity, via, window_id, approved_at, source_id, rights, why) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
@@ -152,7 +153,7 @@ export class QueueGuard extends WindowGuard {
     this.assertLiftable(q, ack);
     const factor = this.verifyFactor(`approve:${q.pluginId}`, this.normalizeAction({ op: "approve", requestId: id, ...(ack ? { acknowledgeBlock: true } : {}) }), raw);
     return this.tx(() => {
-      const a = this.addApproval({ contentHash: q.contentHash, pluginId: q.pluginId, version: q.version, source: q.source, sourceKind: q.sourceKind, gitCommit: null, npmIntegrity: null, via: "touch", windowId: null, rights: q.rights, why: touchWhy(q.note) });
+      const a = this.addApproval({ contentHash: q.contentHash, pluginId: q.pluginId, version: q.version, source: q.source, sourceKind: q.sourceKind, rootDir: q.rootDir, gitCommit: null, npmIntegrity: null, via: "touch", windowId: null, rights: q.rights, why: touchWhy(q.note) });
       this.resolveQueue(q.pluginId, q.contentHash, "approved");
       // The record says what exactly was approved: after the fact, this is what the owner reads.
       this.log("approved.touch", q.pluginId, q.contentHash, { approval: a.id, review: q.id, version: q.version, source: q.source, sourceKind: q.sourceKind, rootDir: q.rootDir, ...(ack ? { acknowledgeBlock: true } : {}), ...factorDetail(factor) });
@@ -173,7 +174,7 @@ export class QueueGuard extends WindowGuard {
     if (!cur.includes(entry) && cur.length + 1 > MAX_SOURCES) throw new GuardError("invalid", `at most ${MAX_SOURCES} sources`);
     const factor = this.verifyFactor(`approve-trust:${q.pluginId}`, action, raw);
     return this.tx(() => {
-      const a = this.addApproval({ contentHash: q.contentHash, pluginId: q.pluginId, version: q.version, source: q.source, sourceKind: q.sourceKind, gitCommit: null, npmIntegrity: null, via: "touch", windowId: null, rights: q.rights, why: touchWhy(q.note) });
+      const a = this.addApproval({ contentHash: q.contentHash, pluginId: q.pluginId, version: q.version, source: q.source, sourceKind: q.sourceKind, rootDir: q.rootDir, gitCommit: null, npmIntegrity: null, via: "touch", windowId: null, rights: q.rights, why: touchWhy(q.note) });
       this.resolveQueue(q.pluginId, q.contentHash, "approved");
       const next = cur.includes(entry) ? cur : [...cur, entry].sort();
       this.setMeta("my_sources", JSON.stringify(next));
@@ -269,7 +270,7 @@ export class QueueGuard extends WindowGuard {
           results.push({ kind: "queue", id: it.id, label: it.label, ok: false, local: false, note: "изменилось после показа списка: не одобрено, посмотрите заново" });
           continue;
         }
-        const a = this.addApproval({ contentHash: q.contentHash, pluginId: q.pluginId, version: q.version, source: q.source, sourceKind: q.sourceKind, gitCommit: null, npmIntegrity: null, via: "touch", windowId: null, rights: q.rights, why: touchWhy(q.note) });
+        const a = this.addApproval({ contentHash: q.contentHash, pluginId: q.pluginId, version: q.version, source: q.source, sourceKind: q.sourceKind, rootDir: q.rootDir, gitCommit: null, npmIntegrity: null, via: "touch", windowId: null, rights: q.rights, why: touchWhy(q.note) });
         this.resolveQueue(q.pluginId, q.contentHash, "approved");
         this.log("approved.touch", q.pluginId, q.contentHash, { approval: a.id, review: q.id, version: q.version, source: q.source, sourceKind: q.sourceKind, rootDir: q.rootDir, batch: b.id, ...factorDetail(factor) });
         results.push({ kind: "queue", id: it.id, label: it.label, ok: true, local: false, note: "одобрено" });

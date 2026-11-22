@@ -3,7 +3,7 @@
 import type { Overview } from "./overview";
 import type { QueueRow } from "./store";
 import type { SkillQueueView } from "./skills/guard";
-import { agentsSectionTab, alarmCount, awayText, cardColor, GUARD_DOWN_TEXT, STOPPED_EXPLAIN, gapAlarmText, pageCounts, pageStatus, unackedGaps, type AwayGroup, type CardPlan, type GapContext, type PageCounts, type PluginCard, type ProblemRef, type Status, type TabId } from "./ux";
+import { agentsSectionTab, alarmCount, awayText, cardColor, GUARD_DOWN_TEXT, STOPPED_EXPLAIN, gapView, pageCounts, plural, pageStatus, unackedGaps, type AwayGroup, type CardPlan, type GapContext, type GapView, type PageCounts, type PluginCard, type ProblemRef, type Status, type TabId } from "./ux";
 
 /** The anchor of the alarm «Второй фактор не настроен»: without a second factor nothing can be approved, so it is the first thing to do, not a calm line. */
 export const SECOND_FACTOR_ANCHOR = "sbb-registration";
@@ -61,14 +61,58 @@ export function gapContext(ov: Overview): GapContext {
   return { guardModeNow: ov.guard !== undefined, coreHoldsNow: ov.alive.coreHolds, configWatch: ov.watch.baselineAt !== null };
 }
 
-type GapLine = { gap: Overview["alive"]["gaps"][number]; text: ReturnType<typeof gapAlarmText> };
+export type GapLine = { gap: Overview["alive"]["gaps"][number]; text: GapView };
 
-/** The gaps shown as a red alarm: all that opened something, and every one in a mode without a guard. A calm one is a line in «Пока вас не было». */
-export function gapsBySeverity(ov: Overview): { critical: GapLine[]; calm: GapLine[] } {
+const defaultTime = (t: number): string => new Date(t).toLocaleString();
+
+/**
+ * The pauses of the plugin, sorted by what they are:
+ *  - `critical`: a red alarm — a pause that opened something, outside the owner's declared maintenance (or past its window), and not yet confirmed with «Я проверил»;
+ *  - `calm`: a line in «Пока вас не было» — a pause that opened nothing, or the owner's own planned update (begun and ended inside a window declared at the guard's console).
+ * Whatever is an alarm without a declared window stays an alarm: only a window the guard recorded can make one calm, and only a code or a touch can hide one.
+ */
+export function gapsBySeverity(ov: Overview, fmt: (t: number) => string = defaultTime): { critical: GapLine[]; calm: GapLine[] } {
   const ctx = gapContext(ov);
-  const all = ov.alive.gaps.map((gap) => ({ gap, text: gapAlarmText(gap, ctx) }));
+  const windows = ov.guard?.maintenance ?? [];
+  const reviewed = new Set(ov.alive.reviewedAts ?? []);
+  const all = ov.alive.gaps.map((gap) => ({ gap, text: gapView(gap, ctx, windows, fmt) }));
   const calm = unackedGaps(all.filter((g) => g.text.severity === "calm").map((g) => ({ ...g, at: g.gap.at })), ov.alive.gapsAckedAt);
-  return { critical: all.filter((g) => g.text.severity === "critical"), calm };
+  return { critical: all.filter((g) => g.text.severity === "critical" && !reviewed.has(g.gap.at)), calm };
+}
+
+// ---- the floating strip over the whole of bb --------------------------------------------------------------------------------------
+/**
+ * What the strip that floats over EVERY screen of bb shows. It must stay small: the alarm about a pause is ONE line (the words, the paragraphs and the lists are on the plugin's
+ * own page), and it can be folded to a dot. Folding hides nothing from the page and confirms nothing; it is remembered only until a NEW alarm comes (the key is the set of the
+ * pauses' `at`). An open trust window is never folded away: its row is shown whatever the alarm does.
+ */
+export interface OverlayView {
+  /** The one line of the alarm about the gate not working, or null when there is none. */
+  alarmLine: string | null;
+  /** What the folded state is remembered against: the set of the pauses (`at`) and the safe-mode flag. A new alarm is a new key. */
+  alarmKey: string;
+  /** The alarm is folded to a dot (the remembered key is this alarm's). */
+  collapsed: boolean;
+  windows: boolean;
+  journalAlarm: boolean;
+  /** Anything at all to draw. */
+  show: boolean;
+}
+export const OVERLAY_COLLAPSE_KEY = "sbb-overlay-collapsed";
+const minutesOfGap = (ms: number): number => Math.max(1, Math.round(ms / 60_000));
+const listAnd = (xs: string[]): string => (xs.length <= 1 ? (xs[0] ?? "") : `${xs.slice(0, -1).join(", ")} и ${xs[xs.length - 1]}`);
+export function overlayView(ov: Overview, collapsedKey: string | null): OverlayView {
+  const gaps = gapsBySeverity(ov).critical.map((g) => g.gap).sort((a, b) => a.from - b.from);
+  const safe = ov.alive.safeMode === true;
+  const parts: string[] = [];
+  if (gaps.length === 1) parts.push(`защита не работала ${minutesOfGap(gaps[0]!.ms)} мин`);
+  if (gaps.length > 1) parts.push(`защита не работала ${gaps.length} ${plural(gaps.length, "раз", "раза", "раз")} (${listAnd(gaps.map((g) => String(minutesOfGap(g.ms))))} мин)`);
+  if (safe) parts.push("включён safe-mode bb");
+  const alarmLine = parts.length > 0 ? `Тревога: ${parts.join("; ")}` : null;
+  const alarmKey = `${[...gaps.map((g) => g.at)].sort((a, b) => a - b).join(",")}${safe ? "|safe" : ""}`;
+  const windows = ov.windows.length > 0 || ov.watch.windows.length > 0;
+  const journalAlarm = !ov.journal.ok;
+  return { alarmLine, alarmKey, collapsed: alarmLine !== null && collapsedKey === alarmKey, windows, journalAlarm, show: alarmLine !== null || windows || journalAlarm };
 }
 
 /** What the guard found in the agents' settings, as the numbers that make an alarm, and the tab the section stands on while one is open. */

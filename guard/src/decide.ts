@@ -75,7 +75,7 @@ export class DecideGuard extends QueueGuard {
   }
   /** What the window may carry without being asked: the last approved version of the plugin (same source first) together with the version it was opened from. */
   protected windowBase(w: WindowRow, req: DecideInput): Rights | null {
-    const ident = identityOf(req.sourceKind, req.source);
+    const ident = identityOf(req.sourceKind, req.source, req.rootDir);
     const q = `SELECT * FROM approvals WHERE plugin_id = ? AND revoked_at IS NULL AND rights IS NOT NULL`;
     const row = ((ident ? this.db.prepare(`${q} AND source_id = ? ORDER BY id DESC LIMIT 1`).get(req.pluginId, ident.id) : undefined) ?? this.db.prepare(`${q} ORDER BY id DESC LIMIT 1`).get(req.pluginId)) as Raw | undefined;
     const parts: Rights[] = [];
@@ -123,7 +123,7 @@ export class DecideGuard extends QueueGuard {
         return h.id === null ? ({ action: "wait", reason: "held by secure-bb guard: too many new holds", requestId: null } as const) : ({ action: "wait", reason: `held by secure-bb guard: review #${h.id}`, requestId: h.id } as const);
       }
       if (w) {
-        const a = this.addApproval({ contentHash: req.contentHash, pluginId: req.pluginId, version: req.version, source: req.source, sourceKind: req.sourceKind, gitCommit: null, npmIntegrity: null, via: "window", windowId: w.id, rights: ev?.ok && ev.hash === req.contentHash ? ev.rights : null, why: "в открытом окне доверия: окно пропускает версии, пока не просят нового" });
+        const a = this.addApproval({ contentHash: req.contentHash, pluginId: req.pluginId, version: req.version, source: req.source, sourceKind: req.sourceKind, rootDir: req.rootDir, gitCommit: null, npmIntegrity: null, via: "window", windowId: w.id, rights: ev?.ok && ev.hash === req.contentHash ? ev.rights : null, why: "в открытом окне доверия: окно пропускает версии, пока не просят нового" });
         this.db.prepare(`UPDATE windows SET uses = uses + 1 WHERE id = ?`).run(w.id);
         if (w.mode === "sliding") {
           const next = Math.min(this.now() + w.sizeSec * 1000, w.hardExpiresAt);
@@ -136,7 +136,7 @@ export class DecideGuard extends QueueGuard {
 
       const verdict = this.sourceVerdict(req, ev, stopped);
       if (verdict.pass) {
-        const a = this.addApproval({ contentHash: req.contentHash, pluginId: req.pluginId, version: req.version, source: req.source, sourceKind: req.sourceKind, gitCommit: null, npmIntegrity: null, via: "source", windowId: null, rights: verdict.rights, why: String(verdict.detail.why ?? "прошла сама: источник и права те же") });
+        const a = this.addApproval({ contentHash: req.contentHash, pluginId: req.pluginId, version: req.version, source: req.source, sourceKind: req.sourceKind, rootDir: req.rootDir, gitCommit: null, npmIntegrity: null, via: "source", windowId: null, rights: verdict.rights, why: String(verdict.detail.why ?? "прошла сама: источник и права те же") });
         this.resolveQueue(req.pluginId, req.contentHash, "approved");
         this.log("approved.source", req.pluginId, req.contentHash, { approval: a.id, version: req.version, source: req.source, sourceKind: req.sourceKind, ...verdict.detail });
         return { action: "proceed", via: "source" } as const;
@@ -159,7 +159,7 @@ export class DecideGuard extends QueueGuard {
    * Checks are limited (two at a time, thirty a minute): whoever can reach the socket must not be able to make the guard read without end.
    */
   async evaluate(req: DecideInput): Promise<Evaluation> {
-    const ident = identityOf(req.sourceKind, req.source);
+    const ident = identityOf(req.sourceKind, req.source, req.rootDir);
     if (ident === null) return { ok: false, reason: "источник не назван (не github и не каталог на диске)" };
     let dir: string;
     try {
@@ -224,7 +224,7 @@ export class DecideGuard extends QueueGuard {
     // A critical difference in the agents' settings is open: an agent that may be swapped must not carry a version of an "own" plugin through. Only a human's decision lets it in.
     if (this.criticalAgentsOpen()) return no("открыта критичная тревога по настройкам агентов: версии сами не проходят, пока вы её не разберёте");
     const mode = this.trustMode();
-    const ident = identityOf(req.sourceKind, req.source);
+    const ident = identityOf(req.sourceKind, req.source, req.rootDir);
     const { level, entry } = levelOf(ident, this.mySources(), this.trustCfg.known);
     if (mode === "strict") return no("режим «Строгий»: каждая версия ждёт вас", "strict");
     if (level === "unknown") return no(ident === null ? "источник нельзя назвать своим (не github и не каталог на диске)" : "неизвестный источник", "unknown-source");

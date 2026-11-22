@@ -117,8 +117,8 @@ describe("one reading of a github.com address, for the guard's sources and the t
     for (const a of ADDRESSES) expect(githubSlug(a), a).toBe(githubRepo(a));
   });
   it("an @ref is a ref only in a plugin SOURCE; in a shell address it is not a repository, so it is never trusted (the reading that does not weaken)", () => {
-    // the plugin source `git@github.com:o/r@v1` names repository o/r (bb's syntax for a ref)…
-    expect(identityOf("git", "git:git@github.com:me/my-plugin@v1")).toEqual({ kind: "git", id: "github:me/my-plugin" });
+    // the plugin source `git:https://github.com/o/r@v1` names repository o/r (bb's syntax for a ref)…
+    expect(identityOf("git", "git:https://github.com/me/my-plugin@v1", "/d/plugins/cache/git/github.com/me/my-plugin/" + "a".repeat(40))).toEqual({ kind: "git", id: "github:me/my-plugin" });
     // …but the same text in a command is not the repository, and a clone of it does not pass as the user's own work
     expect(githubSlug("git@github.com:me/my-plugin@v1")).toBeNull();
     expect(cmd("git clone git@github.com:me/my-plugin@v1", MINE)).not.toBeNull();

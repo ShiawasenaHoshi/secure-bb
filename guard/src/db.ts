@@ -187,6 +187,15 @@ export const MIGRATIONS: string[] = [
   // (NULL: the guard did not read the version, so a block may be there); `reason_kind` is one of trust.ts REASON_KINDS. A row older than these columns has neither.
   `ALTER TABLE queue ADD COLUMN blocks TEXT`,
   `ALTER TABLE queue ADD COLUMN reason_kind TEXT`,
+  // A planned maintenance (an update the owner runs): declared ONLY from the console (`sbb-guard maintenance begin`), never over the socket. A pause of the plugin that began
+  // and ended inside such a window is shown as a calm line, not as an alarm. It ends by itself at `until`; `ended_at` is when it was closed earlier from the console.
+  `CREATE TABLE maintenance (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     began_at INTEGER NOT NULL,
+     until INTEGER NOT NULL,
+     ended_at INTEGER,
+     reason TEXT NOT NULL,
+     ended_how TEXT)`,
 ];
 
 export function openDb(path: string): DatabaseSync {

@@ -18,6 +18,17 @@ export function pageRpc(c: RpcCtx) {
       changed();
       return r;
     },
+    // Hides the named pauses of the plugin from the page: a real alarm, so a code or a touch. In guard mode the guard checks it (`touch`), here we only say with which.
+    "alive.review": wrap(async ({ ats, code, passkey }) => {
+      const proof = proofOf(code, passkey);
+      if (guardLink) {
+        if (proof === undefined) throw new GateError("invalid_code", "a code or a touch is needed: this hides a real alarm");
+        await guardLink.touch("alive.review", proof);
+      } else gate.touch("alive.review", needCode(code));
+      const reviewed = alive.reviewGaps(ats, passkey !== undefined ? "passkey" : "code");
+      changed();
+      return { ok: true as const, reviewed };
+    }),
     "alive.ack": () => {
       alive.ackGaps();
       changed();

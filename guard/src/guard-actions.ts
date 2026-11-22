@@ -23,7 +23,7 @@ export class ActionGuard extends AgentsPlanGuard {
         // The source comes from the queue entry, never from the caller: a touch for "trust THIS" is for what the guard names.
         const id = intOf(a.requestId, "requestId", 1, Number.MAX_SAFE_INTEGER);
         const q = this.heldRequest(id);
-        const ident = identityOf(q.sourceKind, q.source);
+        const ident = identityOf(q.sourceKind, q.source, q.rootDir);
         const entry = ident === null ? null : normalizeEntry(ident.id);
         if (entry === null) throw new GuardError("invalid", "this version's source cannot be put into \"my sources\" (not github and not a directory on disk)");
         return { op: "approve-trust", requestId: id, entry };

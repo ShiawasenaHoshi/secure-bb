@@ -1,7 +1,9 @@
 // The decisions that used to sit inside the page's components, now plain functions: which alarms there are, what the extended queue card shows, what the card of a version says.
 import { describe, expect, it } from "vitest";
 import { pluginPinText, queueFacts, queueLabel, queueSourceLine, queueStatusWord, reviewView, scanHeadText, skillCapsLine, skillFindingsShown } from "../src/cardview";
-import { agentsFacts, pageAlarms } from "../src/pageview";
+import { agentsFacts, OVERLAY_COLLAPSE_KEY, overlayView, pageAlarms } from "../src/pageview";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import type { Overview } from "../src/overview";
 import type { QueueRow } from "../src/store";
 
@@ -58,6 +60,20 @@ describe("the card of a waiting version", () => {
   it("the unsafe directory is a fact of the card", () => {
     expect(reviewView({ q: q({ reason: "каталог доступен на запись другим пользователям" }), found: undefined, ux: undefined, flowDowngrade: false }).unsafeDir).toBe(true);
   });
+  it("a version the guard did not read is told as «not read», with its reason; only real blocks are «ведёт себя как вредоносный»", () => {
+    const ux = { why: null, chain: [], level: "unknown" as const, entry: null, sourceLabel: "github.com/o/chime" };
+    const unread = reviewView({ q: q({ reasonKind: "other", blocks: null, reason: "каталог версии вне каталогов плагинов ядра" } as Partial<QueueRow>), found: found("network"), ux, flowDowngrade: false });
+    expect(unread.red).toBe(true);
+    expect(unread.text.title).toBe("Сторож не смог сам прочитать эту версию");
+    expect(unread.text.line).toContain("Причина: каталог версии вне каталогов плагинов ядра.");
+    expect(`${unread.text.title} ${unread.text.line}`).not.toMatch(/вредонос/);
+    const block = reviewView({ q: q({ reasonKind: "block", blocks: ["decode-eval a.js:1"], reason: "жёсткий флаг: decode-eval a.js:1" } as Partial<QueueRow>), found: found("network"), ux, flowDowngrade: false });
+    expect(block.red).toBe(true);
+    expect(block.text.title).toMatch(/^Остановлено: /);
+    expect(block.text.title).not.toMatch(/не смог сам прочитать/);
+    const clean = reviewView({ q: q({ reasonKind: "unknown-source", blocks: [], reason: "неизвестный источник" } as Partial<QueueRow>), found: found("network"), ux, flowDowngrade: false });
+    expect(clean.red).toBe(false);
+  });
 });
 
 describe("the small lines of the rows", () => {
@@ -75,5 +91,53 @@ describe("the small lines of the rows", () => {
     expect(scanHeadText({ ...base, status: "clean" }, at)).toBe("чисто (t2, A)");
     expect(scanHeadText({ ...base, status: "suspect" }, at)).toBe("ПОДОЗРЕНИЕ (t2)");
     expect(scanHeadText({ ...base, status: "failed", note: "нет сети" }, at)).toBe("недоступен: нет сети");
+  });
+});
+
+describe("the strip that floats over all of bb", () => {
+  const gap = (at: number, minutes: number) => ({ from: at - minutes * 60_000, to: at, ms: minutes * 60_000, at, mode: "guard" as const, cause: "unknown" as const, stopped: false, safeMode: false });
+  const ov = (gaps: Array<ReturnType<typeof gap>>, over: Record<string, unknown> = {}): Overview =>
+    ovOf({ guard: { connected: true, maintenance: [] }, windows: [], watch: { drifts: [], baselineAt: 1, windows: [] }, alive: { gaps, safeMode: false, safeModeSeen: false, gapsAckedAt: null, reviewedAts: [], coreHolds: false }, ...over });
+
+  it("the alarm about a pause is ONE line: the count and the minutes, no paragraph and no list of what did not work", () => {
+    const v = overlayView(ov([gap(2_000_000, 13), gap(1_000_000, 3)]), null);
+    expect(v.alarmLine).toBe("Тревога: защита не работала 2 раза (3 и 13 мин)");
+    expect(v.alarmLine).not.toMatch(/Не работало|Сторож в это время|страница, коды|наблюдение за настройками/);
+    expect(v.alarmLine!.length).toBeLessThan(80);
+    expect(overlayView(ov([gap(1_000_000, 13)]), null).alarmLine).toBe("Тревога: защита не работала 13 мин");
+    expect(overlayView(ov([gap(3, 3), gap(2, 5), gap(1, 13)]), null).alarmLine).toBe("Тревога: защита не работала 3 раза (13, 5 и 3 мин)");
+    expect(overlayView(ov([]), null).alarmLine).toBeNull();
+    expect(overlayView(ov([], { alive: { gaps: [], safeMode: true, safeModeSeen: true, gapsAckedAt: null, reviewedAts: [], coreHolds: false } }), null).alarmLine).toBe("Тревога: включён safe-mode bb");
+  });
+  it("folding is remembered against the set of the pauses: the same alarm stays folded, a NEW one unfolds it", () => {
+    const first = overlayView(ov([gap(1_000_000, 3)]), null);
+    expect(first.collapsed).toBe(false);
+    expect(overlayView(ov([gap(1_000_000, 3)]), first.alarmKey).collapsed).toBe(true);
+    const next = overlayView(ov([gap(2_000_000, 5), gap(1_000_000, 3)]), first.alarmKey);
+    expect(next.alarmKey).not.toBe(first.alarmKey);
+    expect(next.collapsed).toBe(false);
+    // folding is not a confirmation: the alarm is still an alarm for the page
+    expect(pageAlarms(ov([gap(1_000_000, 3)]), true).some((a) => /не работал/.test(a.text))).toBe(true);
+  });
+  it("an open trust window is shown whatever the alarm does: folded or not, the window is there", () => {
+    const withWindow = ov([gap(1_000_000, 3)], { windows: [{ id: 1 }] });
+    const key = overlayView(withWindow, null).alarmKey;
+    const v = overlayView(withWindow, key);
+    expect(v.collapsed).toBe(true);
+    expect(v.windows).toBe(true);
+    expect(v.show).toBe(true);
+    expect(overlayView(ov([], { watch: { drifts: [], baselineAt: 1, windows: [{ id: 2 }] } }), null)).toMatchObject({ windows: true, alarmLine: null, show: true });
+  });
+  it("nothing to show: no alarm, no window", () => {
+    expect(overlayView(ov([]), null).show).toBe(false);
+  });
+  it("the strip never draws the full alarm (that is the page's), keeps the folded state in localStorage under one key, and tries before it touches it", () => {
+    const src = readFileSync(fileURLToPath(new URL("../app/windows.tsx", import.meta.url)), "utf8");
+    const strip = src.slice(src.indexOf("export function WindowOverlay"));
+    expect(strip).not.toContain("<AliveAlarm");
+    expect(strip).not.toMatch(/notWorking|works/);
+    expect(strip).toContain("overlayView(");
+    expect(OVERLAY_COLLAPSE_KEY).toBe("sbb-overlay-collapsed");
+    expect(src).toMatch(/try \{\s*return window\.localStorage\.getItem\(OVERLAY_COLLAPSE_KEY\)/);
   });
 });

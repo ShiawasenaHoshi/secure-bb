@@ -53,6 +53,19 @@ export function redText(rules: string[]): RedText {
   return { ...RED_FALLBACK, rule: rules[0] ?? null };
 }
 
+/**
+ * A version the guard could not read itself: red (it can be lifted only with the acknowledgement and a fresh touch) but honest. `why` is the guard's note, as it wrote it
+ * (not a verdict about the plugin): «источник не назван…», «каталог вне каталогов плагинов ядра», «сторож занят…».
+ */
+export function unreadText(pluginId: string, version: string, why: string | null): RedText {
+  const reason = why !== null && why.trim() !== "" ? ` Причина: ${why.trim().replace(/[.。]+$/, "")}.` : " Причина в записи сторожа не указана.";
+  return {
+    title: "Сторож не смог сам прочитать эту версию",
+    line: `Плагин «${pluginId}» ${version}.${reason} Что в ней, неизвестно: плохого в ней не нашли, но и не смотрели. Разрешить можно только с подтверждением риска и свежим касанием. Плагин не запущен.`,
+    rule: null,
+  };
+}
+
 export const MISMATCH_HINT = "Переустановите плагин из его источника. Если код снова не совпадёт, сообщите об этом в разделе журнала.";
 
 /** A version whose code is not what the guard checked: red, with its own words. */
