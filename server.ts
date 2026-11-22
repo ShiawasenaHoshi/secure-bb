@@ -422,14 +422,6 @@ export default async function plugin(bb: BbPluginApi) {
     guardMode: guardLink !== null,
     coreHolds: (process.env.BB_PLUGIN_ACTIVATION_GUARDS ?? "").split(",").some((g) => g.trim() === "secure-bb"),
     serverStartedAt: () => Date.now() - process.uptime() * 1000,
-    // What the guard let through by a window while this plugin (and its hook's extra checks) was not there: the guard's journal says it.
-    windowPasses: async (from, to) => {
-      const st = await guardLink?.state().catch(() => null);
-      // The guard's state carries the newest 200 records: if they do not reach back to the start of the gap, the count is unknown.
-      const recent = st?.journal.recent ?? [];
-      if (!st || (recent.length >= 200 && Math.min(...recent.map((r) => r.ts)) > from)) return null;
-      return st ? recent.filter((r) => r.kind === "approved.window" && r.ts >= from && r.ts <= to).length : null;
-    },
   });
   if ((await alive.start()) !== null) changed();
   const overview = () =>
@@ -1535,6 +1527,7 @@ export default async function plugin(bb: BbPluginApi) {
         }
       };
       let lastSlow = now();
+      void guardLink?.beat().catch(() => undefined);
       let lastAgentsScan = 0;
       while (!signal.aborted) {
         // Short tick: a plugin the hook did not vet is already running and should be stopped within seconds.
@@ -1548,6 +1541,7 @@ export default async function plugin(bb: BbPluginApi) {
         await task("heartbeat", () => alive.beat());
         await task("guard windows", async () => {
           if (!guardLink) return;
+          await guardLink.beat().catch(() => undefined);
           try {
             gate.syncGuardWindows(await guardLink.state());
           } catch {

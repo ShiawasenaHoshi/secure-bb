@@ -134,6 +134,9 @@ export interface Policy {
   capMin: number;
   mode: "sliding" | "fixed";
 }
+/** The plugin's pulse is fresh for this long (it calls every 15 s). */
+export const PLUGIN_ALIVE_MS = 45_000;
+export const WINDOW_PAUSED_NOTE = "окно приостановлено: страница защиты не работает";
 export const DEFAULT_POLICY: Policy = { windowMin: 30, capMin: 240, mode: "sliding" };
 
 export interface DecideInput {
@@ -199,6 +202,10 @@ export interface WindowRow {
   closedAt: number | null;
   closedReason: string | null;
   uses: number;
+  /** "tree" / "thread": bound to a thread (only the plugin knows the threads); "all": any version of the plugin. A window older than the column is "thread". */
+  scope: "tree" | "thread" | "all";
+  /** The rights of the held version the window was opened from, as the guard read them; null when none was waiting. */
+  baseRights: Rights | null;
 }
 
 type Raw = Record<string, unknown>;
@@ -249,6 +256,8 @@ const windowOf = (r: Raw): WindowRow => ({
   closedAt: r.closed_at === null ? null : Number(r.closed_at),
   closedReason: (r.closed_reason as string | null) ?? null,
   uses: Number(r.uses),
+  scope: r.scope === "tree" || r.scope === "all" ? r.scope : "thread",
+  baseRights: typeof r.base_rights === "string" ? (JSON.parse(r.base_rights) as Rights) : null,
 });
 
 // ---- input validation: every string that reaches the database or the journal is checked here ---------
@@ -797,6 +806,49 @@ export class Guard {
     return this.activeApproval(req.pluginId, req.contentHash, req.source);
   }
 
+  // ---- the plugin's pulse ------------------------------------------------------------------------------------
+  private pluginBeatAt = 0;
+  /** The plugin says it runs (a light call every few seconds). Only memory: after a restart of the guard the plugin is "not alive" until its next call. */
+  beat(): { ok: true } {
+    this.pluginBeatAt = this.now();
+    return { ok: true };
+  }
+  /** The plugin called within PLUGIN_ALIVE_MS. Whoever can reach the socket can call, so this only decides what a window needs; it never lets anything in by itself. */
+  pluginAlive(): boolean {
+    return this.pluginBeatAt > 0 && this.now() - this.pluginBeatAt <= PLUGIN_ALIVE_MS;
+  }
+
+  /**
+   * An open window lets a version in only if the same stands as when the plugin runs. The pulse decides ONE thing: the thread scope (only the plugin knows
+   * the threads), so a window bound to a thread pauses without it. Whoever reaches the socket can fake a pulse, so everything the guard can read itself it
+   * checks always: the version was read and its hash matched, no hard flag, no right beyond the last approved version and the one the window was opened from.
+   * No base to compare with: held. Null: the window may let it in.
+   */
+  private windowRefuses(w: WindowRow, req: DecideInput, ev: Evaluation | null): { note: string; stop: boolean } | null {
+    if (w.scope !== "all" && !this.pluginAlive()) return { note: WINDOW_PAUSED_NOTE, stop: false };
+    if (ev === null) return { note: "окно: права версии не посчитаны", stop: false };
+    if (!ev.ok) return { note: `окно: ${ev.reason}`, stop: false };
+    if (ev.hash !== req.contentHash) return { note: "окно: хеш каталога не совпал с хешем из запроса", stop: false };
+    if (ev.blocks.length > 0) return { note: `жёсткий флаг: ${brief(ev.blocks)}`, stop: true };
+    const base = this.windowBase(w, req);
+    if (base === null) return { note: "окно: нет одобренной версии или версии, с которой открыто окно, для сравнения прав", stop: false };
+    const g = grown(base, ev.rights);
+    if (g.tokens.length > 0) return { note: `новое право: ${brief(g.tokens)}`, stop: true };
+    if (g.review.length > 0) return { note: `новое замечание проверок: ${brief(g.review)}`, stop: true };
+    return null;
+  }
+  /** What the window may carry without being asked: the last approved version of the plugin (same source first) together with the version it was opened from. */
+  private windowBase(w: WindowRow, req: DecideInput): Rights | null {
+    const ident = identityOf(req.sourceKind, req.source);
+    const q = `SELECT * FROM approvals WHERE plugin_id = ? AND revoked_at IS NULL AND rights IS NOT NULL`;
+    const row = ((ident ? this.db.prepare(`${q} AND source_id = ? ORDER BY id DESC LIMIT 1`).get(req.pluginId, ident.id) : undefined) ?? this.db.prepare(`${q} ORDER BY id DESC LIMIT 1`).get(req.pluginId)) as Raw | undefined;
+    const parts: Rights[] = [];
+    if (row) parts.push(approvalOf(row).rights!);
+    if (w.baseRights) parts.push(w.baseRights);
+    if (parts.length === 0) return null;
+    return { tokens: [...new Set(parts.flatMap((p) => p.tokens))].sort(), review: [...new Set(parts.flatMap((p) => p.review))].sort() };
+  }
+
   /**
    * What the core asks before it loads a plugin. Holds when nothing a human decided covers it. `ev`: what the guard itself read in the version's
    * directory (see `evaluate`); with it, a version of a trusted source whose rights did not grow passes by itself (`sourceVerdict`).
@@ -828,6 +880,12 @@ export class Guard {
       // A stop survives a rejection: dismiss needs no code, so a process that can reach the guard could otherwise clear the stop and let the window in.
       const stopped = this.isStopped(req.pluginId, req.contentHash);
       const w = stopped ? null : this.openWindowOf(req.pluginId);
+      const refused = w ? this.windowRefuses(w, req, ev) : null;
+      if (w && refused) {
+        const h = this.upsertHeld(req, refused.stop, { rights: ev?.ok && ev.hash === req.contentHash ? ev.rights : null, note: refused.note });
+        this.log("window.refused", req.pluginId, req.contentHash, { windowId: w.id, version: req.version, scope: w.scope, note: refused.note, ...(refused.stop ? { stop: true } : {}) });
+        return h.id === null ? ({ action: "wait", reason: "held by secure-bb guard: too many new holds", requestId: null } as const) : ({ action: "wait", reason: `held by secure-bb guard: review #${h.id}`, requestId: h.id } as const);
+      }
       if (w) {
         const a = this.addApproval({ contentHash: req.contentHash, pluginId: req.pluginId, version: req.version, source: req.source, sourceKind: req.sourceKind, gitCommit: null, npmIntegrity: null, via: "window", windowId: w.id, rights: ev?.ok && ev.hash === req.contentHash ? ev.rights : null, why: "в открытом окне доверия: окно пропускает версии, пока не просят нового" });
         this.db.prepare(`UPDATE windows SET uses = uses + 1 WHERE id = ?`).run(w.id);
@@ -1364,9 +1422,11 @@ export class Guard {
       for (const old of this.unclosedWindows()) if (old.pluginId === pluginId) this.closeWindowInner(old, "reopened");
       const now = this.now();
       const hard = now + policy.capMin * 60_000;
+      // What the person saw when opening it: the rights of the newest version of this plugin that waits.
+      const held = this.db.prepare(`SELECT rights FROM queue WHERE plugin_id = ? AND status = 'held' AND rights IS NOT NULL ORDER BY id DESC LIMIT 1`).get(pluginId) as { rights: string } | undefined;
       const info = this.db
-        .prepare(`INSERT INTO windows (plugin_id, size_sec, cap_sec, mode, opened_at, expires_at, hard_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-        .run(pluginId, minutes * 60, policy.capMin * 60, policy.mode, now, Math.min(now + minutes * 60_000, hard), hard);
+        .prepare(`INSERT INTO windows (plugin_id, size_sec, cap_sec, mode, opened_at, expires_at, hard_expires_at, scope, base_rights) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(pluginId, minutes * 60, policy.capMin * 60, policy.mode, now, Math.min(now + minutes * 60_000, hard), hard, raw.scope === "tree" || raw.scope === "thread" ? raw.scope : "all", held?.rights ?? null);
       const w = windowOf(this.db.prepare(`SELECT * FROM windows WHERE id = ?`).get(Number(info.lastInsertRowid)) as Raw);
       this.log("window.open", pluginId, null, { windowId: w.id, minutes, mode: w.mode, ceilingMin: policy.capMin, ...factorDetail(factor) });
       return w;

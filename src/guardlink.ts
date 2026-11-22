@@ -402,6 +402,10 @@ export class GuardLink implements GuardPort {
   async batchApprove(batchId: string, setHash: string, proof: GuardProof): Promise<GuardBatchResult[]> {
     return (await this.call({ op: "batch-approve", batchId, setHash, ...proofFields(proof) })).results as GuardBatchResult[];
   }
+  /** The plugin runs: windows bound to a thread let versions in at the guard only while this is fresh (every 15 s). */
+  async beat(): Promise<void> {
+    await this.call({ op: "beat" });
+  }
   async dismiss(requestId: number): Promise<void> {
     await this.call({ op: "dismiss", requestId });
   }

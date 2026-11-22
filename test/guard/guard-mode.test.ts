@@ -256,7 +256,7 @@ describe("guard mode: windows", () => {
   it("a window opened at the guard from elsewhere (no thread known here) holds the plugin's versions", { timeout: 30_000 }, async () => {
     g = await startGuardOnDate();
     const h = await bootPlugin(g.paths.socket);
-    await g.send({ op: "open-window", pluginId: "demo", minutes: 10, code: fresh(g) });
+    await g.send({ op: "open-window", scope: "tree", pluginId: "demo", minutes: 10, code: fresh(g) });
     const v = await proposed(h, "demo");
     expect(await h.hook(v.ctx)).toMatchObject({ action: "wait" });
     const page = await ov(h);

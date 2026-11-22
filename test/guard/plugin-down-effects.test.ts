@@ -38,7 +38,7 @@ async function measure(): Promise<PluginDownEffects> {
   const settings = join(home, ".claude", "settings.json");
   mkdirSync(join(home, ".claude"), { recursive: true });
   writeFileSync(settings, '{"theme":"dark"}\n');
-  const g: TestGuard = await startGuard({ agents: { home, extraRoots: [] }, trust: {} });
+  const g: TestGuard = await startGuard({ agents: { home, extraRoots: [] }, trust: {}, pluginAlive: false, windowContentChecks: true });
   cleanup.push(() => g.close());
   const scan = (): void => void g.guard.agentsScan({ force: true });
   scan();
@@ -51,11 +51,27 @@ async function measure(): Promise<PluginDownEffects> {
   await g.send({ op: "approve", requestId: first.requestId, code: g.nextCode() });
   const guardApprovedStillRun = (await g.send(decideOf(known, "known"))).action === "proceed";
 
-  // a window: a version full of what the hook would reject passes by the window alone
-  g.guard.openWindow({ pluginId: "windowed", minutes: 30, code: g.nextCode() });
-  const loud = plugin(plugins, "windowed", LOUD);
-  const viaWindow = await g.send(decideOf(loud, "windowed"));
-  const windowPassesUnchecked = viaWindow.action === "proceed" && viaWindow.via === "window";
+  // a window bound to a thread, no plugin calling the guard: nothing passes, whatever the version is
+  g.guard.openWindow({ pluginId: "threaded", minutes: 30, scope: "tree", code: g.nextCode() });
+  const quietThreaded = plugin(plugins, "threaded", QUIET);
+  const pausedQuiet = await g.send(decideOf(quietThreaded, "threaded"));
+  const windowPausedWithoutPlugin = pausedQuiet.action === "wait" && /окно приостановлено: страница защиты не работает/.test(String(pausedQuiet.reason ?? "") + JSON.stringify(((await g.send({ op: "state" })).queue as any[]).map((q) => q.note)));
+
+  // a window over everything: after the guard's own checks only. A version with what the hook would reject is held; a clean one of the same source passes.
+  const own = plugin(plugins, "everything", QUIET);
+  const firstOwn = await g.send(decideOf(own, "everything"));
+  await g.send({ op: "approve", requestId: firstOwn.requestId, code: g.nextCode() });
+  g.guard.openWindow({ pluginId: "everything", minutes: 30, code: g.nextCode() });
+  writeFileSync(join(own, "server.ts"), LOUD);
+  const loudAll = await g.send(decideOf(own, "everything", { version: "1.0.1" }));
+  writeFileSync(join(own, "server.ts"), `${QUIET}// again\n`);
+  const quietAll = await g.send(decideOf(own, "everything", { version: "1.0.2" }));
+  // …and a thread window with a (possibly forged) pulse is no easier: the same version is held there too
+  g.guard.openWindow({ pluginId: "everything", minutes: 30, scope: "tree", code: g.nextCode() });
+  await g.send({ op: "beat" });
+  writeFileSync(join(own, "server.ts"), `${LOUD}// pulse\n`);
+  const loudPulse = await g.send(decideOf(own, "everything", { version: "1.0.3" }));
+  const windowChecked = loudPulse.action === "wait" && loudAll.action === "wait" && quietAll.action === "proceed" && quietAll.via === "window";
   // …and the guard expires the window by itself
   g.guard.openWindow({ pluginId: "short", minutes: 5, code: g.nextCode() });
   g.clock.advance(6 * 60_000);
@@ -69,11 +85,11 @@ async function measure(): Promise<PluginDownEffects> {
   const st = await g.send({ op: "state" });
   const seen = (g.guard.agentsState() as any).drifts[0]?.class === "critical";
   const guardWatchesAgents = seen && st.windows.length === 0 && st.closedWindows.some((w: any) => w.closedReason === "agents-critical");
-  return { guardHoldsUnknown, guardApprovedStillRun, guardWatchesAgents, guardExpiresWindows, windowPassesUnchecked, pageAndConfigWatchAreThePlugins: true };
+  return { guardHoldsUnknown, guardApprovedStillRun, guardWatchesAgents, guardExpiresWindows, windowPausedWithoutPlugin, windowChecked, pageAndConfigWatchAreThePlugins: true };
 }
 
 const ctx = (over: Partial<GapContext> = {}): GapContext => ({ guardModeNow: true, coreHoldsNow: false, configWatch: true, ...over });
-const gap = (over: Partial<GapLike> = {}): GapLike => ({ from: 1, to: 13 * 60_000 + 1, ms: 13 * 60_000, mode: "guard", cause: "unknown", windowPasses: 0, ...over });
+const gap = (over: Partial<GapLike> = {}): GapLike => ({ from: 1, to: 13 * 60_000 + 1, ms: 13 * 60_000, mode: "guard", cause: "unknown", ...over });
 
 describe("the alarm about a stopped plugin tells the truth about its mode", () => {
   it("every effect the guard-mode text relies on is what a real guard does", async () => {
@@ -84,10 +100,10 @@ describe("the alarm about a stopped plugin tells the truth about its mode", () =
     const t = gapAlarmText(gap(), ctx());
     expect(t.severity).toBe("critical");
     expect(t.headline).toBe("Страница защиты не работала 13 мин");
-    expect(t.works).toBe("Сторож в это время работал: версии плагинов удерживались и проверялись сторожем, одобренные версии работали, настройки агентов отслеживались.");
+    expect(t.works).toBe("Сторож в это время работал: версии плагинов удерживались и проверялись сторожем, одобренные версии работали, настройки агентов отслеживались, окна доверия по треду стояли (версии по ним не проходили), окна доверия пропускали версию только после проверок сторожа (жёсткие признаки, новые права).");
     expect(t.notWorking).toMatch(/страница, коды и касания/);
     expect(t.notWorking).toMatch(/наблюдение за настройками bb/);
-    expect(t.notWorking).not.toMatch(/по окну доверия/);
+    expect(t.notWorking).not.toMatch(/по окну доверия|без проверок плагина/);
     expect(t.opens).toHaveLength(1);
     expect(`${t.headline} ${t.works} ${t.notWorking}`).not.toMatch(/выключ|остановил|ничего не удерживалось/);
   });
@@ -100,21 +116,12 @@ describe("the alarm about a stopped plugin tells the truth about its mode", () =
     expect(t.notWorking).toMatch(/страница, коды и касания/);
   });
 
-  it("guard mode: versions that passed by a window are named, and an unknown count keeps the alarm", () => {
-    const some = gapAlarmText(gap({ windowPasses: 2 }), ctx({ configWatch: false }));
-    expect(some.severity).toBe("critical");
-    expect(some.notWorking).toMatch(/2 версии прошли по окну доверия без проверок плагина/);
-    const unknown = gapAlarmText(gap({ windowPasses: null }), ctx({ configWatch: false }));
-    expect(unknown.severity).toBe("critical");
-    expect(unknown.notWorking).toMatch(/сколько их было, узнать не удалось/);
-  });
-
   it("if the guard ever stopped checking, the text could not claim it did (effects drive the words)", () => {
-    const t = gapAlarmText(gap(), ctx(), { ...PLUGIN_DOWN_EFFECTS, guardHoldsUnknown: false, guardWatchesAgents: false });
+    const t = gapAlarmText(gap(), ctx(), { ...PLUGIN_DOWN_EFFECTS, guardHoldsUnknown: false, guardWatchesAgents: false, windowPausedWithoutPlugin: false, windowChecked: false });
     expect(t.works).not.toMatch(/удерживались/);
     expect(t.works).not.toMatch(/агентов/);
-    const noWindow = gapAlarmText(gap({ windowPasses: 5 }), ctx({ configWatch: false }), { ...PLUGIN_DOWN_EFFECTS, windowPassesUnchecked: false });
-    expect(noWindow.severity).toBe("calm");
+    expect(t.works).not.toMatch(/окна доверия/);
+    expect(t.works).not.toMatch(/окна доверия пропускали/);
   });
 
   it("without a guard: honest «ничего не удерживается», or what the core did when it waits for the gate", () => {
@@ -165,25 +172,15 @@ describe("the gap record carries the facts of its mode", () => {
     return h.a.start();
   };
 
-  it("guard mode: the mode, the server start and the versions let in by a window are recorded", async () => {
-    let asked: [number, number] | null = null;
-    const h = alive({ guardMode: true, coreHolds: true, windowPasses: async (f, t) => ((asked = [f, t]), 3) });
+  it("guard mode: the mode and what the core does are recorded", async () => {
+    const h = alive({ guardMode: true, coreHolds: true });
     const g = await gapOf(h);
-    expect(g).toMatchObject({ mode: "guard", cause: "unknown", coreHolds: true, windowPasses: 3 });
-    expect(asked).toEqual([g!.from, g!.to]);
-    expect(h.a.view().gaps[0]).toMatchObject({ mode: "guard", windowPasses: 3 });
+    expect(g).toMatchObject({ mode: "guard", cause: "unknown", coreHolds: true });
+    expect(h.a.view().gaps[0]).toMatchObject({ mode: "guard" });
   });
 
-  it("without a guard nobody is asked about windows", async () => {
-    let asked = false;
-    const h = alive({ windowPasses: async () => ((asked = true), 1) });
-    expect(await gapOf(h)).toMatchObject({ mode: "hook", windowPasses: null });
-    expect(asked).toBe(false);
-  });
-
-  it("a guard that cannot be asked leaves the count unknown, not zero", async () => {
-    const h = alive({ guardMode: true, windowPasses: async () => { throw new Error("no socket"); } });
-    expect((await gapOf(h))!.windowPasses).toBeNull();
+  it("without a guard the record says so", async () => {
+    expect(await gapOf(alive())).toMatchObject({ mode: "hook" });
   });
 
   it("the server stopped: it started after the last mark and the plugin came up with it; otherwise the cause is not claimed", () => {
