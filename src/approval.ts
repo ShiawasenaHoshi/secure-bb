@@ -95,8 +95,7 @@ export function authTableMarkdown(): string {
 }
 
 // ---- session ---------------------------------------------------------------------------------------------------------
-export const SESSION_IDLE_MS = 15 * 60_000;
-export const SESSION_CAP_MS = 60 * 60_000;
+// The session's numbers (15 minutes idle, one hour at most) and what it covers are the guard's: guard/src/session-rules.ts.
 
 export const hashToken = (token: string): string => createHash("sha256").update(token, "utf8").digest("hex");
 export const newToken = (): string => randomBytes(32).toString("base64url");

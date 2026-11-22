@@ -61,6 +61,7 @@ import {
   type TrustMode,
   windowAllows,
 } from "./trust.ts";
+import { guardPolicyWidens, type GuardPolicy } from "./policy.ts";
 import { scan as scanAgents, type FileKind, type Limits, type ScanResult } from "./agents-scan.ts";
 import { JSON_FILE, applyPathChange, watchedRel, type JsonKey } from "./restore.ts";
 import { stable } from "./agents-scan.ts";
@@ -85,9 +86,9 @@ export const MAX_FAILURES = 5;
  * number of refusals since the last one), so the journal cannot be flooded either.
  */
 export const PASSKEY_FAIL_LOG_EVERY_MS = 60_000;
-/** Approval sessions (the same numbers as without a guard): 15 minutes sliding, 1 hour ceiling. */
-export const SESSION_IDLE_MS = 15 * 60_000;
-export const SESSION_CAP_MS = 60 * 60_000;
+// Approval sessions: the numbers, the table of what a session covers and `isRoutineAction` are in session-rules.ts (the plugin takes them from there).
+export { SESSION_CAP_MS, SESSION_IDLE_MS, ROUTINE_TOUCH_PURPOSES, isRoutineAction } from "./session-rules.ts";
+import { SESSION_CAP_MS, SESSION_IDLE_MS, isRoutineAction, minutesWords, sessionCoverage } from "./session-rules.ts";
 /** A list for one touch lives this long; a few may wait at once. */
 export const BATCH_TTL_MS = 10 * 60_000;
 const MAX_PENDING_BATCHES = 20;
@@ -95,11 +96,6 @@ const MAX_BATCH_ITEMS = 50;
 /** Troubleshooting mode: at most this long, and every decision is a journal record, so at most this many a minute (past it the guard holds again). */
 export const MAX_TROUBLESHOOT_MIN = 240;
 const MAX_TROUBLESHOOT_PASSES_PER_MIN = 1000;
-/**
- * What a session covers besides `approve` (without acknowledgeBlock), `open-window` and `batch-approve`: the plugin's own routine touches.
- * Everything else (policy, trust mode, sources, agents, the session itself) needs a fresh touch; the plugin's table (src/approval.ts) says the same.
- */
-export const ROUTINE_TOUCH_PURPOSES: ReadonlySet<string> = new Set(["watch.accept", "watch.acceptAll", "watch.rollback", "watch.window.open", "skills.approve"]);
 /** A queue entry older than the `reason_kind` column: the only place a note's words are still read (its kind was never written). Nothing newer is decided by words. */
 const legacyKindOfNote = (n: string | null): ReasonKind | null => (/не совпал с хешем/.test(n ?? "") ? "mismatch" : null);
 const sha256hex = (t: string): string => createHash("sha256").update(t, "utf8").digest("hex");
@@ -130,13 +126,8 @@ function fileGone(path: string): "gone" | "denied" | "present" {
 }
 const rootKindOf = (cfg: AgentsConfig, root: string): string => (root === cfg.home ? "global" : cfg.extraRoots.includes(root) ? "extra" : "workspace");
 
-export interface Policy {
-  /** Default size of a window, minutes. */
-  windowMin: number;
-  /** Hard ceiling of a window from its opening, minutes. */
-  capMin: number;
-  mode: "sliding" | "fixed";
-}
+/** The guard's own part of the policy; what widens it is in policy.ts. */
+export type Policy = GuardPolicy;
 /** The plugin's pulse is fresh for this long (it calls every 15 s). */
 export const PLUGIN_ALIVE_MS = 45_000;
 export const WINDOW_PAUSED_NOTE = "окно приостановлено: страница защиты не работает";
@@ -373,26 +364,6 @@ export interface Factor {
   sessionId?: number;
 }
 const factorDetail = (f: Factor): Record<string, unknown> => ({ via: f.via, ...(f.key !== undefined ? { key: f.key } : {}), ...(f.sessionId !== undefined ? { session: f.sessionId } : {}), ...(f.action !== undefined ? { action: f.action } : {}) });
-
-/** Does a session cover this action? Routine ones only: lifting a block, widening, trusting a source, the session itself — never. */
-export function isRoutineAction(a: Record<string, unknown>): boolean {
-  switch (a.op) {
-    case "approve":
-      return a.acknowledgeBlock !== true;
-    // A window while the agents' settings are under a critical alarm is never routine: a fresh touch, with the warning in the description.
-    case "open-window":
-      return a.alarm !== true;
-    case "batch-approve":
-      return true;
-    case "touch":
-      return typeof a.purpose === "string" && ROUTINE_TOUCH_PURPOSES.has(a.purpose);
-    // Keeping a part of a settings file that does not make the agent more dangerous (the guard has checked the flag itself): routine. A dangerous one: never.
-    case "agents-keep-part":
-      return a.danger === false;
-    default:
-      return false;
-  }
-}
 
 export interface PasskeyRow {
   id: number;
@@ -710,7 +681,7 @@ export class Guard {
       next.mode = patch.mode;
     }
     if (next.windowMin > next.capMin) throw new GuardError("invalid", "the window size cannot exceed the ceiling");
-    const widens = next.windowMin > cur.windowMin || next.capMin > cur.capMin || (next.mode === "sliding" && cur.mode === "fixed");
+    const widens = guardPolicyWidens(cur, next);
     const factor = widens ? this.verifyFactor("policy", this.normalizeAction({ op: "policy", patch }), proof) : null;
     return this.tx(() => {
       this.setMeta("policy", JSON.stringify(next));
@@ -1451,7 +1422,10 @@ export class Guard {
     return this.tx(() => this.sweepInner());
   }
 
-  /** Opens a window on a plugin id with a touch. Inside it, any version of that plugin is approved without a touch. */
+  /**
+   * Opens a window on a plugin id with a touch. Inside it a version is approved without a touch only if it passes `windowRefuses` (no hard sign, no right beyond the
+   * base, nothing for review; a window bound to a thread also needs the plugin's pulse): not "any version".
+   */
   openWindow(raw: Record<string, unknown>): WindowRow {
     const pluginId = pluginIdOf(raw.pluginId);
     const policy = this.policy();
@@ -1792,9 +1766,13 @@ export class Guard {
         if (!q) throw new GuardError("not_found", `no request #${String(a.requestId)}`);
         return `Одобрить версию ${String(q.version)} плагина «${String(q.plugin_id)}» (запись #${String(q.id)}, хеш ${String(q.content_hash).slice(0, 16)}…) И добавить источник ${String(a.entry)} в «мои источники»: новые версии оттуда будут проходить без вопросов, пока плагин не попросит новых прав`;
       }
-      case "session-open":
-        if (a.hour === true) return `Открыть сессию подтверждения на ${SESSION_CAP_MS / 60_000} мин подряд (не продлевается). Рутину (одобрить версию, открыть окно, принять расхождение, одобрить скилл, пакет) она покрывает без касания; опасное — всегда со свежим касанием`;
-        return `Открыть сессию подтверждения: ${SESSION_IDLE_MS / 60_000} мин скользящие, потолок ${SESSION_CAP_MS / 60_000} мин. Рутину (одобрить версию, открыть окно, принять расхождение, одобрить скилл, пакет) она покрывает без касания; опасное — всегда со свежим касанием`;
+      case "session-open": {
+        // What the session covers is told from the table (session-rules.ts), not from a list of its own.
+        const c = sessionCoverage();
+        const tail = `Рутину (${c.routine.join(", ")}) она покрывает без касания; опасное (${c.fresh.join(", ")}) — всегда со свежим касанием`;
+        if (a.hour === true) return `Открыть сессию подтверждения на ${minutesWords(SESSION_CAP_MS)} подряд (не продлевается). ${tail}`;
+        return `Открыть сессию подтверждения: ${SESSION_IDLE_MS / 60_000} мин скользящие, потолок ${SESSION_CAP_MS / 60_000} мин. ${tail}`;
+      }
       case "batch-approve": {
         const row = this.db.prepare(`SELECT * FROM batches WHERE id = ? AND used_at IS NULL`).get(String(a.batchId)) as Raw | undefined;
         if (!row || String(row.set_hash) !== String(a.setHash)) throw new GuardError("not_found", "no such list (or it does not match the hash)");

@@ -3,6 +3,7 @@
 //
 // Nothing here decides anything about plugins: approving and holding stay with the guard. These functions choose what to SHOW.
 import type { TrustMode } from "./guardlink.js";
+import { SESSION_CAP_MS, SESSION_IDLE_MS, minutesWords, minutesWordsUpTo, sessionCoverage } from "../guard/src/session-rules.ts";
 import { isReasonKind, liftBlock, type ReasonKind as GuardReasonKind } from "../guard/src/trust.ts";
 import { FS_HOME, UI_CLICK_ANSWERS, UI_CLICK_GATE, UI_CLICK_NAV } from "./checks/sdk-rights.js";
 
@@ -1132,7 +1133,7 @@ export function sessionClosedText(reason: SessionCloseReason): string {
 export const sessionEndReason = (s: { idleUntil: number; hardUntil: number }, now: number): SessionCloseReason => (now >= s.hardUntil ? "ceiling" : "idle");
 /** After a use the idle end moves ahead by 15 minutes, but never back: a session opened for an hour keeps its hour. */
 export const slideIdle = (cur: { idleUntil: number }, startedAt: number, idleMs: number, marginMs: number): number => Math.max(cur.idleUntil, startedAt + idleMs - marginMs);
-export const SESSION_LINE = "Открыть на 15 минут или на час, чтобы не вводить код каждый раз";
+export const SESSION_LINE = `Открыть на ${minutesWords(SESSION_IDLE_MS)} или на ${minutesWords(SESSION_CAP_MS)}, чтобы не вводить код каждый раз`;
 export interface SessionText {
   /** The one line (always). */
   line: string;
@@ -1143,7 +1144,9 @@ export interface SessionText {
 /** The session paragraph without «токен» and «хеш»: one line in «Простой», the details folded. */
 export function sessionText(mode: TrustMode | null, guard: boolean): SessionText {
   const touch = guard ? "касанием" : "кодом";
-  const details = `Действует на этой странице: 15 минут после последнего действия, не дольше часа. Рутину (одобрить версию, пакет, открыть окно, принять расхождение, одобрить скилл) она покрывает без ${guard ? "касания" : "кода"}. Опасное — снятие блока, ослабление режима, добавление источника, расширение политики, критичные настройки агентов — всегда ${touch} заново. ${guard ? "Ключ сессии хранится только в памяти этой страницы. " : ""}Перезагрузка страницы закрывает сессию.`;
+  // What it covers is told from the guard's table (session-rules.ts), the same one the guard's own description and its decision use.
+  const cov = sessionCoverage();
+  const details = `Действует на этой странице: ${minutesWords(SESSION_IDLE_MS)} после последнего действия, не дольше ${minutesWordsUpTo(SESSION_CAP_MS)}. Рутину (${cov.routine.join(", ")}) она покрывает без ${guard ? "касания" : "кода"}. Опасное (${cov.fresh.join(", ")}) — всегда ${touch} заново. ${guard ? "Ключ сессии хранится только в памяти этой страницы. " : ""}Перезагрузка страницы закрывает сессию.`;
   return { line: SESSION_LINE, details, foldDetails: mode === null || mode === "simple" };
 }
 
