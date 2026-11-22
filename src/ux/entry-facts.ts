@@ -1,7 +1,7 @@
 // The facts a card is built on, as predicates: is it blocked, is it a mismatch, can it be put back, is there a record at the guard. Every decision about a block is the guard's `liftBlock` (guard/src/trust.ts), reached through `liftOfEntry`; nothing here decides by itself.
 import type { TrustMode } from "../guardlink.js";
-import { isReasonKind, type ReasonKind as GuardReasonKind } from "../../guard/src/trust.ts";
-import { bypassOffered, isMismatchWords, liftOfEntry } from "../../guard/src/trust.ts";
+import { isReasonKind, type ReasonKind as GuardReasonKind } from "../../guard/src/lift.ts";
+import { bypassOffered, isMismatchWords, liftOfEntry } from "../../guard/src/lift.ts";
 
 export type CardColor = "red" | "yellow";
 

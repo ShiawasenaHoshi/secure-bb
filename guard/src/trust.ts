@@ -11,7 +11,9 @@ import type { CheckResult, Finding } from "./checks/index.ts";
 import { flowTokens } from "./checks/flow.ts";
 
 export type Level = "own" | "known" | "unknown";
-export type TrustMode = "simple" | "detailed" | "strict";
+import { githubRepo, OWNER, REPO } from "./github-address.ts";
+import type { TrustMode } from "./lift.ts";
+export type { TrustMode };
 export const TRUST_MODES: readonly TrustMode[] = ["simple", "detailed", "strict"];
 /** How strict a mode is: a lower rank is a weaker mode (letting it in needs a touch). */
 export const MODE_RANK: Record<TrustMode, number> = { simple: 0, detailed: 1, strict: 2 };
@@ -19,8 +21,6 @@ export const DEFAULT_TRUST_MODE: TrustMode = "simple";
 export const MAX_SOURCES = 100;
 
 // ---- sources ------------------------------------------------------------------------------------------------------------
-const OWNER = /^[a-z0-9](?:[a-z0-9-]{0,38})$/;
-const REPO = /^[a-z0-9._-]{1,100}$/;
 
 /**
  * An entry of the list: `github:owner/name`, `github:owner/*` or `path:/absolute/dir`. Returns the normalized form, or null.
@@ -50,38 +50,8 @@ export interface SourceIdentity {
   id: string;
 }
 
-/**
- * The ONE reading of a github.com address as `owner/name` (lower case); the plugin's pollution tracker (`src/taint/repos.ts`) calls it too.
- * `https://github.com/o/r.git`, `git@github.com:o/r`, `ssh://git@github.com/o/r`: the host must be exactly github.com.
- * `@ref` is the syntax of bb's PLUGIN SOURCES (`git@github.com:o/r@v1`): only with `allowRef` is it cut off. Anywhere else (an address in a shell command) a name with
- * `@` is not a repository of GitHub, so it is not one here: the choice that never trusts more (a repo is not «the same» because a suffix was ignored).
- */
-export function githubRepo(address: string, opts: { allowRef?: boolean } = {}): string | null {
-  let host: string;
-  let path: string;
-  const scp = /^[\w.-]+@([\w.-]+):(.+)$/.exec(address);
-  if (scp) {
-    host = scp[1]!;
-    path = scp[2]!;
-  } else {
-    try {
-      const u = new URL(address);
-      if (!["https:", "http:", "ssh:", "git:"].includes(u.protocol)) return null;
-      host = u.hostname;
-      path = u.pathname;
-    } catch {
-      return null;
-    }
-  }
-  if (host.toLowerCase() !== "github.com") return null;
-  const parts = path.split(/[?#]/)[0]!.replace(/^\/+/, "").split("/");
-  if (parts.length < 2) return null;
-  const owner = parts[0]!.toLowerCase();
-  const rawName = parts[1]!;
-  if (!opts.allowRef && rawName.includes("@")) return null;
-  const name = rawName.split("@")[0]!.replace(/\.git$/i, "").toLowerCase();
-  return OWNER.test(owner) && REPO.test(name) && name !== "." && name !== ".." ? `${owner}/${name}` : null;
-}
+// `githubRepo` (the ONE reading of a github.com address) is in `github-address.ts`, a leaf the page can use; re-exported here for the guard.
+export { githubRepo } from "./github-address.ts";
 
 /** What the core's `source` says it is. Null: not a source the lists can name (npm, a marketplace over https, anything odd). */
 export function identityOf(sourceKind: string, source: string): SourceIdentity | null {
@@ -183,60 +153,5 @@ export function brief(items: string[], max = 4): string {
 }
 
 // ---- what may lift a held version: the guard's facts, not a note's words ------------------------------------------------------------
-/** Why a version is held (the guard's own reading). `mismatch`: the directory's hash is not the request's; `block`: a hard flag; `growth`: a new right. */
-export const REASON_KINDS = ["mismatch", "block", "growth", "unknown-source", "strict", "first", "other"] as const;
-export type ReasonKind = (typeof REASON_KINDS)[number];
-export const isReasonKind = (x: unknown): x is ReasonKind => typeof x === "string" && (REASON_KINDS as readonly string[]).includes(x);
-
-export interface LiftInput {
-  /** Absent (an entry older than the column, or from a guard that predates it): unknown. */
-  reasonKind?: string | null;
-  /** The hard flags the guard's own `evaluate` found. `null` or absent: the guard did not read the version, so a block may be there. */
-  blocks?: string[] | null;
-}
-export interface Lift {
-  /** Never: the directory is not what the request says (reinstall). */
-  never: boolean;
-  /** A hard flag is there, or may be (not read): approving takes `acknowledgeBlock` AND a fresh touch; a session never covers it. */
-  needsAck: boolean;
-  /** Why `needsAck`: `block` (flags found) or `unread` (nothing was read). */
-  why: "mismatch" | "block" | "unread" | null;
-  /** Strict mode lets no block be lifted. */
-  refusedByMode: boolean;
-}
-/**
- * The ONE rule of lifting a stop, used by the guard (`approve`, batch, «Вернуть», «доверять источнику») and by the page (the buttons it shows).
- * It reads facts: `reasonKind === "mismatch"`, a non-empty `blocks`, or `blocks` not read at all. A note's text is never looked at.
- */
-export function liftBlock(e: LiftInput, mode: TrustMode | null): Lift {
-  const kind = e.reasonKind ?? null;
-  if (kind === "mismatch") return { never: true, needsAck: true, why: "mismatch", refusedByMode: false };
-  const unread = e.blocks === null || e.blocks === undefined;
-  const found = !unread && (e.blocks as string[]).length > 0;
-  const needsAck = unread || found || kind === "block";
-  return { never: false, needsAck, why: !needsAck ? null : found || kind === "block" ? "block" : "unread", refusedByMode: needsAck && mode === "strict" };
-}
-
-// ---- the same rule for an entry that has only words -----------------------------------------------------------------------------
-// An entry the PLUGIN keeps itself (no guard) has no facts the guard read, only the words its gate wrote in `reason`. Those words are turned into facts HERE, and
-// then the one rule above decides: the page does not decide anything about a block by itself.
-export interface EntryLiftInput extends LiftInput {
-  reason: string | null;
-}
-/** «the directory's files did not match the hash of the request»: the words of the gate's own reason for a mismatch. */
-export const isMismatchWords = (reason: string | null): boolean => /не совпал с хешем/.test(reason ?? "");
-const BLOCKED_WORDS = /заблокирован(о)? проверками|жёсткий флаг/;
-/** The facts an entry kept by the plugin states in words. A block in the words is a flag found; no such words means nothing was found (the plugin's own gate has read it). */
-export function factsOfReasonWords(reason: string | null): { reasonKind: string | null; blocks: string[] } {
-  return { reasonKind: isMismatchWords(reason) ? "mismatch" : null, blocks: BLOCKED_WORDS.test(reason ?? "") ? ["words"] : [] };
-}
-/** The entry comes from the guard and carries its facts: then no word of `reason` decides anything. */
-const carriesFacts = (e: LiftInput): boolean => e.reasonKind !== undefined || e.blocks !== undefined;
-/** `liftBlock` for an entry as the page holds it: by the guard's facts when it has them, else by the facts read from the gate's words. */
-export function liftOfEntry(e: EntryLiftInput, mode: TrustMode | null): Lift {
-  return liftBlock(carriesFacts(e) ? { reasonKind: e.reasonKind ?? null, blocks: e.blocks ?? null } : factsOfReasonWords(e.reason), mode);
-}
-/** «Всё равно разрешить…» exists on a red card only if the mode allows it (Strict does not) AND the stop is not a mismatch (an approval would be written for the hash of a suspect request). */
-export function bypassOffered(e: EntryLiftInput, mode: TrustMode | null): boolean {
-  return mode !== "strict" && !liftOfEntry(e, mode).never;
-}
+// The rule itself is in `lift.ts` (a leaf with no imports, so that the page, which runs in the browser, can use it without the guard's analyser).
+export * from "./lift.ts";
