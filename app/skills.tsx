@@ -4,7 +4,9 @@ import type { SecureBbRpc } from "../server";
 import type { Overview } from "../src/overview";
 import type { SkillQueueView } from "../src/skills/guard";
 import { useApproval, RoutineCode } from "./approval";
+import { skillCapsLine, skillFindingsShown } from "../src/cardview";
 import { useCodeAction, CodeField } from "./code";
+import type { Rpc } from "./touch";
 import { card, btn, btnPrimary, input, muted, when, Fold, Msg } from "./ui";
 
 export const skillState: Record<SkillQueueView["state"], string> = {
@@ -15,57 +17,80 @@ export const skillState: Record<SkillQueueView["state"], string> = {
   gone: "исчез",
 };
 
-export function SkillRow({ q, registered, rpc, refetch }: { q: SkillQueueView; registered: boolean; rpc: ReturnType<typeof useRpc<SecureBbRpc>>; refetch: () => void }) {
-  const ap = useApproval();
-  const [code, setCode] = useState("");
-  const [ack, setAck] = useState(false);
-  const [shown, setShown] = useState<Array<{ path: string; content: string | null }> | null>(null);
-  const act = useCodeAction(refetch);
-  const isOpen = q.state === "held" || q.state === "alarm";
-  const canApprove = isOpen || q.state === "removed";
-  const findings = (q.check?.findings ?? []).filter((f) => f.severity !== "info");
+type SkillProps = { q: SkillQueueView; rpc: Rpc; refetch: () => void };
+
+function SkillFindings({ q }: { q: SkillQueueView }) {
+  const found = skillFindingsShown(q.check?.findings ?? []);
+  const caps = q.check ? skillCapsLine(q.check.capabilities) : null;
   return (
-    <div className={`${card} ${isOpen ? (q.decision === "block" ? "border-destructive" : "border-border") : ""}`}>
-      <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h3 className="font-semibold">{q.name} <span className={`text-xs font-normal ${muted}`}>({q.scope})</span></h3>
-        <span className={muted}>{skillState[q.state]} · {when(q.firstSeen)}</span>
-      </div>
-      <p className="break-all">
-        {q.decision === "block" ? "Жёсткий признак. " : ""}{q.reason}
-        {q.preexisting ? " Был до модуля скиллов: сам не удаляется." : ""}
-      </p>
-      {q.note ? <p className={muted}>{q.note}</p> : null}
-      {findings.length > 0 ? (
+    <>
+      {found.length > 0 ? (
         <ul className="mt-1 list-disc pl-5 text-xs">
-          {findings.slice(0, 12).map((f, i) => (
+          {found.map((f, i) => (
             <li key={i} className="break-all">
               <b>{f.severity}</b> <span className="font-mono">{f.rule}</span> {f.file}{f.line ? `:${f.line}` : ""} — {f.excerpt}
             </li>
           ))}
         </ul>
       ) : null}
-      {q.check && q.check.capabilities.length > 0 ? (
-        <p className={`mt-1 text-xs ${muted}`}>Возможности скриптов: {q.check.capabilities.map((c) => `${c.kind}${c.detail.length ? ` (${c.detail.slice(0, 3).join(", ")})` : ""}`).join("; ")}</p>
-      ) : null}
+      {caps ? <p className={`mt-1 text-xs ${muted}`}>{caps}</p> : null}
       {q.source ? <p className={`text-xs ${muted}`}>Источник по метке рядом со скиллом: <span className="font-mono">{q.source}</span> (метка не доказательство)</p> : null}
-      {q.removed ? (
-        <div className="mt-1">
-          <p className={`text-xs ${muted}`}>Что было: {q.removed.map((f) => `${f.path} (${f.size})`).join(", ")}</p>
-          <button className={btn} disabled={act.busy} onClick={() => void act.run(async () => { setShown(await rpc.call("skills.removed", { id: q.id })); })}>Показать содержимое</button>
-          {shown ? <div className="mt-2 space-y-2">{shown.map((f) => <pre key={f.path} className="max-h-60 overflow-auto rounded border border-border p-2 text-xs"><b>{f.path}</b>{"\n"}{(f.content ?? "(не прочитан)").slice(0, 6000)}</pre>)}</div> : null}
-        </div>
-      ) : null}
-      {canApprove && registered ? (
-        <div className="mt-2 flex flex-wrap items-center gap-2">
-          <RoutineCode value={code} onChange={setCode} dangerous={q.decision === "block"} />
-          {q.decision === "block" ? <label className="flex items-center gap-1 text-xs"><input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} /> принимаю, несмотря на жёсткий признак</label> : null}
-          <button className={btn} disabled={act.busy || !ap.ready(code, q.decision === "block") || (q.decision === "block" && !ack)} onClick={() => void act.run(async () => { const r = await ap.routine(code, (proof) => rpc.call("skills.approve", { id: q.id, ...proof, acknowledgeBlock: ack }), q.decision === "block"); setCode(""); setAck(false); return r; })}>
-            {q.state === "removed" ? "Одобрить хеш (поставить снова)" : "Одобрить"}
-          </button>
-          {isOpen && q.removable ? <button className={btn} disabled={act.busy} onClick={() => void act.run(async () => { await rpc.call("skills.remove", { id: q.id }); })}>Удалить скилл</button> : null}
-        </div>
-      ) : null}
+    </>
+  );
+}
+
+/** What a removed skill was: the files, and a button that shows their content. */
+function RemovedFiles({ q, rpc, refetch }: SkillProps) {
+  const [shown, setShown] = useState<Array<{ path: string; content: string | null }> | null>(null);
+  const act = useCodeAction(refetch);
+  if (!q.removed) return null;
+  return (
+    <div className="mt-1">
+      <p className={`text-xs ${muted}`}>Что было: {q.removed.map((f) => `${f.path} (${f.size})`).join(", ")}</p>
+      <button className={btn} disabled={act.busy} onClick={() => void act.run(async () => { setShown(await rpc.call("skills.removed", { id: q.id })); })}>Показать содержимое</button>
+      {shown ? <div className="mt-2 space-y-2">{shown.map((f) => <pre key={f.path} className="max-h-60 overflow-auto rounded border border-border p-2 text-xs"><b>{f.path}</b>{"\n"}{(f.content ?? "(не прочитан)").slice(0, 6000)}</pre>)}</div> : null}
+      <Msg error={act.error} />
+    </div>
+  );
+}
+
+/** «Одобрить» with a code (a fresh one when the checks found a hard sign, and the person says they accept it anyway). */
+function SkillApprove({ q, rpc, refetch, isOpen }: SkillProps & { isOpen: boolean }) {
+  const ap = useApproval();
+  const [code, setCode] = useState("");
+  const [ack, setAck] = useState(false);
+  const act = useCodeAction(refetch);
+  const hard = q.decision === "block";
+  const approve = () => void act.run(async () => { const r = await ap.routine(code, (proof) => rpc.call("skills.approve", { id: q.id, ...proof, acknowledgeBlock: ack }), hard); setCode(""); setAck(false); return r; });
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-2">
+      <RoutineCode value={code} onChange={setCode} dangerous={hard} />
+      {hard ? <label className="flex items-center gap-1 text-xs"><input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} /> принимаю, несмотря на жёсткий признак</label> : null}
+      <button className={btn} disabled={act.busy || !ap.ready(code, hard) || (hard && !ack)} onClick={approve}>{q.state === "removed" ? "Одобрить хеш (поставить снова)" : "Одобрить"}</button>
+      {isOpen && q.removable ? <button className={btn} disabled={act.busy} onClick={() => void act.run(async () => { await rpc.call("skills.remove", { id: q.id }); })}>Удалить скилл</button> : null}
       <Msg error={act.error} ok={act.ok} />
+    </div>
+  );
+}
+
+export function SkillRow({ q, registered, rpc, refetch }: SkillProps & { registered: boolean }) {
+  const isOpen = q.state === "held" || q.state === "alarm";
+  const canApprove = isOpen || q.state === "removed";
+  const hard = q.decision === "block";
+  return (
+    <div className={`${card} ${isOpen ? (hard ? "border-destructive" : "border-border") : ""}`}>
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h3 className="font-semibold">{q.name} <span className={`text-xs font-normal ${muted}`}>({q.scope})</span></h3>
+        <span className={muted}>{skillState[q.state]} · {when(q.firstSeen)}</span>
+      </div>
+      <p className="break-all">
+        {hard ? "Жёсткий признак. " : ""}{q.reason}
+        {q.preexisting ? " Был до модуля скиллов: сам не удаляется." : ""}
+      </p>
+      {q.note ? <p className={muted}>{q.note}</p> : null}
+      <SkillFindings q={q} />
+      <RemovedFiles q={q} rpc={rpc} refetch={refetch} />
+      {canApprove && registered ? <SkillApprove q={q} rpc={rpc} refetch={refetch} isOpen={isOpen} /> : null}
     </div>
   );
 }

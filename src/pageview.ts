@@ -1,6 +1,9 @@
 // What the first screen says, as data: the one line of the header, which alarms are real alarms, what «Пока вас не было» may repeat.
 // The verdicts themselves (what is red, what waits, what is an alarm) are ux.ts's; this arranges them for the page.
-import { awayText, type AwayGroup, type ProblemRef, type Status } from "./ux";
+import type { Overview } from "./overview";
+import type { QueueRow } from "./store";
+import type { SkillQueueView } from "./skills/guard";
+import { agentsSectionTab, alarmCount, awayText, cardColor, GUARD_DOWN_TEXT, STOPPED_EXPLAIN, gapAlarmText, pageCounts, pageStatus, unackedGaps, type AwayGroup, type CardPlan, type GapContext, type PageCounts, type PluginCard, type ProblemRef, type Status, type TabId } from "./ux";
 
 /** The anchor of the alarm «Второй фактор не настроен»: without a second factor nothing can be approved, so it is the first thing to do, not a calm line. */
 export const SECOND_FACTOR_ANCHOR = "sbb-registration";
@@ -50,4 +53,85 @@ export function quietAwayGroups(groups: AwayGroup[]): AwayGroup[] {
       return { ...g, counts, text: awayText({ pluginId: g.pluginId, counts }) };
     })
     .filter((g) => g.text !== "");
+}
+
+// ---- the gaps of the gate and the page's alarms ----------------------------------------------------------------------------------
+/** What a gap says, built from the facts of its mode (`gapAlarmText`). */
+export function gapContext(ov: Overview): GapContext {
+  return { guardModeNow: ov.guard !== undefined, coreHoldsNow: ov.alive.coreHolds, configWatch: ov.watch.baselineAt !== null };
+}
+
+type GapLine = { gap: Overview["alive"]["gaps"][number]; text: ReturnType<typeof gapAlarmText> };
+
+/** The gaps shown as a red alarm: all that opened something, and every one in a mode without a guard. A calm one is a line in «Пока вас не было». */
+export function gapsBySeverity(ov: Overview): { critical: GapLine[]; calm: GapLine[] } {
+  const ctx = gapContext(ov);
+  const all = ov.alive.gaps.map((gap) => ({ gap, text: gapAlarmText(gap, ctx) }));
+  const calm = unackedGaps(all.filter((g) => g.text.severity === "calm").map((g) => ({ ...g, at: g.gap.at })), ov.alive.gapsAckedAt);
+  return { critical: all.filter((g) => g.text.severity === "critical"), calm };
+}
+
+/** What the guard found in the agents' settings, as the numbers that make an alarm, and the tab the section stands on while one is open. */
+export function agentsFacts(ov: Overview): { critical: number; alarms: number; tab: TabId } {
+  const critical = (ov.agents?.state?.drifts ?? []).filter((d) => d.class === "critical" && !d.initial).length;
+  const alarms = (ov.agents?.state?.alarms ?? []).length;
+  // While something critical or an alarm waits, the section is on «Обзор» (the banner leads to it); otherwise it stays in «Журнал».
+  return { critical, alarms, tab: agentsSectionTab({ critical, alarms }) };
+}
+
+const agentsAlarmText = (critical: number, alarms: number): string =>
+  `Настройки агентов: ${[critical > 0 ? `критичных изменений — ${critical}` : "", alarms > 0 ? `файлов не прочитать — ${alarms}` : ""].filter(Boolean).join(", ")}`;
+
+/** The alarms of the system, in the order the header and the counts read them. Every one is a real alarm; none is turned down. */
+export function pageAlarms(ov: Overview, registered: boolean): ProblemRef[] {
+  const alarms: ProblemRef[] = [];
+  const gaps = gapsBySeverity(ov).critical;
+  const agents = agentsFacts(ov);
+  if (!ov.journal.ok) alarms.push({ anchor: "sbb-alarms", tab: "status", text: "Журнал решений нарушен" });
+  if (gaps.length > 0 || ov.alive.safeMode === true) alarms.push({ anchor: "sbb-alarms", tab: "status", text: gaps.every((g) => g.text.mode === "guard") ? "Плагин secure-bb не работал" : "Гейт не всегда работал" });
+  if (ov.guard?.connected && ov.guard.journal && !ov.guard.journal.valid) alarms.push({ anchor: "sbb-guard-alarm", tab: "status", text: "Журнал сторожа нарушен" });
+  if (ov.agents && (agents.alarms > 0 || agents.critical > 0)) alarms.push({ anchor: "sbb-agents", tab: agents.tab, text: agentsAlarmText(agents.critical, agents.alarms), weight: agents.critical + agents.alarms });
+  if (ov.watch.drifts.some((d) => d.status === "open" || d.status === "rollback-failed")) alarms.push({ anchor: "sbb-watch", tab: "more", text: "Настройки bb изменились" });
+  if (!registered) alarms.push({ anchor: SECOND_FACTOR_ANCHOR, tab: "more", text: "Второй фактор не настроен" });
+  if ((ov.guard?.troubleshootUntil ?? 0) > ov.now) alarms.push({ anchor: "sbb-guard-alarm", tab: "status", text: "Включён режим отладки сторожа: он пропускает всё" });
+  return alarms;
+}
+
+/** The skills that were removed, once each: the list of «Карантин» and the number on it. */
+export const removedSkillsOf = (ov: Overview): SkillQueueView[] => [...ov.skills.open, ...ov.skills.recent].filter((s, i, all) => s.state === "removed" && all.findIndex((x) => x.id === s.id) === i);
+
+/** The versions that wait for the person (the guard holds them). */
+export const heldOf = (ov: Overview): QueueRow[] => ov.queue.filter((q) => q.status === "held");
+
+/** Plugins with a version that was let in but did not start, and the reason. */
+export const startedBadly = <P extends { pin: unknown }>(plugins: P[], problem: (p: P) => string | null): P[] => plugins.filter((p) => p.pin !== null && problem(p) !== null);
+
+const isRed = (ov: Overview, q: QueueRow): boolean => cardColor({ reason: q.reason, reasonKind: q.reasonKind, blocks: q.blocks, findings: ov.queueChecks[q.id]?.findings ?? [] }) === "red";
+
+/** The place a plugin's card is: «Показать» goes to it. */
+export const cardRef = (c: { shown: QueueRow; pluginId: string }): ProblemRef => ({ anchor: `sbb-card-${c.shown.id}`, tab: "status", text: `${c.pluginId} ${c.shown.version}` });
+
+export interface PageSummary {
+  alarms: ProblemRef[];
+  status: Status;
+  counts: PageCounts;
+  header: HeaderLine;
+  /** The longer words behind an alarm header, or null. */
+  headerMore: string | null;
+  guardDown: boolean;
+  agents: ReturnType<typeof agentsFacts>;
+}
+
+/** Everything the first screen says, from the overview and the plan of cards: one place, so every number on the page comes from the same plan. */
+export function summarize(ov: Overview, plan: CardPlan<QueueRow>, registered: boolean): PageSummary {
+  const planned: Array<PluginCard<QueueRow>> = [...plan.active, ...plan.later];
+  const redOf = (c: PluginCard<QueueRow>): boolean => c.all.some((q) => isRed(ov, q));
+  const alarms = pageAlarms(ov, registered);
+  const guardDown = ov.guard !== undefined && !ov.guard.connected;
+  const status = pageStatus({ guardDown, red: planned.filter(redOf).map(cardRef), yellow: planned.filter((c) => !redOf(c)).map(cardRef), alarms });
+  // Every number on the page comes from the one plan of cards.
+  const counts = pageCounts(plan, alarmCount(alarms), removedSkillsOf(ov).length);
+  const header = headerLine({ status, waiting: counts.waiting, deferred: counts.deferred, alarms });
+  const headerMore = guardDown ? GUARD_DOWN_TEXT : status.level === "stopped" ? STOPPED_EXPLAIN : null;
+  return { alarms, status, counts, header, headerMore, guardDown, agents: agentsFacts(ov) };
 }

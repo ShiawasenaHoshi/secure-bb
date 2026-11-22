@@ -4,7 +4,7 @@
 import { definePluginApp } from "@get-bb/plugin-sdk/app";
 import { GatePage } from "./app/page";
 import { WindowOverlay } from "./app/windows";
-export { gapsBySeverity } from "./app/windows";
+export { gapsBySeverity } from "./src/pageview";
 
 export default definePluginApp((app) => {
   app.slots.navPanel({

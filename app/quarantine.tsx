@@ -3,6 +3,7 @@ import type { Overview } from "../src/overview";
 import type { QueueRow } from "../src/store";
 import type { SkillQueueView } from "../src/skills/guard";
 import { canRestore, rejectedAtOf, rejectedByText, cardColor } from "../src/ux";
+import { removedSkillsOf } from "../src/pageview";
 import { isMismatchEntry } from "../src/ux";
 import { awayEventsOf } from "./away";
 import { useCodeAction } from "./code";
@@ -105,8 +106,6 @@ export function RemovedSkillRow({ q, ov, rpc, refetch }: { q: SkillQueueView; ov
   );
 }
 
-/** Removed skills, once each: the list of the «Карантин» tab and the number on it. */
-export const removedSkillsOf = (ov: Overview): SkillQueueView[] => [...ov.skills.open, ...ov.skills.recent].filter((s, i, all) => s.state === "removed" && all.findIndex((x) => x.id === s.id) === i);
 
 /** The versions the person rejected and has not brought back: one row per (plugin, hash), the newest; none if the same version is held or approved since. */
 export function RejectedRow({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview; rpc: Rpc; refetch: () => void }) {

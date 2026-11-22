@@ -3,41 +3,51 @@ import type { Overview } from "../src/overview";
 import type { ScanView } from "../src/scan/view";
 import { defined } from "../src/rpc-input";
 import { aiScanEmptyText } from "../src/ux";
+import { scanHeadText } from "../src/cardview";
 import { useCodeAction, CodeField } from "./code";
 import { type Rpc } from "./touch";
 import { card, btn, input, muted, when, Fold, Msg } from "./ui";
 
 export const MODEL_STATUS: Record<string, string> = { clean: "чисто", flag: "флаг", refusal: "отказ", invalid: "невалидный ответ", timeout: "таймаут", error: "ошибка", unavailable: "недоступна" };
 
+type ModelView = ScanView["models"][number];
+
+function ModelReport({ m }: { m: ModelView }) {
+  return (
+    <div className="mt-1">
+      <h4 className="font-medium">{m.label} — {MODEL_STATUS[m.status] ?? m.status}</h4>
+      {m.report ? (
+        <div className={muted}>
+          <p>{m.report.summary}</p>
+          <p>Совпадает с описанием: {m.report.matchesDescription ? "да" : "нет"}{m.report.descriptionNote ? ` — ${m.report.descriptionNote}` : ""}</p>
+          {m.report.capabilities.length > 0 ? <ul className="list-disc pl-5">{m.report.capabilities.map((c, i) => <li key={i}>{c.kind}: {c.detail} ({c.file}{c.line ? `:${c.line}` : ""})</li>)}</ul> : null}
+          {m.report.dataFlows.length > 0 ? <ul className="list-disc pl-5">{m.report.dataFlows.map((f, i) => <li key={i}>{f.from} → {f.to} ({f.file}{f.line ? `:${f.line}` : ""}){f.note ? ` — ${f.note}` : ""}</li>)}</ul> : null}
+        </div>
+      ) : <p className={muted}>{m.detail}</p>}
+    </div>
+  );
+}
+
+function ModelsFold({ scan }: { scan: ScanView }) {
+  if (!scan.models.some((m) => m.report)) return null;
+  return (
+    <Fold id={`scan-${scan.id}-models`} className="mt-1" summary="Что нашли модели">
+      {scan.models.map((m) => <ModelReport key={m.model} m={m} />)}
+      <p className={muted}>Отправлено файлов: {scan.files}, {scan.chars} знаков (без комментариев). Модели одобрить версию не могут.</p>
+    </Fold>
+  );
+}
+
 /** Result of a scan next to the version it belongs to: not run / clean (date, models) / flags (what and where). */
 export function ScanResultView({ scan, other, enabled }: { scan: ScanView | undefined; other?: string; enabled: boolean }) {
   if (!scan) return <p className={`mt-1 ${muted}`}>{aiScanEmptyText(enabled)}</p>;
-  const asked = scan.models.filter((m) => m.status !== "unavailable").map((m) => m.label).join(", ");
-  const head =
-    scan.status === "running" ? "идёт…" : scan.status === "clean" ? `чисто (${when(scan.finishedAt ?? scan.startedAt)}, ${asked})` : scan.status === "suspect" ? `ПОДОЗРЕНИЕ (${when(scan.finishedAt ?? scan.startedAt)})` : `недоступен${scan.note ? `: ${scan.note}` : ""}`;
+  const silent = scan.models.filter((m) => m.status === "unavailable");
   return (
     <div className="mt-1">
-      <p className={scan.status === "suspect" ? "font-semibold text-destructive" : muted}>ИИ-скан #{scan.id}, версия {scan.version}: {head}{other ? ` · ${other}` : ""}</p>
+      <p className={scan.status === "suspect" ? "font-semibold text-destructive" : muted}>ИИ-скан #{scan.id}, версия {scan.version}: {scanHeadText(scan, when)}{other ? ` · ${other}` : ""}</p>
       {scan.flags.length > 0 ? <ul className="list-disc pl-5 text-destructive">{scan.flags.map((f, i) => <li key={i}>{f}</li>)}</ul> : null}
-      {scan.models.some((m) => m.status === "unavailable") ? <p className={muted}>Не отвечала: {scan.models.filter((m) => m.status === "unavailable").map((m) => `${m.label} (${m.detail})`).join("; ")}</p> : null}
-      {scan.models.some((m) => m.report) ? (
-        <Fold id={`scan-${scan.id}-models`} className="mt-1" summary="Что нашли модели">
-          {scan.models.map((m) => (
-            <div key={m.model} className="mt-1">
-              <h4 className="font-medium">{m.label} — {MODEL_STATUS[m.status] ?? m.status}</h4>
-              {m.report ? (
-                <div className={muted}>
-                  <p>{m.report.summary}</p>
-                  <p>Совпадает с описанием: {m.report.matchesDescription ? "да" : "нет"}{m.report.descriptionNote ? ` — ${m.report.descriptionNote}` : ""}</p>
-                  {m.report.capabilities.length > 0 ? <ul className="list-disc pl-5">{m.report.capabilities.map((c, i) => <li key={i}>{c.kind}: {c.detail} ({c.file}{c.line ? `:${c.line}` : ""})</li>)}</ul> : null}
-                  {m.report.dataFlows.length > 0 ? <ul className="list-disc pl-5">{m.report.dataFlows.map((f, i) => <li key={i}>{f.from} → {f.to} ({f.file}{f.line ? `:${f.line}` : ""}){f.note ? ` — ${f.note}` : ""}</li>)}</ul> : null}
-                </div>
-              ) : <p className={muted}>{m.detail}</p>}
-            </div>
-          ))}
-          <p className={muted}>Отправлено файлов: {scan.files}, {scan.chars} знаков (без комментариев). Модели одобрить версию не могут.</p>
-        </Fold>
-      ) : null}
+      {silent.length > 0 ? <p className={muted}>Не отвечала: {silent.map((m) => `${m.label} (${m.detail})`).join("; ")}</p> : null}
+      <ModelsFold scan={scan} />
     </div>
   );
 }
