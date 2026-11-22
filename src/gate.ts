@@ -20,8 +20,10 @@ import { normalizePattern } from "./taint/repos.js";
 import { checkBranch, checkRepoUrl, sameSettings } from "./publish/validate.js";
 import type { PublishSettings } from "./publish/types.js";
 import type { GuardLookup, GuardPort, GuardProof, GuardState } from "./guardlink.js";
+import { GateError, type GateErrorCode } from "./errors.js";
+import type { ThreadTree } from "./thread-tree.js";
 import { T } from "./text.js";
-import { generateSecret, otpauthUri, verifyTotp, stepAt } from "./totp.js";
+import { generateSecret, otpauthUri, verifyTotp, stepAt } from "../guard/src/totp.ts";
 import type { ApprovalRow, Policy, ProposalRow, QueueRow, Store, WindowRow } from "./store.js";
 import { hashTree, isInsideSnapshots } from "./tree.js";
 
@@ -41,35 +43,10 @@ export type Decision =
   | { action: "wait"; reason: string }
   | { action: "reject"; message: string };
 
-export type GateErrorCode =
-  | "not_registered"
-  | "blocked"
-  | "invalid_code"
-  | "conflict"
-  | "not_found"
-  | "invalid";
-
 /** Hold reason for a snapshot whose files differ from what was proposed. */
 export const TAMPERED_REASON = "снимок изменён после предложения";
 /** Prefix of a queue entry's reason when the directory could be changed by someone other than the server's user: such a version cannot be approved. */
 export const UNSAFE_DIR_REASON = "каталог доступен на запись другим";
-
-export class GateError extends Error {
-  constructor(
-    readonly code: GateErrorCode,
-    message: string,
-    readonly extra?: unknown,
-  ) {
-    super(message);
-  }
-}
-
-export interface ThreadTree {
-  /** Ancestors of a thread, parent first. */
-  ancestors(threadId: string): Promise<string[]>;
-  /** Every thread below a thread. */
-  descendants(threadId: string): Promise<string[]>;
-}
 
 export interface GateDeps {
   store: Store;
@@ -354,7 +331,7 @@ export class Gate {
     this.store.putPendingTotp(secret);
     this.store.setMeta("pending_attended", opts.attended ? "1" : "0");
     this.store.log("totp.begin", null, null, { attended: opts.attended, caller: opts.caller });
-    return { secret, uri: otpauthUri(secret) };
+    return { secret, uri: otpauthUri(secret, "secure-bb") };
   }
 
   /** True while a registration was started without the page open. */

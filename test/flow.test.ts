@@ -10,7 +10,7 @@ import { propose } from "../src/propose.js";
 import { CHECKS_VERSION, type CheckResult } from "../src/checks/index.js";
 import { CLEAN, NETWORKED, withFindings } from "./support/checks.js";
 import { MIGRATIONS, Store } from "../src/store.js";
-import { base32Decode, hotp, stepAt } from "../src/totp.js";
+import { base32Decode, hotp, stepAt } from "../guard/src/totp.ts";
 import { hashTree, pluginIdFromPackageName } from "../src/tree.js";
 
 class Env {

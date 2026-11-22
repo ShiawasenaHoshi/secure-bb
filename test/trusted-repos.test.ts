@@ -5,7 +5,7 @@ import { MIGRATIONS, Store } from "../src/store.js";
 import { classifyItem } from "../src/taint/classify.js";
 import { githubRepo, identityOf } from "../guard/src/trust.ts";
 import { githubSlug, isTrustedRepo, normalizePattern } from "../src/taint/repos.js";
-import { base32Decode, hotp, stepAt } from "../src/totp.js";
+import { base32Decode, hotp, stepAt } from "../guard/src/totp.ts";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import plugin from "../server.js";
 

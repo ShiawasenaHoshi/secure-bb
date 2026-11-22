@@ -3,7 +3,7 @@
 //
 // The source is the thread event history of bb (`threads.events.list`); events are read once and
 // remembered by a per-thread cursor, so a scan of an unchanged tree is one cheap call per thread.
-import type { ThreadTree } from "../gate.js";
+import type { ThreadTree } from "../thread-tree.js";
 import type { Store, TaintHitRow } from "../store.js";
 import { classifyEvent, TAINT_EVENT_TYPES, type EventLike, type TaintKind } from "./classify.js";
 

@@ -7,7 +7,7 @@ import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import plugin from "../server.js";
 import { CATEGORY_IDS } from "../src/sentinel/questions.js";
-import { base32Decode, hotp, stepAt } from "../src/totp.js";
+import { base32Decode, hotp, stepAt } from "../guard/src/totp.ts";
 
 const KEY = "sk-or-v1-TESTKEY-0123456789abcdef0123";
 const toJev = (fetch: ReturnType<typeof vi.fn>) => fetch.mock.calls.filter((c) => /typesafe\.ai|openrouter\.ai/.test(String(c[0])));

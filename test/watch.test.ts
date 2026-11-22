@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { GateError } from "../src/gate.js";
+import { GateError } from "../src/errors.js";
 import { diffSnapshot } from "../src/watch/diff.js";
 import { formatWatch } from "../src/watch/format.js";
 import { WatchError } from "../src/watch/watchdog.js";

@@ -7,7 +7,8 @@
 import { randomBytes } from "node:crypto";
 import { setHash, type BatchItem, type BatchKind } from "./approval.js";
 import type { ListProof, Proof } from "./approval.js";
-import { GateError } from "./gate.js";
+import { GateError } from "./errors.js";
+import type { BatchPrepared, BatchResult } from "./batch-types.js";
 import type { GuardBatchPrepared, GuardBatchResult, GuardProof } from "./guardlink.js";
 import type { Store } from "./store.js";
 
@@ -23,22 +24,6 @@ export interface BatchSource {
   approve(id: number, mark: ListProof): Promise<string>;
   /** Guard mode: the guard approved this item itself (it is the guard's own, a held version); what the plugin does after an approval (rechecks, the page). */
   afterGuard?(id: number): Promise<void> | void;
-}
-
-export interface BatchPrepared {
-  batchId: string;
-  /** The hash the person confirms (the page shows its beginning next to the list). */
-  setHash: string;
-  expiresAt: number;
-  items: Array<{ kind: BatchKind; id: number; label: string; detail: string }>;
-  skipped: Array<{ kind: BatchKind; id: number; reason: string }>;
-}
-export interface BatchResult {
-  kind: BatchKind;
-  id: number;
-  label: string;
-  ok: boolean;
-  note: string;
 }
 
 /**

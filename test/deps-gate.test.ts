@@ -11,7 +11,7 @@ import type { FetchLike } from "../src/deps/registry.js";
 import { verifyDependencies } from "../src/deps/verify.js";
 import { runChecks, type CheckResult } from "../src/checks/index.js";
 import { MIGRATIONS, Store } from "../src/store.js";
-import { base32Decode, hotp, stepAt } from "../src/totp.js";
+import { base32Decode, hotp, stepAt } from "../guard/src/totp.ts";
 import { hashTree } from "../src/tree.js";
 
 const DAY = 86_400_000;

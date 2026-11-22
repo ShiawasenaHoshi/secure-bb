@@ -8,9 +8,9 @@
 // This file holds the ONE table that says which RPC a session covers ("routine") and which always needs a fresh code
 // ("dangerous"). The README prints the same table (generated from it, and a test checks that they agree).
 import { createHash, randomBytes } from "node:crypto";
-import type { rpcContract } from "./contract.js";
 
-export type RpcName = keyof typeof rpcContract;
+/** The RPCs of the table. That it is the contract's set exactly is checked in contract.ts (at compile time) and in test/approval.test.ts. */
+export type RpcName = keyof typeof RPC_AUTH;
 
 /**
  * routine   — a session covers it (or a fresh code, as before).
@@ -84,7 +84,7 @@ export const RPC_AUTH = {
   "agents.scan": { group: "free", note: "попросить сторожа просмотреть файлы агентов (не чаще раза в 10 с; только чтение; в режиме сторожа)" },
   "ai.scan": { group: "free", note: "запустить ИИ-скан (кода не требует и раньше)" },
   "publish.run": { group: "free", note: "опубликовать закреплённую версию (адрес задан кодом ранее)" },
-} as const satisfies Record<RpcName, RpcAuth>;
+} as const satisfies Record<string, RpcAuth>;
 
 export const groupOf = (rpc: RpcName): RpcGroup => RPC_AUTH[rpc].group;
 

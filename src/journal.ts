@@ -9,7 +9,7 @@
 //    rewrite the whole chain consistently. The chain is evidence, not a lock.
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { entryHash, GENESIS, scanChain, type ChainRow, type JournalHead } from "../guard/src/journal-chain.ts";
-import type { Db } from "./store.js";
+import type { Db } from "./db-types.js";
 
 export { entryHash, GENESIS, type JournalHead };
 

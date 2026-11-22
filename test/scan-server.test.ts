@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import plugin from "../server.js";
 import type { CommandSpec } from "../src/scan/commands.js";
 import { runProcess } from "../src/scan/process.js";
-import { base32Decode, hotp, stepAt } from "../src/totp.js";
+import { base32Decode, hotp, stepAt } from "../guard/src/totp.ts";
 
 const tmp = (): string => realpathSync(mkdtempSync(join(tmpdir(), "sbb-aisrv-")));
 

@@ -2,7 +2,7 @@
 import Database from "better-sqlite3";
 import { Gate } from "../../src/gate.js";
 import { MIGRATIONS, Store } from "../../src/store.js";
-import { base32Decode, hotp, stepAt } from "../../src/totp.js";
+import { base32Decode, hotp, stepAt } from "../../guard/src/totp.ts";
 import type { InstalledPluginLite } from "../../src/probe.js";
 import type { SkillLite, WatchSource } from "../../src/watch/collect.js";
 import { Watchdog, type WatchActions } from "../../src/watch/watchdog.js";
