@@ -56,6 +56,10 @@ export interface GuardQueueEntry {
   seenCount: number;
   /** Why the version did not pass by itself, in the guard's words (it read the directory itself). Absent in a guard that predates the rule. */
   note?: string | null;
+  /** The hard flags of the guard's own reading; null: not read (a block may be there). Absent in a guard that predates the column. */
+  blocks?: string[] | null;
+  /** Why it is held, as a fact (guard/src/trust.ts REASON_KINDS). */
+  reasonKind?: string | null;
   /** Supplied by this plugin (the guard cannot check it): for display only. */
   annotation: { ts: number; findings: unknown; verified: false } | null;
 }

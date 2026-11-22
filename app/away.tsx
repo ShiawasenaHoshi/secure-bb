@@ -47,7 +47,7 @@ export function AwayCard({ ov, since, onSeen, kept }: { ov: Overview; since: num
   for (const q of ov.queue) {
     if (q.status !== "held" || kept.has(q.id)) continue;
     const h = (heldNow[q.pluginId] ??= { yellow: 0, red: 0 });
-    if (cardColor({ reason: q.reason, findings: ov.queueChecks[q.id]?.findings ?? [] }) === "red") h.red++;
+    if (cardColor({ reason: q.reason, reasonKind: q.reasonKind, blocks: q.blocks, findings: ov.queueChecks[q.id]?.findings ?? [] }) === "red") h.red++;
     else h.yellow++;
   }
   const groups = quietAwayGroups(groupAway(awayInfoEvents(events, guardMode), since, guardMode, heldNow));

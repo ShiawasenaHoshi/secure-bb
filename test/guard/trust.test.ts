@@ -62,10 +62,10 @@ const decideOf = (rootDir: string, over: Record<string, unknown> = {}) => ({
 });
 const addMine = (g: TestGuard, entries: string[]) => g.send({ op: "sources-add", entries, code: g.nextCode() });
 /** The first version: it waits, a human approves it with a touch (that is what makes it the baseline). */
-async function approveFirst(g: TestGuard, req: Record<string, unknown>): Promise<void> {
+async function approveFirst(g: TestGuard, req: Record<string, unknown>, acknowledgeBlock = false): Promise<void> {
   const d = await g.send(req);
   expect(d).toMatchObject({ action: "wait" });
-  expect(await g.send({ op: "approve", requestId: d.requestId, code: g.nextCode() })).toMatchObject({ ok: true });
+  expect(await g.send({ op: "approve", requestId: d.requestId, ...(acknowledgeBlock ? { acknowledgeBlock: true } : {}), code: g.nextCode() })).toMatchObject({ ok: true });
 }
 const journal = (g: TestGuard, kind: string) => (g.guard.state().journal as { recent: Array<{ kind: string; detail: Record<string, any> | null }> }).recent.filter((r) => r.kind === kind);
 const queueNote = (g: TestGuard, id: number): string | null => (g.guard.state().queue as Array<{ id: number; note: string | null }>).find((q) => q.id === id)?.note ?? null;
@@ -341,7 +341,8 @@ describe("the guard cannot read the directory, or the checks fail → the queue,
     const dir = tmp();
     const v = plugin(dir, "demo", BASE);
     await addMine(g, [`path:${dir}`]);
-    await approveFirst(g, decideOf(v));
+    // the guard could not read it (the checks fail): it may carry a block, so the first approval takes the acknowledgement and a fresh touch
+    await approveFirst(g, decideOf(v), true);
     expect(g.guard.state().approvals).toMatchObject([{ rights: null }]);
     const d = await g.send(decideOf(v, { contentHash: hash() }));
     expect(d).toMatchObject({ action: "wait" });

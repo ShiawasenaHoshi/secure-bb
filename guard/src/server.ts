@@ -43,7 +43,7 @@ export function dispatch(guard: Guard, req: unknown, version: string): Record<st
     case "sources-remove":
       return guard.removeSource(r);
     case "hold":
-      return guard.hold(r);
+      return guard.holdChecked(r);
     case "state":
       return guard.state();
     case "lookup":

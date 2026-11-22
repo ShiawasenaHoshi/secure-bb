@@ -46,7 +46,9 @@ import {
   grown,
   hardFlags,
   identityOf,
+  isReasonKind,
   levelOf,
+  liftBlock,
   MAX_SOURCES,
   MODE_RANK,
   normalizeEntry,
@@ -54,6 +56,7 @@ import {
   rightsOf,
   TRUST_MODES,
   type Level,
+  type ReasonKind,
   type Rights,
   type TrustMode,
 } from "./trust.ts";
@@ -96,9 +99,8 @@ const MAX_TROUBLESHOOT_PASSES_PER_MIN = 1000;
  * Everything else (policy, trust mode, sources, agents, the session itself) needs a fresh touch; the plugin's table (src/approval.ts) says the same.
  */
 export const ROUTINE_TOUCH_PURPOSES: ReadonlySet<string> = new Set(["watch.accept", "watch.acceptAll", "watch.rollback", "watch.window.open", "skills.approve"]);
-/** The reasons the guard itself wrote into a queue entry (see `sourceVerdict`, `evaluate`). */
-const isMismatchNote = (n: string | null): boolean => /не совпал с хешем/.test(n ?? "");
-const isHardFlagNote = (n: string | null): boolean => /жёсткий флаг/.test(n ?? "");
+/** A queue entry older than the `reason_kind` column: the only place a note's words are still read (its kind was never written). Nothing newer is decided by words. */
+const legacyKindOfNote = (n: string | null): ReasonKind | null => (/не совпал с хешем/.test(n ?? "") ? "mismatch" : null);
 const sha256hex = (t: string): string => createHash("sha256").update(t, "utf8").digest("hex");
 /** The window the console opens for registering a passkey, and how long a challenge lives. */
 export const ENROLL_WINDOW_MS = 5 * 60_000;
@@ -189,6 +191,10 @@ export interface QueueRow {
   /** Why the version did not pass by itself (the guard's words), or null. */
   note: string | null;
   rights: Rights | null;
+  /** The hard flags of the guard's own reading of the version; null: it was not read (a block may be there). Decides what may lift the hold. */
+  blocks: string[] | null;
+  /** Why it is held, as a fact (see trust.ts `REASON_KINDS`); null in an entry older than the column. */
+  reasonKind: ReasonKind | null;
 }
 export interface WindowRow {
   id: number;
@@ -243,7 +249,18 @@ const queueOf = (r: Raw): QueueRow => ({
   seenCount: Number(r.seen_count),
   note: (r.note as string | null) ?? null,
   rights: parseRights(r.rights),
+  blocks: parseBlocks(r.blocks),
+  reasonKind: isReasonKind(r.reason_kind) ? r.reason_kind : legacyKindOfNote((r.note as string | null) ?? null),
 });
+function parseBlocks(v: unknown): string[] | null {
+  if (typeof v !== "string") return null;
+  try {
+    const j = JSON.parse(v) as unknown;
+    return Array.isArray(j) && j.every((x) => typeof x === "string") ? (j as string[]) : null;
+  } catch {
+    return null;
+  }
+}
 const windowOf = (r: Raw): WindowRow => ({
   id: Number(r.id),
   pluginId: String(r.plugin_id),
@@ -314,7 +331,7 @@ export interface TrustConfig {
 }
 /** What the guard found in a version's directory by itself, or why it could not. */
 /** `hash`: the core's hash of the directory, computed by the guard in the same pass that the checks ran on (it equals the request's contentHash, or the evaluation is not ok). */
-export type Evaluation = { ok: true; hash: string; rights: Rights; blocks: string[] } | { ok: false; reason: string };
+export type Evaluation = { ok: true; hash: string; rights: Rights; blocks: string[] } | { ok: false; reason: string; /** The directory's hash is not the request's. */ mismatch?: true };
 const MAX_CONCURRENT_EVALS = 2;
 const MAX_EVALS_PER_MINUTE = 30;
 const DEFAULT_BUDGET_MS = 3500;
@@ -755,12 +772,14 @@ export class Guard {
   }
 
   /** The held entry of a version (made if there was none, unless too many were made this hour). `stop`: a window does not lift this hold. */
-  private upsertHeld(req: DecideInput, stop: boolean, why: { rights: Rights | null; note: string | null } = { rights: null, note: null }): { id: number | null; created: boolean } {
+  private upsertHeld(req: DecideInput, stop: boolean, why: { rights: Rights | null; note: string | null; kind?: ReasonKind | null; blocks?: string[] | null } = { rights: null, note: null }): { id: number | null; created: boolean } {
     const held = this.db.prepare(`SELECT * FROM queue WHERE content_hash = ? AND plugin_id = ? AND status = 'held' ORDER BY id DESC LIMIT 1`).get(req.contentHash, req.pluginId) as Raw | undefined;
     const rightsJson = why.rights === null ? null : JSON.stringify(why.rights);
+    const blocksJson = why.blocks === null || why.blocks === undefined ? null : JSON.stringify(why.blocks);
+    const kind = why.kind ?? null;
     if (held) {
       // The note and the rights are the guard's own latest reading; a call that could not read keeps the earlier one.
-      this.db.prepare(`UPDATE queue SET last_seen = ?, seen_count = seen_count + 1, version = ?, source = ?, source_kind = ?, root_dir = ?, trigger = ?, stop = MAX(stop, ?), note = COALESCE(?, note), rights = COALESCE(?, rights) WHERE id = ?`).run(this.now(), req.version, req.source, req.sourceKind, req.rootDir, req.trigger, stop ? 1 : 0, why.note, rightsJson, Number(held.id));
+      this.db.prepare(`UPDATE queue SET last_seen = ?, seen_count = seen_count + 1, version = ?, source = ?, source_kind = ?, root_dir = ?, trigger = ?, stop = MAX(stop, ?), note = COALESCE(?, note), rights = COALESCE(?, rights), blocks = COALESCE(?, blocks), reason_kind = CASE WHEN reason_kind = 'mismatch' THEN reason_kind ELSE COALESCE(?, reason_kind) END WHERE id = ?`).run(this.now(), req.version, req.source, req.sourceKind, req.rootDir, req.trigger, stop ? 1 : 0, why.note, rightsJson, blocksJson, kind, Number(held.id));
       return { id: Number(held.id), created: false };
     }
     // A process that can talk to the guard must not be able to fill it: a flood of new holds is not recorded (one record says so).
@@ -773,12 +792,22 @@ export class Guard {
       return { id: null, created: false };
     }
     const info = this.db
-      .prepare(`INSERT INTO queue (content_hash, plugin_id, version, source, source_kind, root_dir, trigger, status, first_seen, last_seen, stop, note, rights) VALUES (?, ?, ?, ?, ?, ?, ?, 'held', ?, ?, ?, ?, ?)`)
-      .run(req.contentHash, req.pluginId, req.version, req.source, req.sourceKind, req.rootDir, req.trigger, this.now(), this.now(), stop ? 1 : 0, why.note, rightsJson);
+      .prepare(`INSERT INTO queue (content_hash, plugin_id, version, source, source_kind, root_dir, trigger, status, first_seen, last_seen, stop, note, rights, blocks, reason_kind) VALUES (?, ?, ?, ?, ?, ?, ?, 'held', ?, ?, ?, ?, ?, ?, ?)`)
+      .run(req.contentHash, req.pluginId, req.version, req.source, req.sourceKind, req.rootDir, req.trigger, this.now(), this.now(), stop ? 1 : 0, why.note, rightsJson, blocksJson, kind);
     const id = Number(info.lastInsertRowid);
     this.db.prepare(`DELETE FROM queue WHERE status != 'held' AND status != 'dismissed' AND id NOT IN (SELECT id FROM queue ORDER BY id DESC LIMIT ?)`).run(MAX_QUEUE_ROWS);
     this.log("hold", req.pluginId, req.contentHash, { review: id, version: req.version, trigger: req.trigger, source: req.source, sourceKind: req.sourceKind, ...(why.note !== null ? { note: why.note } : {}), ...(stop ? { stop: true } : {}) });
     return { id, created: true };
+  }
+
+  /** What the guard's OWN reading says about a version, whatever check a hold stopped at: the hard flags (null: not read) and whether the hash did not match. */
+  private factsOf(req: DecideInput, ev: Evaluation | null): { blocks: string[] | null; mismatch: boolean } {
+    if (ev?.ok === true && ev.hash === req.contentHash) return { blocks: ev.blocks, mismatch: false };
+    return { blocks: null, mismatch: (ev?.ok === true && ev.hash !== req.contentHash) || (ev?.ok === false && ev.mismatch === true) };
+  }
+  /** The reason as a fact: a hash mismatch and a hard flag outrank the check a hold stopped at (`verdictKind`). */
+  private kindOf(f: { blocks: string[] | null; mismatch: boolean }, verdictKind: ReasonKind): ReasonKind {
+    return f.mismatch ? "mismatch" : f.blocks !== null && f.blocks.length > 0 ? "block" : verdictKind;
   }
 
   /**
@@ -786,7 +815,7 @@ export class Guard {
    * only a human's approval does. Needed because the hook knows things the guard cannot (a new capability inside a window), and the core may not
    * ask the guard at all once a hook has held the version.
    */
-  hold(raw: Record<string, unknown>): { requestId: number | null } {
+  hold(raw: Record<string, unknown>, ev: Evaluation | null = null): { requestId: number | null } {
     const req = this.parseDecide(raw);
     return this.tx(() => {
       this.sweepInner();
@@ -797,8 +826,15 @@ export class Guard {
         this.logRepeatReject(req.pluginId, req.contentHash, req.version);
         return { requestId: null };
       }
-      return { requestId: this.upsertHeld(req, raw.stop === true).id };
+      // From the hook only what tightens is taken: `stop`. Its findings are not believed: the block is what the guard's own reading found (none read: unknown, which counts as a block).
+      const f = this.factsOf(req, ev);
+      return { requestId: this.upsertHeld(req, raw.stop === true, { rights: ev?.ok && ev.hash === req.contentHash ? ev.rights : null, note: null, kind: this.kindOf(f, "other"), blocks: f.blocks }).id };
     });
+  }
+  /** `hold` with the guard's own reading of the version first (as `decideChecked` does for a decision). */
+  async holdChecked(raw: Record<string, unknown>): Promise<{ requestId: number | null }> {
+    const req = this.parseDecide(raw);
+    return this.hold(raw, await this.evaluate(req));
   }
 
   /** An approval that covers this request. One made by the source rule covers only the source it was made for (the hash alone does not say where the code came from). */
@@ -824,17 +860,17 @@ export class Guard {
    * checks always: the version was read and its hash matched, no hard flag, no right beyond the last approved version and the one the window was opened from.
    * No base to compare with: held. Null: the window may let it in.
    */
-  private windowRefuses(w: WindowRow, req: DecideInput, ev: Evaluation | null): { note: string; stop: boolean } | null {
-    if (w.scope !== "all" && !this.pluginAlive()) return { note: WINDOW_PAUSED_NOTE, stop: false };
-    if (ev === null) return { note: "окно: права версии не посчитаны", stop: false };
-    if (!ev.ok) return { note: `окно: ${ev.reason}`, stop: false };
-    if (ev.hash !== req.contentHash) return { note: "окно: хеш каталога не совпал с хешем из запроса", stop: false };
-    if (ev.blocks.length > 0) return { note: `жёсткий флаг: ${brief(ev.blocks)}`, stop: true };
+  private windowRefuses(w: WindowRow, req: DecideInput, ev: Evaluation | null): { note: string; stop: boolean; kind: ReasonKind } | null {
+    if (w.scope !== "all" && !this.pluginAlive()) return { note: WINDOW_PAUSED_NOTE, stop: false, kind: "other" };
+    if (ev === null) return { note: "окно: права версии не посчитаны", stop: false, kind: "other" };
+    if (!ev.ok) return { note: `окно: ${ev.reason}`, stop: false, kind: ev.mismatch === true ? "mismatch" : "other" };
+    if (ev.hash !== req.contentHash) return { note: "окно: хеш каталога не совпал с хешем из запроса", stop: false, kind: "mismatch" };
+    if (ev.blocks.length > 0) return { note: `жёсткий флаг: ${brief(ev.blocks)}`, stop: true, kind: "block" };
     const base = this.windowBase(w, req);
-    if (base === null) return { note: "окно: нет одобренной версии или версии, с которой открыто окно, для сравнения прав", stop: false };
+    if (base === null) return { note: "окно: нет одобренной версии или версии, с которой открыто окно, для сравнения прав", stop: false, kind: "first" };
     const g = grown(base, ev.rights);
-    if (g.tokens.length > 0) return { note: `новое право: ${brief(g.tokens)}`, stop: true };
-    if (g.review.length > 0) return { note: `новое замечание проверок: ${brief(g.review)}`, stop: true };
+    if (g.tokens.length > 0) return { note: `новое право: ${brief(g.tokens)}`, stop: true, kind: "growth" };
+    if (g.review.length > 0) return { note: `новое замечание проверок: ${brief(g.review)}`, stop: true, kind: "growth" };
     return null;
   }
   /** What the window may carry without being asked: the last approved version of the plugin (same source first) together with the version it was opened from. */
@@ -882,7 +918,8 @@ export class Guard {
       const w = stopped ? null : this.openWindowOf(req.pluginId);
       const refused = w ? this.windowRefuses(w, req, ev) : null;
       if (w && refused) {
-        const h = this.upsertHeld(req, refused.stop, { rights: ev?.ok && ev.hash === req.contentHash ? ev.rights : null, note: refused.note });
+        const f = this.factsOf(req, ev);
+        const h = this.upsertHeld(req, refused.stop, { rights: ev?.ok && ev.hash === req.contentHash ? ev.rights : null, note: refused.note, kind: this.kindOf(f, refused.kind), blocks: f.blocks });
         this.log("window.refused", req.pluginId, req.contentHash, { windowId: w.id, version: req.version, scope: w.scope, note: refused.note, ...(refused.stop ? { stop: true } : {}) });
         return h.id === null ? ({ action: "wait", reason: "held by secure-bb guard: too many new holds", requestId: null } as const) : ({ action: "wait", reason: `held by secure-bb guard: review #${h.id}`, requestId: h.id } as const);
       }
@@ -906,7 +943,8 @@ export class Guard {
         return { action: "proceed", via: "source" } as const;
       }
 
-      const h = this.upsertHeld(req, stopped, { rights: ev?.ok && ev.hash === req.contentHash ? ev.rights : null, note: verdict.note });
+      const f = this.factsOf(req, ev);
+      const h = this.upsertHeld(req, stopped, { rights: ev?.ok && ev.hash === req.contentHash ? ev.rights : null, note: verdict.note, kind: this.kindOf(f, verdict.kind), blocks: f.blocks });
       return h.id === null ? ({ action: "wait", reason: "held by secure-bb guard: too many new holds", requestId: null } as const) : ({ action: "wait", reason: `held by secure-bb guard: review #${h.id}`, requestId: h.id } as const);
     });
   }
@@ -1026,7 +1064,7 @@ export class Guard {
         return { ok: false, reason: err instanceof TreeRefused ? `каталог не прочитан: ${err.message}` : `каталог не прочитан: ${this.errText(err)}` };
       }
       try {
-        if (tree.hash !== req.contentHash) return { ok: false, reason: "хеш каталога, посчитанный сторожем, не совпал с хешем из запроса" };
+        if (tree.hash !== req.contentHash) return { ok: false, reason: "хеш каталога, посчитанный сторожем, не совпал с хешем из запроса", mismatch: true };
         const res = await this.trustCfg.checks(tree.dir, { pluginId: req.pluginId });
         // The clock stopped the flow analysis: its result is not finished and counts for no right. The version is held; the next evaluation tries again.
         if (res.flowsTimedOut) return { ok: false, reason: "проверка не успела: анализ потока данных остановлен по времени, повторите позже" };
@@ -1064,28 +1102,28 @@ export class Guard {
     return this.db.prepare(`SELECT 1 FROM agent_drifts WHERE status = 'open' AND class = 'critical' AND initial = 0 LIMIT 1`).get() !== undefined;
   }
 
-  private sourceVerdict(req: DecideInput, ev: Evaluation | null, stopped: boolean): { pass: true; rights: Rights; detail: Record<string, unknown> } | { pass: false; note: string | null } {
-    const no = (note: string | null) => ({ pass: false as const, note });
-    if (stopped) return no(null); // the plugin's own check stopped this version for a human: its reason is in the queue already
+  private sourceVerdict(req: DecideInput, ev: Evaluation | null, stopped: boolean): { pass: true; rights: Rights; detail: Record<string, unknown> } | { pass: false; note: string | null; kind: ReasonKind } {
+    const no = (note: string | null, kind: ReasonKind = "other") => ({ pass: false as const, note, kind });
+    if (stopped) return no(null, "other"); // the plugin's own check stopped this version for a human: its reason is in the queue already
     // A critical difference in the agents' settings is open: an agent that may be swapped must not carry a version of an "own" plugin through. Only a human's decision lets it in.
     if (this.criticalAgentsOpen()) return no("открыта критичная тревога по настройкам агентов: версии сами не проходят, пока вы её не разберёте");
     const mode = this.trustMode();
     const ident = identityOf(req.sourceKind, req.source);
     const { level, entry } = levelOf(ident, this.mySources(), this.trustCfg.known);
-    if (mode === "strict") return no("режим «Строгий»: каждая версия ждёт вас");
-    if (level === "unknown") return no(ident === null ? "источник нельзя назвать своим (не github и не каталог на диске)" : "неизвестный источник");
+    if (mode === "strict") return no("режим «Строгий»: каждая версия ждёт вас", "strict");
+    if (level === "unknown") return no(ident === null ? "источник нельзя назвать своим (не github и не каталог на диске)" : "неизвестный источник", "unknown-source");
     if (ev === null) return no("права версии не посчитаны");
-    if (!ev.ok) return no(ev.reason);
-    if (ev.hash !== req.contentHash) return no("хеш каталога не совпал с хешем из запроса");
+    if (!ev.ok) return no(ev.reason, ev.mismatch === true ? "mismatch" : "other");
+    if (ev.hash !== req.contentHash) return no("хеш каталога не совпал с хешем из запроса", "mismatch");
     const base = this.db
       .prepare(`SELECT * FROM approvals WHERE plugin_id = ? AND source_id = ? AND revoked_at IS NULL AND rights IS NOT NULL ORDER BY id DESC LIMIT 1`)
       .get(req.pluginId, ident!.id) as Raw | undefined;
-    if (!base) return no("нет одобренной версии этого плагина из этого источника");
-    if (ev.blocks.length > 0) return no(`жёсткий флаг: ${brief(ev.blocks)}`);
+    if (!base) return no("нет одобренной версии этого плагина из этого источника", "first");
+    if (ev.blocks.length > 0) return no(`жёсткий флаг: ${brief(ev.blocks)}`, "block");
     const baseline = approvalOf(base);
     const g = grown(baseline.rights!, ev.rights);
-    if (g.tokens.length > 0) return no(`новое право: ${brief(g.tokens)}`);
-    if (g.review.length > 0) return no(`новое замечание проверок: ${brief(g.review)}`);
+    if (g.tokens.length > 0) return no(`новое право: ${brief(g.tokens)}`, "growth");
+    if (g.review.length > 0) return no(`новое замечание проверок: ${brief(g.review)}`, "growth");
     const levelText = level === "own" ? "свой источник" : "известный источник";
     return { pass: true, rights: ev.rights, detail: { why: `прошла сама: ${levelText}, права те же`, level, entry, mode, baseline: { approval: baseline.id, version: baseline.version, source: baseline.sourceId }, rights: ev.rights.tokens.length } };
   }
@@ -1148,9 +1186,12 @@ export class Guard {
    * other code than the directory shows), and in Strict mode nothing is lifted. `acknowledgeBlock` is the page's word for "I accept the risk".
    */
   private assertLiftable(q: QueueRow, acknowledgeBlock: boolean): void {
-    if (isMismatchNote(q.note)) throw new GuardError("invalid", "the directory's hash did not match the request's: this version is never approved, with or without acknowledgeBlock (reinstall the plugin from its source)");
-    if (acknowledgeBlock && this.trustMode() === "strict") throw new GuardError("invalid", "режим «Строгий»: остановку обойти нельзя (acknowledgeBlock отклонён сторожем); сначала ослабьте режим касанием");
-    if (isHardFlagNote(q.note) && !acknowledgeBlock) throw new GuardError("invalid", "this version has a hard flag: it is approved only with acknowledgeBlock and a fresh touch (a session does not cover it)");
+    // By the guard's facts (trust.ts `liftBlock`): the hash mismatch, a hard flag found by its own reading, or a version it did not read at all.
+    const lift = liftBlock(q, this.trustMode());
+    if (lift.never) throw new GuardError("invalid", "the directory's hash did not match the request's: this version is never approved, with or without acknowledgeBlock (reinstall the plugin from its source)");
+    if (acknowledgeBlock && this.trustMode() === "strict") throw new GuardError("invalid", "режим «Строгий»: остановку обойти нельзя (acknowledgeBlock отклонён сторожем); сначала ослабьте режим");
+    if (lift.needsAck && !acknowledgeBlock)
+      throw new GuardError("invalid", lift.why === "unread" ? "the guard did not read this version, so a hard flag may be there: it is approved only with acknowledgeBlock and a fresh touch (a session does not cover it)" : "this version has a hard flag: it is approved only with acknowledgeBlock and a fresh touch (a session does not cover it)");
   }
 
   /**
@@ -1181,7 +1222,6 @@ export class Guard {
     const id = intOf(raw.requestId, "requestId", 1, Number.MAX_SAFE_INTEGER);
     const q = this.heldRequest(id, true);
     this.assertLiftable(q, false);
-    if (isHardFlagNote(q.note)) throw new GuardError("invalid", "a version with a hard flag cannot be returned together with trusting its source");
     const action = this.normalizeAction({ op: "approve-trust", requestId: id });
     const entry = action.entry as string;
     const cur = this.mySources();
@@ -1205,7 +1245,7 @@ export class Guard {
   /** What a held version is right now, as the guard sees it: if any part differs when the touch arrives, the version is not approved. */
   private queueFingerprint(q: QueueRow): string {
     const stop = (this.db.prepare(`SELECT stop FROM queue WHERE id = ?`).get(q.id) as { stop: number } | undefined)?.stop ?? 0;
-    return sha256hex(JSON.stringify([q.pluginId, q.version, q.contentHash, q.source, q.sourceKind, q.rootDir, stop]));
+    return sha256hex(JSON.stringify([q.pluginId, q.version, q.contentHash, q.source, q.sourceKind, q.rootDir, stop, q.blocks, q.reasonKind]));
   }
 
   /**
@@ -1230,8 +1270,8 @@ export class Guard {
         const row = this.db.prepare(`SELECT * FROM queue WHERE id = ?`).get(id) as Raw | undefined;
         const q = row ? queueOf(row) : null;
         if (!q || q.status !== "held") skipped.push({ kind: "queue", id, reason: "уже не ждёт решения" });
-        else if (isMismatchNote(q.note)) skipped.push({ kind: "queue", id, reason: "хеш не совпал: одобрить нельзя" });
-        else if (isHardFlagNote(q.note)) skipped.push({ kind: "queue", id, reason: "жёсткий флаг: снимается отдельно, свежим касанием" });
+        else if (liftBlock(q, this.trustMode()).never) skipped.push({ kind: "queue", id, reason: "хеш не совпал: одобрить нельзя" });
+        else if (liftBlock(q, this.trustMode()).needsAck) skipped.push({ kind: "queue", id, reason: liftBlock(q, this.trustMode()).why === "unread" ? "сторож не читал версию, жёсткий признак возможен: снимается отдельно, свежим касанием" : "жёсткий флаг: снимается отдельно, свежим касанием" });
         else items.push({ kind: "queue", id, label: `${q.pluginId}@${q.version}`, fingerprint: this.queueFingerprint(q) });
       } else {
         items.push({ kind: it.kind, id, label: str(it.label ?? `${it.kind} #${id}`, "label", 200), fingerprint: str(it.fingerprint, "fingerprint", 128, 1) });
@@ -1284,7 +1324,7 @@ export class Guard {
         }
         const row = this.db.prepare(`SELECT * FROM queue WHERE id = ?`).get(it.id) as Raw | undefined;
         const q = row ? queueOf(row) : null;
-        if (!q || q.status !== "held" || this.queueFingerprint(q) !== it.fingerprint || isMismatchNote(q.note) || isHardFlagNote(q.note)) {
+        if (!q || q.status !== "held" || this.queueFingerprint(q) !== it.fingerprint || liftBlock(q, this.trustMode()).never || liftBlock(q, this.trustMode()).needsAck) {
           results.push({ kind: "queue", id: it.id, label: it.label, ok: false, local: false, note: "изменилось после показа списка: не одобрено, посмотрите заново" });
           continue;
         }

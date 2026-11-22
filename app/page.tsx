@@ -140,7 +140,7 @@ export function GatePage() {
   const registered = ov.totp.state === "locked" || ov.totp.state === "external";
   const heldAll = ov.queue.filter((q) => q.status === "held");
   const settled = ov.queue.filter((q) => q.status !== "held").slice(0, 10);
-  const colorOf = (q: QueueRow) => cardColor({ reason: q.reason, findings: ov.queueChecks[q.id]?.findings ?? [] });
+  const colorOf = (q: QueueRow) => cardColor({ reason: q.reason, reasonKind: q.reasonKind, blocks: q.blocks, findings: ov.queueChecks[q.id]?.findings ?? [] });
   const decisions = { deferred: deferredKeys, kept: keptKeys };
   const isDeferred = (q: QueueRow) => decisionOf(q, decisions) === "deferred";
   const isKept = (q: QueueRow) => decisionOf(q, decisions) === "kept";

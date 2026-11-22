@@ -357,10 +357,10 @@ describe("review fixes (PR 2, review)", () => {
   });
   it("yellow words follow the guard's reason and never contradict themselves", () => {
     const y = (reason: string | null, caps: Array<{ kind: string; detail: string[] }> = []) => yellowText({ pluginId: "p", version: "1", level: "own", sourceLabel: "github.com/me/p", reason, caps }).line;
-    expect(reasonKind("новое право: network")).toBe("new-right");
+    expect(reasonKind("новое право: network")).toBe("growth");
     expect(reasonKind("неизвестный источник")).toBe("unknown-source");
     expect(reasonKind("режим «Строгий»: каждая версия ждёт вас")).toBe("strict");
-    expect(reasonKind("нет одобренной версии этого плагина из этого источника")).toBe("first-version");
+    expect(reasonKind("нет одобренной версии этого плагина из этого источника")).toBe("first");
     expect(reasonKind(null)).toBe("other");
     expect(y("режим «Строгий»: каждая версия ждёт вас")).toContain("Строгий");
     expect(y("нет одобренной версии этого плагина из этого источника")).toContain("ещё не разрешали");
@@ -394,10 +394,13 @@ describe("review fixes (PR 2, review)", () => {
 describe("no bypass on a hash mismatch", () => {
   const MIS = "хеш каталога, посчитанный сторожем, не совпал с хешем из запроса";
   it("in no mode; other red cards keep it except in Strict", () => {
-    for (const m of ["simple", "detailed", "strict", null] as const) expect(bypassAllowed(m, MIS), String(m)).toBe(false);
-    expect(bypassAllowed("simple", "заблокировано проверками: decode-eval")).toBe(true);
-    expect(bypassAllowed("detailed", null)).toBe(true);
-    expect(bypassAllowed("strict", "заблокировано проверками: decode-eval")).toBe(false);
+    for (const m of ["simple", "detailed", "strict", null] as const) expect(bypassAllowed(m, { reason: MIS }), String(m)).toBe(false);
+    expect(bypassAllowed("simple", { reason: "заблокировано проверками: decode-eval" })).toBe(true);
+    expect(bypassAllowed("detailed", { reason: null })).toBe(true);
+    expect(bypassAllowed("strict", { reason: "заблокировано проверками: decode-eval" })).toBe(false);
+    // an entry from the guard is read by its facts: the words say "mismatch" but the guard's fact does not (and the other way round)
+    expect(bypassAllowed("simple", { reason: MIS, reasonKind: "other", blocks: [] })).toBe(true);
+    expect(bypassAllowed("simple", { reason: "что угодно", reasonKind: "mismatch", blocks: null })).toBe(false);
   });
   it("the card says what to do instead", () => {
     expect(MISMATCH_HINT).toBe("Переустановите плагин из его источника. Если код снова не совпадёт, сообщите об этом в разделе журнала.");

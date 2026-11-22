@@ -3,6 +3,7 @@
 //
 // Nothing here decides anything about plugins: approving and holding stay with the guard. These functions choose what to SHOW.
 import type { TrustMode } from "./guardlink.js";
+import { isReasonKind, liftBlock, type ReasonKind as GuardReasonKind } from "../guard/src/trust.ts";
 import { FS_HOME, UI_CLICK_ANSWERS, UI_CLICK_GATE, UI_CLICK_NAV } from "./checks/sdk-rights.js";
 
 // ---- modes ------------------------------------------------------------------------------------------------------------------
@@ -477,28 +478,44 @@ export interface ReviewEntry {
   id: number;
   status: string;
   reason: string | null;
+  /** The guard's facts about the entry (guard mode); when `reasonKind` is present the words of `reason` are not looked at. */
+  reasonKind?: string | null;
+  blocks?: string[] | null;
   /** Checks of this version: severities of the findings. */
   findings: Array<{ rule: string; severity: string }>;
 }
 /** A hard flag, as the core says it (the reason of the held entry) or as the checks found it. */
 /** The guard read the directory itself and its count did not match the request's: files changed between the check and the load. */
 export const isMismatch = (reason: string | null): boolean => /не совпал с хешем/.test(reason ?? "");
-export const isBlockedEntry = (e: Pick<ReviewEntry, "reason" | "findings">): boolean => isMismatch(e.reason) || /заблокирован(о)? проверками/.test(e.reason ?? "") || /жёсткий флаг/.test(e.reason ?? "") || e.findings.some((f) => f.severity === "block");
+/** An entry as the page holds it: the words of the reason, and (from the guard) the facts it read itself. */
+export interface EntryFacts {
+  reason: string | null;
+  reasonKind?: string | null;
+  blocks?: string[] | null;
+}
+/** The entry comes from the guard and carries its facts: then no word of `reason` decides anything. */
+const hasFacts = (e: EntryFacts): boolean => e.reasonKind !== undefined || e.blocks !== undefined;
+/** The same rule the guard applies (`liftBlock`, guard/src/trust.ts) on the facts of an entry from the guard. */
+export const liftOf = (e: EntryFacts, mode: TrustMode | null = null) => liftBlock({ reasonKind: e.reasonKind ?? null, blocks: e.blocks ?? null }, mode);
+export const isMismatchEntry = (e: EntryFacts): boolean => (hasFacts(e) ? liftOf(e).never : isMismatch(e.reason));
+export const isBlockedEntry = (e: Pick<ReviewEntry, "reason" | "findings" | "reasonKind" | "blocks">): boolean =>
+  hasFacts(e) ? liftOf(e).never || liftOf(e).needsAck || e.findings.some((f) => f.severity === "block") : isMismatch(e.reason) || /заблокирован(о)? проверками/.test(e.reason ?? "") || /жёсткий флаг/.test(e.reason ?? "") || e.findings.some((f) => f.severity === "block");
 
-/** Why the guard held a version, as its own note says (the card's words follow this, not a default). */
-export type ReasonKind = "mismatch" | "unknown-source" | "new-right" | "strict" | "first-version" | "other";
+/** Why the guard held a version (the card's words follow this, not a default): its fact when it has one, else the words of an entry the plugin keeps itself. */
+export type ReasonKind = GuardReasonKind;
 export function reasonKind(reason: string | null): ReasonKind {
   const r = reason ?? "";
   if (isMismatch(r)) return "mismatch";
-  if (/новое право|новое замечание/.test(r)) return "new-right";
+  if (/новое право|новое замечание/.test(r)) return "growth";
   if (/неизвестный источник|нельзя назвать своим/.test(r)) return "unknown-source";
   if (/Строгий/.test(r)) return "strict";
-  if (/нет одобренной версии/.test(r)) return "first-version";
+  if (/нет одобренной версии/.test(r)) return "first";
   return "other";
 }
+export const entryReasonKind = (e: EntryFacts): ReasonKind => (hasFacts(e) ? (isReasonKind(e.reasonKind) ? e.reasonKind : "other") : reasonKind(e.reason));
 
 /** «Всё равно разрешить…» exists on a red card only if the mode allows it AND the stop is not a mismatch (an approval would be written for the hash of a suspect request). */
-export const bypassAllowed = (mode: TrustMode | null, reason: string | null): boolean => detailLevel(mode).bypass && !isMismatch(reason);
+export const bypassAllowed = (mode: TrustMode | null, e: EntryFacts): boolean => detailLevel(mode).bypass && !isMismatchEntry(e);
 export const MISMATCH_HINT = "Переустановите плагин из его источника. Если код снова не совпадёт, сообщите об этом в разделе журнала.";
 
 /** A version whose code is not what the guard checked: red, with its own words. */
@@ -510,7 +527,7 @@ export function mismatchText(pluginId: string, version: string): RedText {
   };
 }
 /** Red: a hard flag. Yellow: everything else that waits for a person (a new right, an unknown source). */
-export const cardColor = (e: Pick<ReviewEntry, "reason" | "findings">): CardColor => (isBlockedEntry(e) ? "red" : "yellow");
+export const cardColor = (e: Pick<ReviewEntry, "reason" | "findings" | "reasonKind" | "blocks">): CardColor => (isBlockedEntry(e) ? "red" : "yellow");
 
 export type Level = "own" | "known" | "unknown";
 export interface YellowInput {
@@ -520,6 +537,8 @@ export interface YellowInput {
   sourceLabel: string;
   /** The guard's reason in its words (it may mention a new right). */
   reason: string | null;
+  /** The guard's fact about why it is held, when the entry has one. */
+  reasonKind?: string | null;
   caps: CapLike[];
 }
 export interface YellowText {
@@ -534,8 +553,8 @@ export function yellowText(y: YellowInput): YellowText {
   const who = y.level === "own" ? "вашего" : "известного";
   const tail = " Пока вы не решите, он не запускается.";
   let line: string;
-  switch (reasonKind(y.reason)) {
-    case "new-right":
+  switch (entryReasonKind({ reason: y.reason, ...(y.reasonKind !== undefined ? { reasonKind: y.reasonKind } : {}) })) {
+    case "growth":
       line = `Плагин из ${who} источника (${y.sourceLabel}) просит новое, чего раньше не просил.${can || " Что именно, видно в подробностях."}`;
       break;
     case "unknown-source":
@@ -544,7 +563,7 @@ export function yellowText(y: YellowInput): YellowText {
     case "strict":
       line = `Режим «Строгий»: каждый плагин ждёт вас, даже из ${y.level === "unknown" ? "источника" : who + " источника"} (${y.sourceLabel}).${can}`;
       break;
-    case "first-version":
+    case "first":
       line = `Плагин из ${y.level === "unknown" ? "источника" : who + " источника"} (${y.sourceLabel}), который вы ещё не разрешали.${can || " Особых прав он не просит."}`;
       break;
     default:
@@ -1371,7 +1390,7 @@ export function clockText(ms: number, now: number): string {
   return d.toDateString() === n.toDateString() ? hhmm : `${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")} ${hhmm}`;
 }
 /** A rejected version (a card the person dismissed): the version's own version can be put back only if its files are what was checked. */
-export const canRestore = (q: { reason: string | null; contentHash: string | null }): boolean => !isMismatch(q.reason) && q.contentHash !== null;
+export const canRestore = (q: EntryFacts & { contentHash: string | null }): boolean => !isMismatchEntry(q) && q.contentHash !== null;
 /** When the person rejected a version: the guard's journal knows (a `dismissed` record of this entry), the entry itself only knows when it last saw it. */
 export function rejectedAtOf(q: { id: number; pluginId: string; version: string; lastSeen: number }, events: Array<{ ts: number; kind: string; pluginId: string | null; detail?: unknown }>): number {
   let best: number | null = null;

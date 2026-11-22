@@ -3,7 +3,7 @@ import type { Overview } from "../src/overview";
 import type { QueueRow } from "../src/store";
 import type { SkillQueueView } from "../src/skills/guard";
 import { canRestore, rejectedAtOf, rejectedByText, cardColor } from "../src/ux";
-import { isMismatch } from "../src/ux";
+import { isMismatchEntry } from "../src/ux";
 import { awayEventsOf } from "./away";
 import { useCodeAction, type Rpc } from "./code";
 import { useProof, ProofField, ProofNotes } from "./confirm";
@@ -28,7 +28,7 @@ export function QuarantineRow({ q, ov, rpc, refetch, onTrustPending, onShowCard,
   const proof = useProof(ov, rpc);
   const found = ov.queueChecks[q.id] ?? (q.contentHash ? ov.checks[q.contentHash] : undefined);
   const ux = ov.ux[q.id];
-  const red = cardColor({ reason: q.reason, findings: found?.findings ?? [] }) === "red";
+  const red = cardColor({ reason: q.reason, reasonKind: q.reasonKind, blocks: q.blocks, findings: found?.findings ?? [] }) === "red";
   const unsafeDir = q.reason?.startsWith("каталог доступен на запись другим") ?? false;
   const approve = () => proof.run({ kind: "approve", queueId: q.id, acknowledgeBlock: false }, (p) => rpc.call("queue.approve", { id: q.id, ...p, acknowledgeBlock: false } as never), { routine: true });
   const entry = ux?.entry ?? null;
@@ -134,7 +134,7 @@ export function RejectedRow({ q, ov, rpc, refetch }: { q: QueueRow; ov: Overview
           <ProofNotes proof={proof} />
         </>
       ) : (
-        <p className="mt-1">Эта версия не запущена, и вернуть её нельзя: {isMismatch(q.reason) ? "её файлы изменились после проверки" : "нет данных, по которым её можно узнать"}. Чтобы пользоваться плагином, установите его заново из источника.</p>
+        <p className="mt-1">Эта версия не запущена, и вернуть её нельзя: {isMismatchEntry(q) ? "её файлы изменились после проверки" : "нет данных, по которым её можно узнать"}. Чтобы пользоваться плагином, установите его заново из источника.</p>
       )}
       <Msg error={act.error} ok={act.ok} reserve />
     </div>

@@ -183,6 +183,10 @@ export const MIGRATIONS: string[] = [
   // NULL (a window opened before this column existed) counts as "thread": the stricter. `base_rights`: what the held version showed when the window was opened.
   `ALTER TABLE windows ADD COLUMN scope TEXT`,
   `ALTER TABLE windows ADD COLUMN base_rights TEXT`,
+  // Why a version is held, as FACTS the guard read itself (not as a note's text): `blocks` is the JSON list of hard flags of its own `evaluate`
+  // (NULL: the guard did not read the version, so a block may be there); `reason_kind` is one of trust.ts REASON_KINDS. A row older than these columns has neither.
+  `ALTER TABLE queue ADD COLUMN blocks TEXT`,
+  `ALTER TABLE queue ADD COLUMN reason_kind TEXT`,
 ];
 
 export function openDb(path: string): DatabaseSync {

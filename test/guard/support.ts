@@ -22,6 +22,19 @@ export function pulseOnlyWindows(guard: Guard): void {
   (guard as any).windowRefuses = (w: { scope: string }) => (w.scope !== "all" && !guard.pluginAlive() ? { note: WINDOW_PAUSED_NOTE, stop: false } : null);
 }
 
+/**
+ * A guard started without a `trust` configuration is given made-up hashes and directories in many tests (codes, journals, windows, the plugin around them).
+ * The guard treats a version it could not read as one that may carry a hard flag (only a fresh touch with acknowledgeBlock lifts it). For those tests that is not
+ * the subject, so a version the guard cannot read "reads" as clean there; a directory it CAN read is read for real. Tests of what the guard reads pass `trust`.
+ */
+export function readsEverythingClean(guard: Guard): void {
+  const real = guard.evaluate.bind(guard);
+  (guard as any).evaluate = async (req: { contentHash: string } & Parameters<Guard["evaluate"]>[0]) => {
+    const ev = await real(req);
+    return ev.ok ? ev : { ok: true, hash: req.contentHash, rights: { tokens: [], review: [] }, blocks: [] };
+  };
+}
+
 export class Clock {
   t = 1_800_000_000_000;
   now = (): number => this.t;
@@ -52,6 +65,7 @@ export async function startGuard(opts: { register?: boolean; serve?: boolean; rp
   const db = openDb(paths.db);
   const guard = new Guard({ db, now: clock.now, secretPath: paths.secret, headPath: paths.head, ...(opts.rp ? { rp: opts.rp } : {}), ...(opts.agents ? { agents: opts.agents } : {}), ...(opts.trust ? { trust: opts.trust } : {}) });
   if (opts.windowContentChecks !== true) pulseOnlyWindows(guard);
+  if (opts.trust === undefined) readsEverythingClean(guard);
   const secret = generateSecret();
   const code = (): string => hotp(base32Decode(secret), stepAt(clock.t));
   if (opts.register !== false) {
@@ -115,6 +129,7 @@ export async function startGuardOnDate(opts: { agents?: AgentsConfig; trust?: Tr
   const db = openDb(paths.db);
   const guard = new GuardClass({ db, now: () => Date.now(), secretPath: paths.secret, headPath: paths.head, ...(opts.agents ? { agents: opts.agents } : {}), ...(opts.trust ? { trust: opts.trust } : {}) });
   pulseOnlyWindows(guard);
+  if (opts.trust === undefined) readsEverythingClean(guard);
   const secret = generateSecret();
   const code = (): string => hotp(base32Decode(secret), stepAt(Date.now()));
   guard.registerSecret(secret, code());
