@@ -157,12 +157,6 @@ export const MIGRATIONS: string[] = [
      fetched_at INTEGER NOT NULL,
      dist_tags TEXT NOT NULL,
      times TEXT NOT NULL)`,
-  // What the registry's tarball of a package version holds (file → sha256), so that a copy in node_modules can be compared
-  // without downloading it again. Only filled after the tarball matched the registry's integrity.
-  `CREATE TABLE IF NOT EXISTS integrity_cache (
-     key TEXT PRIMARY KEY,
-     fetched_at INTEGER NOT NULL,
-     files TEXT NOT NULL)`,
   // Stage 3: optional AI scan results (spec §8). Keyed by the scanned source tree; the core's hash is kept when known.
   `CREATE TABLE IF NOT EXISTS scans (
      id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -237,6 +231,12 @@ export const MIGRATIONS: string[] = [
      used_at INTEGER)`,
   // Guard mode: a window of the guard (sbb-guard) has a shadow row here that holds what the guard does not know: the thread, its scope and the capabilities at opening.
   `ALTER TABLE windows ADD COLUMN guard_window_id INTEGER`,
+  // What the registry's tarball of a package version holds (file → sha256), so that a copy in node_modules can be compared
+  // without downloading it again. Only filled after the tarball matched the registry's integrity.
+  `CREATE TABLE IF NOT EXISTS integrity_cache (
+     key TEXT PRIMARY KEY,
+     fetched_at INTEGER NOT NULL,
+     files TEXT NOT NULL)`,
 ];
 
 export interface SessionRow {
