@@ -1,14 +1,16 @@
 # SecureBB
 
-An experiment in protecting a coding-agent workspace from its own agents. It is a plugin for [bb](https://github.com/get-bb/bb) (an open-source IDE where agents run in threads and write plugins for the IDE itself) plus a small guard daemon.
+A security layer for [bb](https://github.com/get-bb/bb), an open-source IDE where coding agents run in threads and write plugins for the IDE itself. SecureBB is a bb plugin plus a small guard daemon. Its goal: agents keep working on their own, but a person decides which code gets loaded into the IDE.
 
-**Status: frozen experiment, not a product.** It works on my machine, I ran it for a few days, and I concluded that most of it should not exist. This README says what it does, why it is built this way, and what I would keep. The interface and the detailed reference ([docs/REFERENCE.ru.md](docs/REFERENCE.ru.md)) are in Russian.
+bb is gaining users quickly, and its trust model was designed for one developer on one laptop. This project is an attempt to make it safe for a stricter case, and a record of how far a plugin can take that.
+
+**Status:** working, on hold. The remaining gaps can only be closed in bb's core (see [Where a plugin stops](#where-a-plugin-stops)). The interface and the detailed reference ([docs/REFERENCE.ru.md](docs/REFERENCE.ru.md)) are in Russian.
 
 ## The problem
 
 In bb, an agent can write a plugin, and an installed plugin runs with full trust inside the server. bb's local HTTP API has no authentication; its security policy says so directly: "unauthenticated by design". That is a reasonable choice for one developer on one laptop, where the agent is treated as the user.
 
-I wanted something else: agents that run for hours without me, read the web and other people's repositories, and still cannot decide on their own which code gets loaded into the IDE. So my threat model treats the agent as untrusted, and bb's does not. SecureBB is what you get when you try to build the first model on top of a product designed for the second.
+SecureBB targets a different case: agents that run for hours unattended, read the web and other people's repositories, and so may end up acting on someone else's instructions. Here the agent is untrusted, and it must not be able to decide on its own which code gets loaded into the IDE.
 
 ## What it does
 
@@ -23,37 +25,37 @@ I wanted something else: agents that run for hours without me, read the web and 
 
 The strongest mode needs three OS users (server, agents, guard) and a small patch to bb's core that asks the guard before loading plugin code. The patch and the installer are not in this repository. On stock bb the plugin works in a weaker "after the fact" mode: it disables an unapproved plugin after it has already started.
 
-## How it was built
+## Design decisions
 
-Agents inside bb wrote most of the code. I wrote the specification and the threat model, split the work into stages, reviewed and merged every change, and ran each stage through a review by a model from a different family. About 38,000 lines of TypeScript with tests, around 1,980 tests, no runtime dependencies beyond Node and the bb SDK.
+Most of the design follows from one fact: **the bb server cannot tell an agent from a person.** Any local process can call the endpoint behind the "Approve" button. Each mechanism answers a specific consequence of that:
 
-## What I learned
-
-Almost every mechanism here compensates for one missing thing: **the server cannot tell an agent from a person.** Because of that:
-
-| Mechanism | Why it exists | Verdict |
+| Mechanism | What it answers | Still needed once bb has scoped agent credentials |
 |---|---|---|
-| Separate OS users | Keeps agents out of my home directory, SSH keys and Keychain | Keep |
-| Checks and a rights report at install time | A person should see what a plugin can do before it runs with full trust | Keep, simplify |
-| Second factor on approvals | An agent can call the approval endpoint itself | Needed only because the API has no auth |
-| Guard daemon under its own user | An agent could edit the plugin's own database | Same |
-| Config watcher, trust windows | An agent can change settings and install plugins | Same |
-| "Guard is not answering" alarms | An agent could stop the guard | Same |
-| AI observer of agent actions | Catch what the rules miss | Drop: it could not act, only report |
+| Separate OS users | Agents must not reach the owner's home directory, SSH keys and Keychain | Yes |
+| Checks and a rights report at install time | A person should see what a plugin can do before it runs with full trust | Yes, in a simpler form |
+| Second factor on approvals | An agent can call the approval endpoint itself | No |
+| Guard daemon under its own user | An agent could edit the plugin's own database | No |
+| Config watcher, trust windows | An agent can change settings and install plugins | No |
+| "Guard is not answering" alarms | An agent could stop the guard | No |
 
-The second lesson is about people. I put security into the everyday interface: codes, windows, alarms, cards. After a few days I, the author, had to ask what all of it was for. Protection that needs a security engineer every day is not protection for ordinary users. It belongs in the installer and in the server's defaults, and should surface only when a person installs a plugin or issues a token.
+Built with agents inside bb from a written specification and threat model, stage by stage, each stage reviewed by a model from a different family. About 38,000 lines of TypeScript with tests, around 1,980 tests, no runtime dependencies beyond Node and the bb SDK.
 
-## What should replace it
+## Where a plugin stops
 
-The right fix is in bb's core, not in a plugin:
+Two limits cannot be removed from outside bb's core:
+
+- **Identity.** Without authentication in the API, every protection has to assume the agent can imitate the person. That is why approvals need a second factor, and why the daily interface carries codes, windows and alarms. This level of friction is acceptable for a security engineer and too much for most users.
+- **Plugin rights.** The checks report what a plugin can do, but nothing enforces it once the plugin runs.
+
+What closes them, in the core:
 
 1. each thread gets its own scoped credential;
 2. approvals, plugin installs and settings need an operator credential;
-3. plugin rights are enforced at run time, not only scanned.
+3. plugin rights are enforced at run time, not only reported.
 
-bb's maintainers already track local API authentication in [get-bb/bb#3708](https://github.com/get-bb/bb/issues/3708), including the point that agents must not get the unrestricted install secret. I added two concrete findings there ([comment](https://github.com/get-bb/bb/issues/3708#issuecomment-7095775704)): the routes an agent can use to approve its own request, and an enrollment route open to any local process.
+bb's maintainers track local API authentication in [get-bb/bb#3708](https://github.com/get-bb/bb/issues/3708), including the requirement that agents must not receive the unrestricted install secret. Two concrete findings from this project are posted there ([comment](https://github.com/get-bb/bb/issues/3708#issuecomment-7095775704)): the routes an agent can use to approve its own request, and an enrollment route open to any local process.
 
-If scoped agent credentials land, I plan to rewrite this plugin as a small one: checks and a rights report at install time, on top of OS user separation. The second factor, the guard daemon, the watcher, the windows and the alarms go away.
+When scoped agent credentials land, SecureBB can be rewritten as a much smaller plugin: checks and a rights report at install time, on top of OS user separation. The second factor, the guard daemon, the watcher, the windows and the alarms become unnecessary, and the protection stops being visible in everyday work.
 
 ## Repository map
 
