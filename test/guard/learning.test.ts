@@ -210,7 +210,7 @@ describe("what the export never holds", () => {
 
 describe("the schema in the README", () => {
   it("every field of a line of the export, and every key of seen and how, is described there", () => {
-    const readme = readFileSync(new URL("../../README.md", import.meta.url), "utf8");
+    const readme = readFileSync(new URL("../../docs/REFERENCE.ru.md", import.meta.url), "utf8");
     const section = readme.slice(readme.indexOf("## Журнал для обучения"));
     const rec = exportRecord({ id: 1, ts: 1, kind: "dismissed", pluginId: "p", detail: { version: "1", seen: { level: "calm" }, how: { decideMs: 1 }, reason: "r" } }, { record: 1, mark: "unknown", reason: null, ts: 1 })!;
     const keys = [...Object.keys(rec), ...Object.keys(cleanSeen({ level: "calm" })!).map((k) => `seen.${k}`), ...Object.keys(rec.how!).map((k) => `how.${k}`)];

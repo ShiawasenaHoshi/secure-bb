@@ -100,7 +100,7 @@ describe("the table of RPC groups", () => {
   });
 
   it("the README prints the same table", () => {
-    const readme = readFileSync(fileURLToPath(new URL("../README.md", import.meta.url)), "utf8");
+    const readme = readFileSync(fileURLToPath(new URL("../docs/REFERENCE.ru.md", import.meta.url)), "utf8");
     expect(readme).toContain(authTableMarkdown());
   });
 });
