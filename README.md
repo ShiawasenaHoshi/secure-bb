@@ -73,4 +73,4 @@ Tests run with `npm test` and need bb's plugin SDK available locally.
 
 ## License
 
-MIT.
+MIT, see [LICENSE](LICENSE).
